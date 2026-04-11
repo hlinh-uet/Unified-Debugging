@@ -14,6 +14,13 @@
 - `configs/path.py`: Nơi thiết lập thư mục trỏ đến `codeflaws` repository (Tự động config)
 - `experiments/`: Khởi tạo sau khi chạy test để lưu trữ kết quả phân tích Tarantula (`tarantula_results.json`) và nơi lưu Patch thành công (`patches/`).
 
+## Đặc tả dữ liệu (Ground Truth Extraction)
+
+Dự án tương tác với bộ dữ liệu Codeflaws thông qua bộ sinh dữ liệu json tự động (`data_collector.py` & `run_all_data.py`).
+Hệ thống định vị lỗi (FL) sẽ lấy **Ground Truth** (dò hàm thực sự bị lỗi) bằng cách đọc module C của bài nộp sai (Buggy submission) và mã nguồn của bài nộp sửa được ban tổ chức accept (Accepted submission).
+- Lệnh Unix `diff -u` được dùng để truy xuất các dòng bị thay đổi, ánh xạ trực tiếp sang Regex nhận dạng tên hàm trong ngôn ngữ C. 
+- Module đánh giá (Evaluation) `eval_fl.py` so sánh hàm đầu ra của FL Tarantula (ví dụ đứng Top-1, Top-3) với mảng `ground_truth_functions` để tính độ chính xác (% Hit Rate).
+
 ## Thiết lập môi trường
 
 Hệ thống yêu cầu các thư viện để tương tác với các API Generative AI (LLM) và các dịch vụ khác. Hãy làm theo hướng dẫn dưới đây để chuẩn bị môi trường:
@@ -93,14 +100,15 @@ python3 main.py --eval
 Hệ thống đang ở mức Baseline để chứng minh khả năng ráp nối giữa Fault Localization và LLM APR. Các điểm thiếu sót cần được chuẩn hóa như sau:
 
 ### Phân tích và biên dịch (Compilation & Analysis)
-- **Validation lỏng lẻo:** script xác thực (hàm `validate_patch` trong `apr_baseline.py`) hiện tại trả về kết quả giả (`False`). Cần gọi trình biên dịch (VD: `gcc patched.c -o program`), nối ghép đầu ra và gọi trực tiếp `tests/` để đánh giá Test Case cụ thể.
-- **Tính toán gcov/lcov chưa được nhúng:** Các phép đo Tarantula bị phụ thuộc vào metadata trích xuất JSON. Hệ thống nên triển khai luồng chạy biên dịch gcov và load matrix test-case tự động đối với các file C mới.
+- **Tính toán gcov/lcov:** Các phép đo Tarantula được gán dựa trên metadata trích xuất JSON. Hệ thống đã triển khai luồng chạy biên dịch gcov và load matrix test-case tự động đối với các file C (`data_collector.py`).
+- **Sandbox Validation:** Sử dụng tự động script `test-genprog.sh` của tập lệnh codeflaws, tự động backup, dịch file `.c` (bằng `make` hoặc `gcc`) và check qua toàn bộ case P/N (positive / negative) pass in/out stdout để xác nhận patch có lỗi hay không (`validate_patch` trong `apr_baseline.py`).
+- Mở rộng thêm Ground Truth Mapping an toàn hơn cho các trường hợp Code C++ rắc rối do Regex hiện tại bị giới hạn về xử lý block `{}` phức tạp.
 
 ### Chỉnh sửa Code C (Source Extraction & Injection)
 - **Trích xuất bằng Regex:** Hàm `extract_function_code()` hiện vẫn sử dụng biểu thức chính quy tĩnh và tìm ngoặc ngẫu nhiên (`{`, `}`). Có thể hoạt động không đúng nếu C macro, strings, hoặc comment chứa các dấu ngoặc nhọn này.
 - **Đề xuất công nghệ:** Cần áp dụng các thư viện như `pycparser`, Clang AST hay `tree-sitter` để trích xuất hoặc thay thế nguyên dòng (statement/function-level) chuẩn hóa hơn.
 
 ### Hệ thống Generative AI (LLM APIs)
-- **API Placeholder:** Hàm `call_llm()` chưa được cắm Gemini hoặc OpenAI thực.
-- **LLM Error Recovery:** Trường hợp API timeout hay mô hình không tuân thủ mẫu trả về (ví dụ, xuất lộn xộn các thẻ Markdown chung với C). Cần có bộ lọc parser cho đầu ra của LLM.
+- **API Placeholder:** Hàm `call_llm()` đã được kết nối thực tế thông qua SDK Google Generative AI (Gemini).
+- **Hỗ trợ Model mới nhất:** Do sự thay đổi của Google API SDK, hệ thống sử dụng model `models/gemini-2.5-flash` mang lại tốc độ và độ chính xác cao khi xử lý mã nguồn C.
 - **Ràng buộc mã (Context Windows):** Đối với các tệp C dung lượng siêu lớn, cần nén prompt tốt hơn là chèn nguyên mã hàm.

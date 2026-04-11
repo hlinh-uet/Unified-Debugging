@@ -14,30 +14,52 @@ def evaluate_fl():
 
     total_bugs = len(tarantula_results)
     
-    # Phân tích top-K
+    # Phân tích top-K dựa trên Ground Truth
     top_1_suspicious_funcs = 0
     top_3_suspicious_funcs = 0
+    top_5_suspicious_funcs = 0
+    
+    evaluated_bugs = 0
 
-    for bug_id, scores in tarantula_results.items():
-        if not scores:
+    for bug_id, result_data in tarantula_results.items():
+        # Backward compatibility with old format
+        if not isinstance(result_data, dict) or 'scores' not in result_data:
             continue
+            
+        scores = result_data.get('scores', {})
+        ground_truth = result_data.get('ground_truth', [])
+        
+        if not scores or not ground_truth:
+            continue
+            
+        evaluated_bugs += 1
             
         # Sắp xếp hàm giảm dần
         sorted_funcs = sorted(scores.items(), key=lambda item: item[1], reverse=True)
         if not sorted_funcs:
             continue
             
+        # Kiểm tra xem hàm ground truth có xuất hiện ở Top N không
+        sorted_func_names = [f[0] for f in sorted_funcs]
+        
         # Nếu hàm root có điểm tarantula > 0.0, coi như FL định vị được ít nhất 1 node
-        if sorted_funcs[0][1] > 0.0:
+        top1_funcs = sorted_func_names[:1]
+        top3_funcs = sorted_func_names[:3]
+        top5_funcs = sorted_func_names[:5]
+
+        # Kiểm tra hit
+        if any(gt in top1_funcs for gt in ground_truth):
             top_1_suspicious_funcs += 1
             
-        # Kiểm tra top 3 (Chỉ mang tính chất tham khảo vì chưa có Ground Truth chính xác của hàm chứa lỗi)
-        # Trong hệ thống thực tế: cần so sánh hàm nghi ngờ với hàm bị chỉnh sửa trong git diff (ground_truth_func)
-        top_k_score = sum(1 for func, score in sorted_funcs[:3] if score > 0)
-        if top_k_score > 0:
+        if any(gt in top3_funcs for gt in ground_truth):
             top_3_suspicious_funcs += 1
+            
+        if any(gt in top5_funcs for gt in ground_truth):
+            top_5_suspicious_funcs += 1
 
-    print(f"Tổng số bugs đã phân tích FL: {total_bugs}")
-    print(f"Số lượng bug tìm thấy hàm nghi ngờ (Top 1 score > 0): {top_1_suspicious_funcs} / {total_bugs} ({top_1_suspicious_funcs/total_bugs*100:.2f}%)")
-    print(f"Số lượng bug có hàm nghi ngờ tồn tại trong Top 3: {top_3_suspicious_funcs} / {total_bugs} ({top_3_suspicious_funcs/total_bugs*100:.2f}%)")
-    print("--- (Lưu ý: Evaluation hiện tại chưa có Ground Truth để tính Recall/Precision tuyệt đối) ---\n")
+    print(f"Tổng số bugs đã phân tích qua FL (có đủ Ground Truth): {evaluated_bugs} / {total_bugs}")
+    if evaluated_bugs > 0:
+        print(f"Số lượng bug tìm thấy chính xác Ground Truth ở Top 1: {top_1_suspicious_funcs} / {evaluated_bugs} ({top_1_suspicious_funcs/evaluated_bugs*100:.2f}%)")
+        print(f"Số lượng bug tìm thấy chính xác Ground Truth ở Top 3: {top_3_suspicious_funcs} / {evaluated_bugs} ({top_3_suspicious_funcs/evaluated_bugs*100:.2f}%)")
+        print(f"Số lượng bug tìm thấy chính xác Ground Truth ở Top 5: {top_5_suspicious_funcs} / {evaluated_bugs} ({top_5_suspicious_funcs/evaluated_bugs*100:.2f}%)")
+    print("--- Hoàn thành Đánh giá FL ---\n")

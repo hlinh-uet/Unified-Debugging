@@ -44,14 +44,34 @@ Mục tiêu của APR là nhận vào vị trí lỗi từ FL, tự động tạ
 
 **Cách hoạt động (**`core/apr_baseline.py`**):**
 1.  **Phân tích và trích xuất:** Đọc thứ tự hàm nghi ngờ từ `tarantula_results.json`. Cấu trúc lại tên file `.c` để tra cứu trong `codeflaws/benchmark/<bug-id>/`. Tiến hành trích xuất source code của hàm đang bị nghi ngờ.
-2.  **Tạo bản vá (Patch Generation):** Đẩy thông tin text của function đến thuật toán sinh (hiện tại là `call_llm` Prompt giả định).
+2.  **Tạo bản vá (Patch Generation):** Đẩy thông tin text của function đến LLM (Sử dụng Google Gemini - model `models/gemini-2.5-flash`).
 3.  **Hoán đổi và Biên dịch (Patch Validation):** 
     *   Tạo file dự phòng `.c.bak` cho file gốc.
     *   Thay thế bằng source code đã qua chỉnh sửa của LLM vào file gốc.
     *   Biên dịch lại mã nguồn tại thư mục đó bằng lệnh `make FILENAME=<tên-file>` (hoặc fallback `gcc`).
-4.  **Chạy Test case nội bộ (Ground Truth test):** 
+4.  **Giao tiếp Test case nội bộ (Ground Truth test):**
     *   Hệ thống đọc file `test-genprog.sh` của thư mục bug tương ứng để lấy danh sách các testcases (ví dụ `p1`, `p2`, `n1`,...).
     *   Chạy từng testcase thông qua bash script nội bộ của Codeflaws.
     *   Nếu tất cả chạy trả về "Accepted" (hoặc exit code trả về `0`), mã nguồn được coi là Passed Validation (Thành công). Bất kỳ case nào lỗi sẽ loại bỏ bản vá.
-5.  **Dọn dẹp & Lưu trữ:** Revert (phục hồi) file `.c.bak` về trạng thái ban đầu, dọn các binary dư thừa như `a.out`. Các Patch thành công sẽ được extract nguyên bản ra thư mục `experiments/patches/`.
-6.  **Đánh giá (Evaluation):** `eval_apr.py` tính toán tỷ lệ Fix rate (Số bug được sinh patch / Tổng số bug có sẵn).
+5.  **Dọn dẹp & Lưu trữ: 
+    *   Revert (phục hồi) file `.c.bak` về trạng thái ban đầu, dọn các binary dư thừa như `a.out` và `test_executable`.
+    *   Các Patch thành công sẽ được extract nguyên bản ra thư mục `experiments/patches/`.
+6.  **Đánh giá (Evaluation): 
+    *   `eval_apr.py` tính toán tỷ lệ Fix rate (Số bug sinh ra patch thành công / Tổng số bug đem đi vá).
+    
+---
+
+## 5. Dữ liệu Ground Truth và Tính chính xác
+
+Trong Data mới nhất, hệ thống thu thập dữ liệu bằng script `codeflaws/data_collector.py` đã được cập nhật logic **trích xuất Ground Truth tự động**.
+*   **Thu thập:** Đối với mỗi folder bug trong Codeflaws, script sẽ tìm file nguồn lỗi (`.c`) và file nguồn đã accept (Ground Truth). Bằng cách dùng lệnh `diff -u` và phân tích AST/Regex C, script sẽ so khớp các dòng thay đổi với các hàm (function) trong mã nguồn, ghi nhận danh sách "các hàm thực sự chứa lỗi" vào file JSON `ground_truth_functions`.
+*   **Đánh giá FL:** Tại file `evaluation/eval_fl.py`, hệ thống không còn dùng "dummy metric" mà so sánh trực tiếp danh sách hàm do Tarantula rank (Top-1, Top-3, Top-5) với danh sách `ground_truth_functions` từ file JSON. Nếu hàm ground truth có mặt trong Top-K, hệ thống ghi nhận là định vị lỗi thành công (Hit).
+*   **Báo cáo APR:** Cung cấp thông kê kết quả (Plausible patches) lưu trữ tự động trong `experiments/apr_results.json` theo từng `bug_id` và hàm bị sửa.
+
+---
+
+## 6. Các thay đổi và Cải tiến mới nhất
+
+*   **Tích hợp LLM thực thụ (Gemini):** Đã thay thế mock function (trả về văn bản vô nghĩa) thành một đường ống API gọi đến mô hình AI thực `models/gemini-2.5-flash` thông qua `google.generativeai`. Tính năng cung cấp bản vá lỗi trực tiếp từ Google API và được bảo mật API Keys bằng `dotenv`.
+*   **Tích hợp Sandbox Validation thực thi toàn diện:** Quá trình compile patch hiện nay không chỉ tạo file binary mà đã trỏ chính xác và tự động gọi bash `test-genprog.sh` của Codeflaws. Hệ thống parse exit code chuẩn `0` (Success) và `non-zero` (Failure) để xác định tính chính xác của LLM output ngay tại runtime.
+*   **Fix Tương thích Python & Version:** Các file phụ thuộc đã được định cấu hình nâng cấp đảm bảo Google API Core chạy ổn định. Sửa lỗi `404 model not found` do API Versioning. Tự động lưu vết kết quả biên dịch sửa đổi (APR results) phục vụ tính Rate vá lỗi.

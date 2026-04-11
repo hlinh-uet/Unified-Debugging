@@ -25,9 +25,16 @@ def run_fl():
         test_data_dict = bug['test_data']
         test_data = test_data_dict.get('tests', [])
         
+        # Save info about ground truth functions straight in the dict
+        ground_truth_funcs = test_data_dict.get('ground_truth_functions', [])
+        
         print(f"Calculating Tarantula score for {bug_id}...")
         scores = calculate_tarantula(test_data)
-        results[bug_id] = scores
+        
+        results[bug_id] = {
+            'scores': scores,
+            'ground_truth': ground_truth_funcs
+        }
 
     output_file = os.path.join(EXPERIMENTS_DIR, "tarantula_results.json")
     with open(output_file, 'w') as f:
@@ -63,6 +70,14 @@ def main():
             print("Đang chạy riêng quy trình thông kê Evaluation...")
             evaluate_fl()
             evaluate_apr()
+
+    print(
+        "Các tính năng mới đã được thêm vào:\n"
+        "1. Tích hợp Sandbox (Cơ chế test bằng test case có sẵn của test-genprog.sh).\n"
+        "2. Đánh giá Top-K Tarantula bằng Ground Truth file.\n"
+        "3. Cung cấp API thay cho mock text.\n"
+    )
+    print("Mọi tính năng mới đã được lưu vào INSTRUCTION.md và README.md")
 
 if __name__ == "__main__":
     main()
