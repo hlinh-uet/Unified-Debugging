@@ -4,6 +4,8 @@ import argparse
 from data_loaders.codeflaws_loader import load_all_bugs
 from core.fl_tarantula import calculate_tarantula
 from core.apr_baseline import run_apr_pipeline
+from evaluation.eval_fl import evaluate_fl
+from evaluation.eval_apr import evaluate_apr
 from configs.path import EXPERIMENTS_DIR
 
 def run_fl():
@@ -37,21 +39,30 @@ def main():
     parser = argparse.ArgumentParser(description="Unified Debugging Pipeline")
     parser.add_argument('--fl', action='store_true', help='Chỉ chạy Fault Localization (Tarantula)')
     parser.add_argument('--apr', action='store_true', help='Chỉ chạy Automated Program Repair (APR)')
-    parser.add_argument('--all', action='store_true', help='Chạy cả 2 quy trình trình')
+    parser.add_argument('--eval', action='store_true', help='Chỉ chạy đánh giá kết quả từ cả FL và APR (Evaluation)')
+    parser.add_argument('--all', action='store_true', help='Chạy toàn bộ quy trình: FL -> APR -> Evaluation')
     args = parser.parse_args()
 
     # Nếu chọn --all hoặc không truyền tham số nào thì chạy toàn bộ pipeline
-    if args.all or (not args.fl and not args.apr):
-        print("Đang chạy toàn bộ quy trình (FL -> APR)...")
+    if args.all or (not args.fl and not args.apr and not args.eval):
+        print("Đang chạy toàn bộ quy trình (FL -> APR -> Evaluation)...")
         run_fl()
         run_apr_pipeline()
+        evaluate_fl()
+        evaluate_apr()
     else:
         if args.fl:
             print("Đang chạy quy trình Fault Localization...")
             run_fl()
+            evaluate_fl()
         if args.apr:
             print("Đang chạy quy trình Automated Program Repair...")
             run_apr_pipeline()
+            evaluate_apr()
+        if args.eval:
+            print("Đang chạy riêng quy trình thông kê Evaluation...")
+            evaluate_fl()
+            evaluate_apr()
 
 if __name__ == "__main__":
     main()

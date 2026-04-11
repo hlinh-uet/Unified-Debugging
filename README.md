@@ -7,6 +7,9 @@
 - `core/`: Chứa các thuật toán xử lý chính
   - `fl_tarantula.py`: Thuật toán chấm điểm Tarantula.
   - `apr_baseline.py`: Bộ sinh bản vá tự động dựa trên LLM prompt.
+- `evaluation/`: Module đánh giá và báo cáo.
+  - `eval_fl.py`: Đánh giá Fault Localization (Ví dụ: tính toán Top-K suspicious functions).
+  - `eval_apr.py`: Đánh giá Automatic Program Repair (Tỉ lệ sinh ra Plausible Patches).
 - `data_loaders/`: Các module đọc kết quả JSON / nguồn C của bug.
 - `configs/path.py`: Nơi thiết lập thư mục trỏ đến `codeflaws` repository (Tự động config)
 - `experiments/`: Khởi tạo sau khi chạy test để lưu trữ kết quả phân tích Tarantula (`tarantula_results.json`) và nơi lưu Patch thành công (`patches/`).
@@ -77,6 +80,12 @@ Bạn cũng có thể chỉ chạy luồng sửa lỗi tự động (APR), phầ
 
 ```bash
 python3 main.py --apr
+```
+
+#### Bước 3: Đánh giá quá trình (Evaluation)
+In ra lại số điểm thống kê Fault Localization và Tỉ lệ thành công của các Patch APR mà không cần phải thực thi luồng tải mô hình lại.
+```bash
+python3 main.py --eval
 ```
 
 ## Các hạn chế và Hướng phát triển

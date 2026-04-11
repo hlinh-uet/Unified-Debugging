@@ -3,9 +3,7 @@ import json
 import re
 import subprocess
 
-from configs.path import EXPERIMENTS_DIR, CODEFLAWS_SOURCE_DIR
-
-PATCHES_DIR = os.path.join(EXPERIMENTS_DIR, "patches")
+from configs.path import EXPERIMENTS_DIR, CODEFLAWS_SOURCE_DIR, PATCHES_DIR
 
 def extract_function_code(source_code, func_name):
     """
@@ -52,6 +50,7 @@ def validate_patch(patched_file_path, bug_id):
     # result = subprocess.run(cmd, capture_output=True, text=True)
     # return "All tests passed" in result.stdout
     print(f"Validating patch for {bug_id}...")
+    # For now, randomly return a success or failure, or just return false
     return False # Default to False for safety in baseline
 
 def run_apr_pipeline():

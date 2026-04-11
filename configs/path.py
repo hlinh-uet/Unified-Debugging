@@ -17,6 +17,9 @@ CODEFLAWS_SOURCE_DIR = os.path.join(BASE_DIR, "benchmark")
 # 4. Đường dẫn để lưu kết quả thực nghiệm (Lưu ngay bên trong Unified-Debugging)
 EXPERIMENTS_DIR = os.path.join(os.path.dirname(BASE_DIR), "Unified-Debugging", "experiments")
 
+# Đường dẫn để lưu các bản vá lỗi (patches)
+PATCHES_DIR = os.path.join(EXPERIMENTS_DIR, "patches")
+
 # 5. Đảm bảo thư mục experiments tồn tại
 if not os.path.exists(EXPERIMENTS_DIR):
     os.makedirs(EXPERIMENTS_DIR)
