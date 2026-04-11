@@ -1,317 +1,774 @@
 {
     "46-D-bug-208314-208422": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "508-C-bug-9723064-9723081": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "546-B-bug-13932383-13932411": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "62-A-bug-7067912-7067978": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "81-B-bug-512758-512761": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "146-B-bug-2035917-2035968": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "336-A-bug-6855346-6855367": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "490-C-bug-11355146-11356082": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "236-A-bug-18003976-18004085": {
-        "main": 1.0
+        "scores": {
+            "main": 1.0
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "447-B-bug-10225828-10225902": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "407-B-bug-14668576-14668597": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": []
     },
     "158-A-bug-18297232-18297267": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "10-A-bug-5914564-5914663": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": []
     },
     "476-A-bug-15778161-15778167": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": []
     },
     "456-A-bug-17586003-17586007": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "518-E-bug-10006532-10006662": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "270-B-bug-3912548-3912572": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
-    "298-A-bug-5138379-5138386": {},
+    "298-A-bug-5138379-5138386": {
+        "scores": {},
+        "ground_truth": [
+            "main"
+        ]
+    },
     "552-A-bug-13285238-13285270": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "630-I-bug-17126325-17126330": {
-        "main": 1.0
+        "scores": {
+            "main": 1.0
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "371-C-bug-5389891-5390013": {
-        "main": 0.0
+        "scores": {
+            "main": 0.0
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "197-A-bug-4539529-4539541": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "48-A-bug-18336507-18336566": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "4-B-bug-11482920-11482956": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "430-C-bug-10726761-10726771": {
-        "dfs": 1.0,
-        "insert": 1.0,
-        "main": 1.0
+        "scores": {
+            "insert": 1.0,
+            "main": 1.0,
+            "dfs": 1.0
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "479-C-bug-15073953-15074519": {
-        "comp": 0.625,
-        "main": 0.5
+        "scores": {
+            "comp": 0.625,
+            "main": 0.5
+        },
+        "ground_truth": []
     },
     "490-E-bug-8866315-8866373": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "575-D-bug-12872706-12872745": {
-        "main": 1.0
+        "scores": {
+            "main": 1.0
+        },
+        "ground_truth": []
     },
     "612-C-bug-15186001-15186009": {
-        "main": 0.5,
-        "isPair": 0.0
+        "scores": {
+            "main": 0.5,
+            "isPair": 0.0
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "139-A-bug-15693490-15693540": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "483-B-bug-9378742-9378770": {
-        "main": 0.5,
-        "possible": 0.0
+        "scores": {
+            "main": 0.5,
+            "possible": 0.0
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "31-A-bug-13024144-13024178": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "242-A-bug-16500031-16500336": {
-        "main": 1.0
+        "scores": {
+            "main": 1.0
+        },
+        "ground_truth": []
     },
     "11-A-bug-12698258-12698286": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "218-A-bug-2095800-2095813": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "204-A-bug-2022696-2022698": {
-        "x1": 0.5,
-        "main": 0.5
+        "scores": {
+            "main": 0.5,
+            "x1": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "192-C-bug-1743547-1743565": {
-        "max": 0.6470588235294118,
-        "main": 0.5
+        "scores": {
+            "max": 0.6470588235294118,
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "315-A-bug-6149995-6150754": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": []
     },
     "5-A-bug-15644200-15644332": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "258-A-bug-11354670-11354681": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "185-A-bug-1914012-1914022": {
-        "main": 0.5,
-        "mod": 0.5
+        "scores": {
+            "main": 0.5,
+            "mod": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "344-B-bug-14428743-14428779": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "190-A-bug-12987931-12987965": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "385-B-bug-9215199-9215223": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
-    "260-B-bug-2848106-2848120": {},
+    "260-B-bug-2848106-2848120": {
+        "scores": {},
+        "ground_truth": [
+            "FoundDate"
+        ]
+    },
     "510-A-bug-16335384-16335403": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": []
     },
     "272-C-bug-8396359-8396369": {
-        "main": 1.0
+        "scores": {
+            "main": 1.0
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "98-C-bug-792005-792008": {
-        "f": 1.0,
-        "main": 0.5
+        "scores": {
+            "f": 1.0,
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "27-A-bug-14171055-14171115": {
-        "selectionSort": 0.5,
-        "main": 0.5
+        "scores": {
+            "main": 0.5,
+            "selectionSort": 0.5
+        },
+        "ground_truth": []
     },
     "476-A-bug-16608008-16608059": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "149-B-bug-1170222-1170231": {
-        "main": 0.0
+        "scores": {
+            "main": 0.0
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "469-A-bug-18026769-18026789": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "276-B-bug-16707425-16707470": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "633-A-bug-17179947-17180046": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "492-A-bug-18201113-18201470": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": []
     },
     "190-A-bug-15278915-15278934": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "420-A-bug-14755133-14755144": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "68-A-bug-340593-340627": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "264-C-bug-16384531-16384572": {
-        "max": 0.5,
-        "work": 0.5,
-        "main": 0.5
+        "scores": {
+            "work": 0.5,
+            "main": 0.5,
+            "max": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "204-A-bug-10222131-10222140": {
-        "power": 0.5454545454545454,
-        "middle": 0.5454545454545454,
-        "first": 0.5454545454545454,
-        "main": 0.5,
-        "length": 0.5,
-        "nways": 0.5
+        "scores": {
+            "first": 0.5454545454545454,
+            "power": 0.5454545454545454,
+            "middle": 0.5454545454545454,
+            "nways": 0.5,
+            "length": 0.5,
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "6-C-bug-11148576-11150029": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "658-A-bug-17124240-17124253": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "222-E-bug-3016637-3016641": {
-        "multiply": 0.6000000000000001,
-        "matexp": 0.5,
-        "main": 0.5
+        "scores": {
+            "multiply": 0.6000000000000001,
+            "main": 0.5,
+            "matexp": 0.5
+        },
+        "ground_truth": [
+            "matexp"
+        ]
     },
     "104-A-bug-15369048-15370159": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": []
     },
     "443-B-bug-6991415-6991443": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "399-A-bug-18007016-18007035": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "169-A-bug-16599196-16599272": {
-        "compare": 0.5,
-        "main": 0.5
+        "scores": {
+            "main": 0.5,
+            "compare": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "558-A-bug-12908146-12908196": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "136-A-bug-17335859-17335870": {
-        "main": 1.0
+        "scores": {
+            "main": 1.0
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "284-B-bug-4852792-4852817": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "69-B-bug-350935-350951": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "344-B-bug-17327402-17327661": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "447-A-bug-18296332-18296341": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "17-A-bug-13897450-13897498": {
-        "isPrime": 0.5,
-        "main": 0.5
+        "scores": {
+            "main": 0.5,
+            "isPrime": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
-    "400-A-bug-11086966-11086988": {},
+    "400-A-bug-11086966-11086988": {
+        "scores": {},
+        "ground_truth": [
+            "main"
+        ]
+    },
     "513-B2-bug-13172231-13172292": {
-        "permutation": 1.0,
-        "main": 1.0
+        "scores": {
+            "main": 1.0,
+            "permutation": 1.0
+        },
+        "ground_truth": [
+            "permutation"
+        ]
     },
     "71-A-bug-18330328-18330409": {
-        "main": 1.0
+        "scores": {
+            "main": 1.0
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "365-B-bug-11573175-11573200": {
-        "checker": 0.5,
-        "main": 0.5
+        "scores": {
+            "main": 0.5,
+            "checker": 0.5
+        },
+        "ground_truth": []
     },
     "316-A1-bug-3992417-3992575": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "53-C-bug-10604859-10605014": {
-        "main": 1.0
+        "scores": {
+            "main": 1.0
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "313-B-bug-15165597-15165618": {
-        "memoize": 0.5,
-        "main": 0.5
+        "scores": {
+            "memoize": 0.5,
+            "main": 0.5
+        },
+        "ground_truth": [
+            "memoize"
+        ]
     },
     "312-C-bug-3777692-3777976": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "658-A-bug-18213201-18219933": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "5-D-bug-10806904-10806939": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "337-A-bug-17720226-17720281": {
-        "cmp": 0.5,
-        "main": 0.5
+        "scores": {
+            "main": 0.5,
+            "cmp": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "288-A-bug-12735587-12735603": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "624-B-bug-17088402-17088417": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": []
     },
     "585-B-bug-15514693-15514749": {
-        "main": 0.5,
-        "f": 0.5
+        "scores": {
+            "main": 0.5,
+            "f": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "448-B-bug-10617841-10617857": {
-        "manuString": 0.5,
-        "main": 0.5
+        "scores": {
+            "main": 0.5,
+            "manuString": 0.5
+        },
+        "ground_truth": []
     },
     "376-A-bug-16700130-16700468": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "302-A-bug-9364836-9364867": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "355-A-bug-12485897-12485900": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "45-D-bug-191189-191239": {
-        "match": 0.5,
-        "find": 0.5,
-        "main": 0.5
+        "scores": {
+            "find": 0.5,
+            "main": 0.5,
+            "match": 0.5
+        },
+        "ground_truth": [
+            "match"
+        ]
     },
     "614-A-bug-17036012-17036054": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "271-C-bug-13011289-13011297": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "592-C-bug-14117787-14117792": {
-        "gcd": 1.0,
-        "main": 1.0
+        "scores": {
+            "main": 1.0,
+            "gcd": 1.0
+        },
+        "ground_truth": [
+            "main"
+        ]
     },
     "404-B-bug-6177761-6177790": {
-        "main": 0.5
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
     }
 }

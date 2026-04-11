@@ -58,20 +58,22 @@ Mục tiêu của APR là nhận vào vị trí lỗi từ FL, tự động tạ
     *   Các Patch thành công sẽ được extract nguyên bản ra thư mục `experiments/patches/`.
 6.  **Đánh giá (Evaluation): 
     *   `eval_apr.py` tính toán tỷ lệ Fix rate (Số bug sinh ra patch thành công / Tổng số bug đem đi vá).
-    
+
 ---
 
-## 5. Dữ liệu Ground Truth và Tính chính xác
+## 5. Cập nhật mới
 
-Trong Data mới nhất, hệ thống thu thập dữ liệu bằng script `codeflaws/data_collector.py` đã được cập nhật logic **trích xuất Ground Truth tự động**.
-*   **Thu thập:** Đối với mỗi folder bug trong Codeflaws, script sẽ tìm file nguồn lỗi (`.c`) và file nguồn đã accept (Ground Truth). Bằng cách dùng lệnh `diff -u` và phân tích AST/Regex C, script sẽ so khớp các dòng thay đổi với các hàm (function) trong mã nguồn, ghi nhận danh sách "các hàm thực sự chứa lỗi" vào file JSON `ground_truth_functions`.
-*   **Đánh giá FL:** Tại file `evaluation/eval_fl.py`, hệ thống không còn dùng "dummy metric" mà so sánh trực tiếp danh sách hàm do Tarantula rank (Top-1, Top-3, Top-5) với danh sách `ground_truth_functions` từ file JSON. Nếu hàm ground truth có mặt trong Top-K, hệ thống ghi nhận là định vị lỗi thành công (Hit).
-*   **Báo cáo APR:** Cung cấp thông kê kết quả (Plausible patches) lưu trữ tự động trong `experiments/apr_results.json` theo từng `bug_id` và hàm bị sửa.
+*   **Tích hợp LLM thực thụ (Gemini):** Đã thay thế mock function (trả về văn bản vô nghĩa) thành một đường ống API gọi đến mô hình AI thực `models/gemini-2.5-flash` thông qua `google.generativeai`. Tính năng cung cấp bản vá lỗi trực tiếp từ Google API và được bảo mật API Keys bằng `dotenv`.
+*   **Tích hợp Sandbox Validation thực thi toàn diện:** Quá trình compile patch hiện nay không chỉ tạo file binary mà đã trỏ chính xác và tự động gọi bash `test-genprog.sh` của Codeflaws. Hệ thống parse exit code chuẩn `0` (Success) và `non-zero` (Failure) để xác định tính chính xác của LLM output ngay tại runtime.
+*   **Thống kê Test P/F Nâng cao (Evaluation):** Thống kê số lượng test pass/fail ban đầu với số test pass/fail sau khi chạy qua sinh mã, đồng thời xem xét liệu lỗi gốc của file (test failures trigger exception) có được xử lý hay tạo ra lỗi quy hồi (Regressions).
+*   **Tự động so sánh khoảng cách vá (Edit Distance):** Tích hợp việc lấy Ground Truth của tác giả (Accepted codebase) so với Output của APR để tính Levenshtein Edit Distance, hỗ trợ đánh giá chất lượng patch khách quan.
+*   **Mở rộng bộ sinh dữ liệu json (`data_collector.py`):** Bổ sung lưu trữ String matching giữa `expected_output` và `actuall_output` để phục vụ logging.
+*   **Fix Tương thích Python & Version:** Các file phụ thuộc đã được định cấu hình nâng cấp đảm bảo Google API Core chạy ổn định. Sửa lỗi `404 model not found` do API Versioning. Tự động lưu vết kết quả biên dịch sửa đổi (APR results) phục vụ tính Rate vá lỗi.
 
 ---
 
 ## 6. Các thay đổi và Cải tiến mới nhất
 
-*   **Tích hợp LLM thực thụ (Gemini):** Đã thay thế mock function (trả về văn bản vô nghĩa) thành một đường ống API gọi đến mô hình AI thực `models/gemini-2.5-flash` thông qua `google.generativeai`. Tính năng cung cấp bản vá lỗi trực tiếp từ Google API và được bảo mật API Keys bằng `dotenv`.
-*   **Tích hợp Sandbox Validation thực thi toàn diện:** Quá trình compile patch hiện nay không chỉ tạo file binary mà đã trỏ chính xác và tự động gọi bash `test-genprog.sh` của Codeflaws. Hệ thống parse exit code chuẩn `0` (Success) và `non-zero` (Failure) để xác định tính chính xác của LLM output ngay tại runtime.
-*   **Fix Tương thích Python & Version:** Các file phụ thuộc đã được định cấu hình nâng cấp đảm bảo Google API Core chạy ổn định. Sửa lỗi `404 model not found` do API Versioning. Tự động lưu vết kết quả biên dịch sửa đổi (APR results) phục vụ tính Rate vá lỗi.
+*   **Đánh giá FL:** Tại file `evaluation/eval_fl.py`, hệ thống không còn dùng "dummy metric" mà so sánh trực tiếp danh sách hàm do Tarantula rank (Top-1, Top-3, Top-5) với danh sách `ground_truth_functions` từ file JSON. Nếu hàm ground truth có mặt trong Top-K, hệ thống ghi nhận là định vị lỗi thành công (Hit).
+*   **Báo cáo APR:** Cung cấp thống kê kết quả trong `experiments/apr_results.json` theo từng `bug_id`. Báo cáo đánh giá hiển thị số lượng Test Pass/Fail trước khi vá và sau khi vá để kiểm tra AI có giải quyết được lỗi ban đầu không, đồng thời cung cấp tham chiếu **Edit Distance (Levenshtein)** giữa patch của AI và patch đúng của tác giả, nhằm phản ánh chất lượng tạo mã.
+

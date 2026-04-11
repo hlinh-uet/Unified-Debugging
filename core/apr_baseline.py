@@ -3,17 +3,30 @@ import json
 import re
 import subprocess
 
-from configs.path import EXPERIMENTS_DIR, CODEFLAWS_SOURCE_DIR, PATCHES_DIR
+from configs.path import EXPERIMENTS_DIR, CODEFLAWS_SOURCE_DIR, PATCHES_DIR, CODEFLAWS_RESULTS_DIR
 
 def extract_function_code(source_code, func_name):
     """
-    Very basic heuristic to extract a C function by name using regex and brace matching.
-    For production, consider using pycparser or tree-sitter.
+    Heuristic to extract a C function by name using regex and brace matching.
+    Fixed to matching modern C signatures more robustly, especially `main`.
     """
-    pattern = re.compile(r'\b(?:int|void|char|double|float|long|unsigned|short|struct|static)\s+[\w\*\s]+\b' + func_name + r'\s*\([^)]*\)\s*\{', re.MULTILINE)
+    # Improved regex to capture C function definitions more flexibly. 
+    # Example: int main() { or int main(int argc, char *argv[]) {
+    pattern = re.compile(
+        r'\b(?:int|void|char|double|float|long|unsigned|short|struct|static)?\s*\*?\s*' + 
+        re.escape(func_name) + r'\s*\([^)]*\)\s*\{', 
+        re.MULTILINE
+    )
     match = pattern.search(source_code)
     if not match:
-        return None, -1, -1
+        # Fallback for main specifically id it lacks return type e.g. main() {
+        if func_name == "main":
+            pattern = re.compile(r'\bmain\s*\([^)]*\)\s*\{', re.MULTILINE)
+            match = pattern.search(source_code)
+            if not match:
+                return None, -1, -1
+        else:
+            return None, -1, -1
 
     start_idx = match.start()
     open_braces = 0
@@ -76,7 +89,7 @@ def validate_patch(patched_file_path, bug_id):
     backup_file = os.path.join(bug_dir, f"{expected_name}.bak")
     
     if not os.path.exists(original_file):
-        return False
+        return False, [], []
 
     is_valid = False
     try:
@@ -91,7 +104,7 @@ def validate_patch(patched_file_path, bug_id):
             compile_cmd = ["gcc", expected_name, "-o", expected_name.replace(".c", "")]
             compile_process = subprocess.run(compile_cmd, cwd=bug_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if compile_process.returncode != 0:
-                return False
+                return False, [], ["Compilation Error"]
 
         # Build list of tests dynamically by looking at test-genprog.sh
         test_script_content = ""
@@ -103,13 +116,21 @@ def validate_patch(patched_file_path, bug_id):
         test_cases = re.findall(r'^([np]\d+)\)', test_script_content, re.MULTILINE)
         
         all_passed = True
+        failed_tests = []
+        passed_tests = []
         for tc in test_cases:
             test_cmd = ["bash", "test-genprog.sh", tc]
             test_process = subprocess.run(test_cmd, cwd=bug_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            
+            # Map "p1" to "pos1" and "n1" to "neg1" for evaluation consistency
+            normalized_tc = tc.replace("p", "pos").replace("n", "neg")
+            
             # The script exits with 0 on success, >0 on failure
             if test_process.returncode != 0:
                 all_passed = False
-                break
+                failed_tests.append(normalized_tc)
+            else:
+                passed_tests.append(normalized_tc)
 
         if all_passed and len(test_cases) > 0:
             is_valid = True
@@ -124,7 +145,7 @@ def validate_patch(patched_file_path, bug_id):
         if os.path.exists(a_out_path):
             os.remove(a_out_path)
 
-    return is_valid
+    return is_valid, passed_tests if 'passed_tests' in locals() else [], failed_tests if 'failed_tests' in locals() else []
 
 def run_apr_pipeline():
     os.makedirs(EXPERIMENTS_DIR, exist_ok=True)
@@ -137,9 +158,24 @@ def run_apr_pipeline():
         fl_results = json.load(f)
 
     apr_results = {}
+    
+    # Load previously saved progress if exists
+    apr_results_file = os.path.join(EXPERIMENTS_DIR, "apr_results.json")
+    if os.path.exists(apr_results_file):
+        try:
+            with open(apr_results_file, "r") as f:
+                apr_results = json.load(f)
+        except Exception:
+            pass
+
     print("Đang chạy quy trình Automated Program Repair...")
     
+    from configs.path import CODEFLAWS_RESULTS_DIR
+    
     for bug_id, result_data in fl_results.items():
+        if bug_id in apr_results and apr_results[bug_id].get("status") != "skipped":
+            continue # Skip ALREADY evaluated bugs unless you delete apr_results.json
+            
         if isinstance(result_data, dict) and 'scores' in result_data:
             scores = result_data['scores']
         else:
@@ -181,10 +217,26 @@ def run_apr_pipeline():
                 print(f"    WARNING: Could not extract function {func_name}")
                 continue
                 
+            target_func = func_name
+            
             prompt = f"Đây là hàm C bị lỗi trong bug {bug_id}, hãy sửa nó:\n\n{func_code}\n\nChỉ trả về mã C đã sửa, không giải thích."
             
             # 3. Call LLM to get patch
             patched_func = call_llm(prompt)
+            
+            # Remove Markdown formatting specifically if present
+            if patched_func:
+                if patched_func.startswith("```c"):
+                    patched_func = patched_func[4:]
+                elif patched_func.startswith("```cpp"):
+                    patched_func = patched_func[6:]
+                elif patched_func.startswith("```"):
+                    patched_func = patched_func[3:]
+                    
+                if patched_func.endswith("```"):
+                    patched_func = patched_func[:-3]
+                
+                patched_func = patched_func.strip()
             
             # 4. Integrate patch into temporary source code
             patched_source = source_code[:start_idx] + patched_func + source_code[end_idx:]
@@ -193,8 +245,17 @@ def run_apr_pipeline():
             with open(tmp_source_path, 'w') as f:
                 f.write(patched_source)
                 
+            # Copy real accepted code for evaluation baseline!
+            import shutil
+            bug_file_prefix = "-".join(bug_id.split("-bug-")[0].split("-"))
+            bug_file_suffix_accepted = bug_id.split("-bug-")[1].split("-")[1]
+            accepted_source = os.path.join(bug_dir, f"{bug_file_prefix}-{bug_file_suffix_accepted}.c")
+            os.makedirs(os.path.join(EXPERIMENTS_DIR, "correct_patches"), exist_ok=True)
+            if os.path.exists(accepted_source):
+                shutil.copy2(accepted_source, os.path.join(EXPERIMENTS_DIR, "correct_patches", f"{bug_id}_accepted.c"))
+                
             # 5. Validation
-            is_valid = validate_patch(tmp_source_path, bug_id)
+            is_valid, post_passed_tests, post_failed_tests = validate_patch(tmp_source_path, bug_id)
             
             status = "failed"
             if is_valid:
@@ -207,15 +268,34 @@ def run_apr_pipeline():
                 print(f"    [FAIL] Patch failed validation.")
                 if os.path.exists(tmp_source_path):
                     os.remove(tmp_source_path)
+                    
+        # Extract init testing metrics properly
+        init_passed = []
+        init_failed = []
+        json_path = os.path.join(CODEFLAWS_RESULTS_DIR, f"{bug_id}.json")
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, 'r') as f:
+                    data = json.load(f)
+                tests = data.get("tests", [])
+                init_passed = [t.get("test_id") for t in tests if t.get("outcome") == "PASS"]
+                init_failed = [t.get("test_id") for t in tests if t.get("outcome") == "FAIL"]
+            except Exception:
+                pass
 
         apr_results[bug_id] = {
-            "status": status,
-            "patched_function": patched_func,
-            "selected_function": target_func if 'target_func' in locals() else None
+            "status": status if 'status' in locals() else "skipped",
+            "patched_function": patched_func if 'patched_func' in locals() else None,
+            "selected_function": target_func if 'target_func' in locals() else None,
+            "init_passed_tests": init_passed,
+            "init_failed_tests": init_failed,
+            "post_passed_tests": post_passed_tests if 'post_passed_tests' in locals() else [],
+            "post_failed_tests": post_failed_tests if 'post_failed_tests' in locals() else []
         }
 
-    with open(os.path.join(EXPERIMENTS_DIR, "apr_results.json"), "w") as f:
-        json.dump(apr_results, f, indent=4)
+        # Lưu JSON liên tục sau mỗi bug (incremental save) thay vì đợi cạn kiệt list
+        with open(os.path.join(EXPERIMENTS_DIR, "apr_results.json"), "w") as f:
+            json.dump(apr_results, f, indent=4)
 
 if __name__ == "__main__":
     run_apr_pipeline()

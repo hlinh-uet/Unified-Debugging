@@ -19,6 +19,7 @@
 Dự án tương tác với bộ dữ liệu Codeflaws thông qua bộ sinh dữ liệu json tự động (`data_collector.py` & `run_all_data.py`).
 Hệ thống định vị lỗi (FL) sẽ lấy **Ground Truth** (dò hàm thực sự bị lỗi) bằng cách đọc module C của bài nộp sai (Buggy submission) và mã nguồn của bài nộp sửa được ban tổ chức accept (Accepted submission).
 - Lệnh Unix `diff -u` được dùng để truy xuất các dòng bị thay đổi, ánh xạ trực tiếp sang Regex nhận dạng tên hàm trong ngôn ngữ C. 
+- Mọi String input và stdout trong quá trình Codeflaws test-cases (pass/fail) đều được ghi nhận trực tiếp vào Output JSON (`expected_output` / `actual_output`) giúp dễ dàng theo dõi lỗi biên dịch hoặc thuật toán.
 - Module đánh giá (Evaluation) `eval_fl.py` so sánh hàm đầu ra của FL Tarantula (ví dụ đứng Top-1, Top-3) với mảng `ground_truth_functions` để tính độ chính xác (% Hit Rate).
 
 ## Thiết lập môi trường
@@ -111,4 +112,5 @@ Hệ thống đang ở mức Baseline để chứng minh khả năng ráp nối 
 ### Hệ thống Generative AI (LLM APIs)
 - **API Placeholder:** Hàm `call_llm()` đã được kết nối thực tế thông qua SDK Google Generative AI (Gemini).
 - **Hỗ trợ Model mới nhất:** Do sự thay đổi của Google API SDK, hệ thống sử dụng model `models/gemini-2.5-flash` mang lại tốc độ và độ chính xác cao khi xử lý mã nguồn C.
+- **Tính toán Validation Distance:** Đã tích hợp thư viện `Levenshtein` trong module `eval_apr.py` nhằm đánh giá số khoảng cách Edit Distance nội suy giữa Source Code Benchmark (Accepted của bộ dữ liệu gốc) so sánh với Source Patch của LLM Generative AI cung cấp. Hệ thống đánh giá cả các test ban đầu bị Fail có thực sự được giải quyết - sinh ra Regressions hay không.
 - **Ràng buộc mã (Context Windows):** Đối với các tệp C dung lượng siêu lớn, cần nén prompt tốt hơn là chèn nguyên mã hàm.

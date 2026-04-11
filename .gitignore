@@ -42,5 +42,4 @@ program
 .idea/
 
 # Local data / patches
-experiments/tmp_*.c
-experiments/val_*.c
+experiments/

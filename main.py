@@ -71,11 +71,12 @@ def main():
             evaluate_fl()
             evaluate_apr()
 
+    print("\nCác tính năng mới đã được thêm vào:")
     print(
-        "Các tính năng mới đã được thêm vào:\n"
         "1. Tích hợp Sandbox (Cơ chế test bằng test case có sẵn của test-genprog.sh).\n"
         "2. Đánh giá Top-K Tarantula bằng Ground Truth file.\n"
-        "3. Cung cấp API thay cho mock text.\n"
+        "3. Đánh giá APR nâng cao (Edit Distance Levenshtein, Pass/Fail Regressions).\n"
+        "4. Cung cấp API có khả năng truy xuất model Gemini.\n"
     )
     print("Mọi tính năng mới đã được lưu vào INSTRUCTION.md và README.md")
 
