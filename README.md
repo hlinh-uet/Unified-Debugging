@@ -1,31 +1,18 @@
 # Unified-Debugging Pipeline
 
-Đây là công cụ tự động chẩn đoán lỗi (Fault Localization) và sửa lỗi tự động (Automated Program Repair) cơ bản dùng thuật toán Tarantula và LLM (Placeholder). Hệ thống được sử dụng cho bộ dữ liệu Codeflaws.
-
-## Cấu trúc thư mục tương đối
+## Cấu trúc 
 
 - `core/`: Chứa các thuật toán xử lý chính
-  - `fl_tarantula.py`: Thuật toán chấm điểm Tarantula.
-  - `apr_baseline.py`: Bộ sinh bản vá tự động dựa trên LLM prompt.
+  - `fl_tarantula.py`
+  - `apr_baseline.py`
 - `evaluation/`: Module đánh giá và báo cáo.
-  - `eval_fl.py`: Đánh giá Fault Localization (Ví dụ: tính toán Top-K suspicious functions).
-  - `eval_apr.py`: Đánh giá Automatic Program Repair (Tỉ lệ sinh ra Plausible Patches).
+  - `eval_fl.py`: Đánh giá Fault Localization 
+  - `eval_apr.py`: Đánh giá Automatic Program Repair 
 - `data_loaders/`: Các module đọc kết quả JSON / nguồn C của bug.
 - `configs/path.py`: Nơi thiết lập thư mục trỏ đến `codeflaws` repository (Tự động config)
 - `experiments/`: Khởi tạo sau khi chạy test để lưu trữ kết quả phân tích Tarantula (`tarantula_results.json`) và nơi lưu Patch thành công (`patches/`).
 
-## Đặc tả dữ liệu (Ground Truth Extraction)
-
-Dự án tương tác với bộ dữ liệu Codeflaws thông qua bộ sinh dữ liệu json tự động (`data_collector.py` & `run_all_data.py`).
-Hệ thống định vị lỗi (FL) sẽ lấy **Ground Truth** (dò hàm thực sự bị lỗi) bằng cách đọc module C của bài nộp sai (Buggy submission) và mã nguồn của bài nộp sửa được ban tổ chức accept (Accepted submission).
-- Lệnh Unix `diff -u` được dùng để truy xuất các dòng bị thay đổi, ánh xạ trực tiếp sang Regex nhận dạng tên hàm trong ngôn ngữ C. 
-- Mọi String input và stdout trong quá trình Codeflaws test-cases (pass/fail) đều được ghi nhận trực tiếp vào Output JSON (`expected_output` / `actual_output`) giúp dễ dàng theo dõi lỗi biên dịch hoặc thuật toán.
-- Module đánh giá (Evaluation) `eval_fl.py` so sánh hàm đầu ra của FL Tarantula (ví dụ đứng Top-1, Top-3) với mảng `ground_truth_functions` để tính độ chính xác (% Hit Rate).
-
 ## Thiết lập môi trường
-
-Hệ thống yêu cầu các thư viện để tương tác với các API Generative AI (LLM) và các dịch vụ khác. Hãy làm theo hướng dẫn dưới đây để chuẩn bị môi trường:
-
 ### 1. Tạo môi trường ảo (Khuyến nghị)
 ```bash
 python3 -m venv .venv
@@ -47,22 +34,20 @@ pip install -r requirements.txt
 ```
 
 ### 4. Cấu hình biến môi trường (API Keys):
-Sao chép file mẫu và cấu hình thư viện LLM mà bạn muốn.
+Sao chép file mẫu và cấu hình thư viện LLM.
 ```bash
 cp .env.example .env
 ```
-Mở tệp `.env` vừa sao chép, tìm biến `GEMINI_API_KEY=YOUR_KEY_HERE` hoặc `OPENAI_API_KEY` và thay thế giá trị ảo bằng khóa API thực tế của bạn. Dự án đã tự động `.gitignore` file `.env` để bảo mật thông tin này.
+Mở tệp `.env` vừa sao chép, tìm biến `GEMINI_API_KEY=YOUR_KEY_HERE` hoặc `OPENAI_API_KEY` và thay thế giá trị ảo bằng khóa API thực tế.
 
 ## Hướng dẫn sử dụng
-
-Hệ thống cho phép bạn điều hướng từng quy trình một thông qua tham số dòng lệnh hoặc có thể chạy tự động tuần tự cả luồng.
 
 ```bash
 # Di chuyển vào thư mục dự án
 cd Unified-Debugging
 
-# Cài đặt (nếu có các dependency sau này - ví dụ openai API)
-# pip install -r requirements.txt
+# Cài đặt 
+pip install -r requirements.txt
 ```
 
 ### 1. Chạy tất cả tự động (Automated Pipeline)
@@ -77,14 +62,14 @@ python3 main.py --all
 ### 2. Chạy từng bước (Step-by-Step)
 
 #### Bước 1: Chạy Fault Localization
-Nếu bạn chỉ muốn tính toán Suspiciousness Score (Tarantula) cho các hàm C trong tập Test Suite, truyền cờ `--fl`. Điểm số này sẽ lưu trữ trong file `experiments/tarantula_results.json`.
+Đây là bước nếu chỉ muốn chạy Fault Localization. Truyền `--fl`. Điểm số này sẽ lưu trữ trong file `experiments/tarantula_results.json`.
 
 ```bash
 python3 main.py --fl
 ```
 
 #### Bước 2: Chạy Automated Program Repair
-Bạn cũng có thể chỉ chạy luồng sửa lỗi tự động (APR), phần này sẽ đọc trực tiếp từ `tarantula_results.json` có sẵn trước đó để lên thứ tự ưu tiên Fix bằng Prompt LLM. Vui lòng đảm bảo bạn đã cấu hình thư mục trỏ vào mã nguồn thực tế tại `configs/path.py` (biến `CODEFLAWS_SOURCE_DIR`).
+Đây là bước chỉ chạy luồng sửa lỗi tự động (APR), phần này sẽ đọc trực tiếp từ `tarantula_results.json` có sẵn trước đó để lên thứ tự ưu tiên Fix bằng Prompt LLM. 
 
 ```bash
 python3 main.py --apr
@@ -95,6 +80,22 @@ In ra lại số điểm thống kê Fault Localization và Tỉ lệ thành cô
 ```bash
 python3 main.py --eval
 ```
+
+## Đánh giá hiệu suất (Evaluation)
+
+Hệ thống triển khai 2 luồng đánh giá tự động dựa trên kết quả đầu ra tại mục `experiments/`:
+
+### 1. Đánh giá Fault Localization (`eval_fl.py`)
+Tiến hành tính toán độ chính xác của thuật toán Tarantula bằng cách đối soát danh sách hàm nghi ngờ (Suspicious functions) với **Ground Truth** (Hàm lỗi chuẩn, được xác định qua `diff -u` giữa mã lỗi và mã thành công). Kết quả trả về tỷ lệ hàm lỗi được xếp hạng đúng trong:
+- **Top-1** Hit Rate
+- **Top-3** Hit Rate
+- **Top-5** Hit Rate
+
+### 2. Đánh giá Automated Program Repair (`eval_apr.py`)
+Mô phỏng bảng báo cáo dựa trên số liệu chi tiết mà Sandbox Validation đã sinh ra. Các độ đo bao gồm:
+- **Plausible Fix Rate (%):** Tỷ lệ phần trăm các file báo lỗi (Bug ID) được vá thành công hoàn toàn sao cho *vượt qua 100% test cases* gốc.
+- **Fixed Initial Fails / Regressions:** Theo dõi các tests bị Fail ở nguyên bản. Báo cáo "Yes" nếu AI đã sửa triệt để. Báo cáo "Yes (Regressions)" nếu AI sửa được lỗi gốc nhưng vô tình làm gãy một test-case khác vốn đang chạy đúng.
+- **Edit Distance (Levenshtein):** Tính toán khoảng cách sửa lỗi ký tự giữa bản vá do AI (LLM) đề xuất và **Ground truth patch** (Bản patch đúng do con người làm). Từ đó suy ra mức độ hiệu quả và ngắn gọn của Prompt AI.
 
 ## Các hạn chế và Hướng phát triển
 

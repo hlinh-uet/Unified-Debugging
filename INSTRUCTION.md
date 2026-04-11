@@ -1,7 +1,5 @@
 # Hướng dẫn Quy trình Hoạt động của Dự án Unified-Debugging
 
-Tài liệu này mô tả chi tiết quy trình hoạt động của hệ thống Unified-Debugging, bao gồm hai giai đoạn chính là Định vị lỗi (Fault Localization - FL) và Sửa lỗi tự động (Automated Program Repair - APR), cũng như cách hệ thống giao tiếp với bộ dữ liệu Codeflaws.
-
 ---
 
 ## 1. Tổng quan luồng hệ thống (Pipeline)
@@ -10,70 +8,60 @@ Hệ thống được thiết kế dưới dạng một pipeline nối tiếp nh
 **Data Loader** ➔ **Fault Localization (FL)** ➔ **Automated Program Repair (APR)** ➔ **Evaluation**
 
 *   **Chạy toàn bộ pipeline:** `python3 main.py --all` (hoặc `python3 main.py`)
-*   **Chỉ chạy FL:** `python3 main.py --fl`
-*   **Chỉ chạy APR:** `python3 main.py --apr`
-*   **Chỉ thống kê/đánh giá:** `python3 main.py --eval`
+*   **Chỉ chạy định vị lỗi (FL):** `python3 main.py --fl`
+*   **Chỉ chạy sửa lỗi tự động (APR):** `python3 main.py --apr`
+*   **Chỉ chạy đánh giá kết quả (Evaluation):** `python3 main.py --eval`
 
 ---
 
 ## 2. Giao tiếp với dữ liệu
 
-Dự án tương tác với module dữ liệu `codeflaws` nằm ở cấp độ thư mục ngang hàng/cha. Các đường dẫn được tự động map qua `configs/path.py`:
+Dự án tương tác với mã nguồn và dữ liệu test của các benchmark (như Codeflaws) thông qua cấu hình đường dẫn linh hoạt trong `configs/path.py`:
 
-*   **Đầu vào của FL (Coverage Info):** Hệ thống đọc các file `*.json` lưu tại `codeflaws/codeflaws/all_results`. Những file này chứa thông tin test (pass/fail) cùng với độ bao phủ lệnh (statement coverage) của từng file sinh ra từ trước.
-*   **Đầu vào của APR (Source Code & Tests):** Hệ thống đọc mã nguồn gốc (các file `.c`), `Makefile`, và các script test (`test-genprog.sh`) tại thư mục Benchmark của Codeflaws `codeflaws/benchmark/`.
-*   **Đầu ra của hệ thống:** Mọi kết quả phân tích và patch tự động sinh ra được lưu tại `Unified-Debugging/experiments/`.
-
----
-
-## 3. Quá trình Định vị lỗi (Fault Localization - FL)
-
-Mục tiêu của FL là tìm ra chính xác các dòng code hoặc hàm (function) có khả năng gây ra lỗi nhất, từ đó giảm không gian tìm kiếm cho APR.
-
-**Cách hoạt động:**
-1.  **Thu thập dữ liệu:** Đọc toàn bộ file kết quả trả về từ `CODEFLAWS_RESULTS_DIR` (thông qua `data_loaders/codeflaws_loader.py`).
-2.  **Tính điểm nghi ngờ (Suspiciousness Score):** Module `core/fl_tarantula.py` sử dụng thuật toán Tarantula để chấm điểm từng hàm dựa trên thống kê mức độ bao phủ (coverage) trong quá trình pass/fail ở các bài test.
-3.  **Lưu kết quả:** Kết quả (danh sách từng hàm tương ứng với số điểm) được sắp xếp giảm dần và ghi vào file `experiments/tarantula_results.json`.
-4.  **Đánh giá (Evaluation):** Thống kê số lượng các bug mà hàm chứa lỗi nằm trong top-1 hoặc top-3 suspicious functions (thực hiện qua `eval_fl.py`).
+*   **Đầu vào của FL (Thông tin Độ bao phủ - Coverage Info):** Hệ thống đọc các file kết quả (metadata JSON) chứa thông tin test (P/F) cùng với độ bao phủ lệnh (statement coverage) tại môi trường gốc.
+*   **Đầu vào của APR (Mã nguồn & kịch bản kiểm thử):** Đọc mã nguồn lỗi (ví dụ file `*.c`), các file bản vá đúng (nếu có để tham chiếu đánh giá) và mã lệnh thực thi test (`test-genprog.sh` hoặc framework tương đương).
+*   **Đầu ra của hệ thống:** Mọi file kết quả JSON, log thực thi, kết hợp đánh giá và file bản vá thành công được lưu tại tập trung trong thư mục `experiments/`.
 
 ---
 
-## 4. Quá trình Sửa lỗi tự động (Automated Program Repair - APR)
+## 3. Định vị lỗi (Fault Localization - FL)
 
-Mục tiêu của APR là nhận vào vị trí lỗi từ FL, tự động tạo các bản vá (patch) và chèn lại thử nghiệm dưới một hộp cát giả lập (sandbox checking) để tìm ra bản vá đúng (Plausible Patch).
+Mục tiêu của quá trình này là tìm ra chính xác các hàm (functions) có nguy cơ chứa lỗi cao nhất, rút gọn độ lớn ngữ cảnh cho LLM bước tiếp theo.
 
-**Cách hoạt động (**`core/apr_baseline.py`**):**
-1.  **Phân tích và trích xuất:** Đọc thứ tự hàm nghi ngờ từ `tarantula_results.json`. Cấu trúc lại tên file `.c` để tra cứu trong `codeflaws/benchmark/<bug-id>/`. Tiến hành trích xuất source code của hàm đang bị nghi ngờ.
-2.  **Tạo bản vá (Patch Generation):** Đẩy thông tin text của function đến LLM (Sử dụng Google Gemini - model `models/gemini-2.5-flash`).
-3.  **Hoán đổi và Biên dịch (Patch Validation):** 
-    *   Tạo file dự phòng `.c.bak` cho file gốc.
-    *   Thay thế bằng source code đã qua chỉnh sửa của LLM vào file gốc.
-    *   Biên dịch lại mã nguồn tại thư mục đó bằng lệnh `make FILENAME=<tên-file>` (hoặc fallback `gcc`).
-4.  **Giao tiếp Test case nội bộ (Ground Truth test):**
-    *   Hệ thống đọc file `test-genprog.sh` của thư mục bug tương ứng để lấy danh sách các testcases (ví dụ `p1`, `p2`, `n1`,...).
-    *   Chạy từng testcase thông qua bash script nội bộ của Codeflaws.
-    *   Nếu tất cả chạy trả về "Accepted" (hoặc exit code trả về `0`), mã nguồn được coi là Passed Validation (Thành công). Bất kỳ case nào lỗi sẽ loại bỏ bản vá.
-5.  **Dọn dẹp & Lưu trữ: 
-    *   Revert (phục hồi) file `.c.bak` về trạng thái ban đầu, dọn các binary dư thừa như `a.out` và `test_executable`.
-    *   Các Patch thành công sẽ được extract nguyên bản ra thư mục `experiments/patches/`.
-6.  **Đánh giá (Evaluation): 
-    *   `eval_apr.py` tính toán tỷ lệ Fix rate (Số bug sinh ra patch thành công / Tổng số bug đem đi vá).
+**Các bước thực hiện:**
+1.  **Dữ liệu đầu vào:** Trích xuất ma trận thông tin bao phủ lệnh của từng test case bằng công cụ thu thập (`data_collector.py`).
+2.  **Tính điểm nghi ngờ (Suspiciousness Score):** Module `core/fl_tarantula.py` chạy thuật toán Tarantula trên toàn bộ mã nguồn để chấm điểm. Hàm được bao phủ nhiều bởi failed-tests sẽ có điểm số cao.
+3.  **Lưu trữ vị trí lỗi:** Danh sách các hàm sắp xếp theo điểm nghi ngờ từ cao xuống thấp được lưu trữ vào `experiments/tarantula_results.json`.
+4.  **Đánh giá độ chính xác (FL Evaluation):** Scripts `evaluation/eval_fl.py` tra cứu tệp lỗi gốc (ground truth) có nằm trong Top-1, Top-3, Top-5 danh sách từ thuật toán hay không.
 
 ---
 
-## 5. Cập nhật mới
+## 4. Sửa lỗi tự động (Automated Program Repair - APR)
 
-*   **Tích hợp LLM thực thụ (Gemini):** Đã thay thế mock function (trả về văn bản vô nghĩa) thành một đường ống API gọi đến mô hình AI thực `models/gemini-2.5-flash` thông qua `google.generativeai`. Tính năng cung cấp bản vá lỗi trực tiếp từ Google API và được bảo mật API Keys bằng `dotenv`.
-*   **Tích hợp Sandbox Validation thực thi toàn diện:** Quá trình compile patch hiện nay không chỉ tạo file binary mà đã trỏ chính xác và tự động gọi bash `test-genprog.sh` của Codeflaws. Hệ thống parse exit code chuẩn `0` (Success) và `non-zero` (Failure) để xác định tính chính xác của LLM output ngay tại runtime.
-*   **Thống kê Test P/F Nâng cao (Evaluation):** Thống kê số lượng test pass/fail ban đầu với số test pass/fail sau khi chạy qua sinh mã, đồng thời xem xét liệu lỗi gốc của file (test failures trigger exception) có được xử lý hay tạo ra lỗi quy hồi (Regressions).
-*   **Tự động so sánh khoảng cách vá (Edit Distance):** Tích hợp việc lấy Ground Truth của tác giả (Accepted codebase) so với Output của APR để tính Levenshtein Edit Distance, hỗ trợ đánh giá chất lượng patch khách quan.
-*   **Mở rộng bộ sinh dữ liệu json (`data_collector.py`):** Bổ sung lưu trữ String matching giữa `expected_output` và `actuall_output` để phục vụ logging.
-*   **Fix Tương thích Python & Version:** Các file phụ thuộc đã được định cấu hình nâng cấp đảm bảo Google API Core chạy ổn định. Sửa lỗi `404 model not found` do API Versioning. Tự động lưu vết kết quả biên dịch sửa đổi (APR results) phục vụ tính Rate vá lỗi.
+Sau khi có trong tay các hàm dễ bị lỗi nhất, hệ thống tiến hành giao tiếp với mô hình ngôn ngữ lớn (LLM - Gemini) để sinh ra bản vá và kiểm chứng cục bộ hộp cát (Sandbox validation).
+
+**Các bước thực hiện (**`core/apr_baseline.py`**):**
+1.  **Trích xuất mã nguồn con:** Đọc `tarantula_results.json` để xác định C-function tiềm ẩn lỗi. Sử dụng Regex nội bộ để tách riêng phần mã nguồn của hàm đó.
+2.  **Giao tiếp Mô hình LLM:** Tạo một prompt kết hợp code lỗi cùng thông tin báo cáo lỗi, gửi đến Google Gemini (thông qua `google-generativeai`). LLM trả về source code được kỳ vọng đã fix lỗi.
+3.  **Hộp cát kiểm thử (Sandbox Validation):** 
+    *   Tự động *backup* mã nguồn gốc.
+    *   Bơm trực tiếp đoạn mã sửa lỗi của LLM đè lên nội dung hàm bị lỗi.
+    *   Tiến hành biên dịch cục bộ bằng `make` hoặc `gcc`.
+    *   Thực thi bộ test script nội bộ (`test-genprog.sh` hoặc tương tự) với các test case gốc.
+    *   Thu thập log Pass/Fail mới nhất từ môi trường thực thi (so sánh cả `post_passed_tests` và `post_failed_tests`).
+4.  **Xử lý hậu kỳ (Cleanup & Export):** 
+    *   Lưu toàn bộ quá trình xác thực vào `experiments/apr_results.json` liên tục theo thời gian thực (đảm bảo an toàn khi Ctrl+C).
+    *   Phục hồi (revert) source code file để tránh làm hỏng bộ Dữ liệu gốc.
+    *   Nếu Plausible/Correct: Đẩy bản vá vào `experiments/correct_patches/`.
 
 ---
 
-## 6. Các thay đổi và Cải tiến mới nhất
+## 5. Đánh giá hệ thống (Evaluation)
 
-*   **Đánh giá FL:** Tại file `evaluation/eval_fl.py`, hệ thống không còn dùng "dummy metric" mà so sánh trực tiếp danh sách hàm do Tarantula rank (Top-1, Top-3, Top-5) với danh sách `ground_truth_functions` từ file JSON. Nếu hàm ground truth có mặt trong Top-K, hệ thống ghi nhận là định vị lỗi thành công (Hit).
-*   **Báo cáo APR:** Cung cấp thống kê kết quả trong `experiments/apr_results.json` theo từng `bug_id`. Báo cáo đánh giá hiển thị số lượng Test Pass/Fail trước khi vá và sau khi vá để kiểm tra AI có giải quyết được lỗi ban đầu không, đồng thời cung cấp tham chiếu **Edit Distance (Levenshtein)** giữa patch của AI và patch đúng của tác giả, nhằm phản ánh chất lượng tạo mã.
+Hệ thống có cơ chế tự động đánh giá sự hiệu quả của toàn bộ Pipeline để đưa ra báo cáo chi tiết. Toàn quyền thay đổi bởi `evaluation/eval_apr.py` & `evaluation/eval_fl.py`.
+
+*   **Tỉ lệ sửa thành công (Plausible Fix Rate):** Tính tỉ lệ số lượng bugs được vá thành công vĩnh viễn chia cho tổng số bugs thực thi.
+*   **Regression Tracking:** Đếm số lượng test cases thất bại (Fail) ban đầu có được vá hay không (Fixed Init Fails?), đồng thời báo cáo nếu patch làm vỡ logic của test cases đang chạy đúng (Regressions).
+*   **Edit Distance (Levenshtein):** Với các bản code đã fix, đo đạc khoảng cách chuỗi (Levenshtein distance) so với đoạn code chuẩn mà nhà phát triển (developer) thực tế đã sửa (Ground-truth accepted patches). Giúp đánh giá độ "tự nhiên" và "ngắn gọn" của AI sinh ra.
+
 
