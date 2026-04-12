@@ -4,6 +4,7 @@ import argparse
 from data_loaders.codeflaws_loader import load_all_bugs
 from core.fl_tarantula import calculate_tarantula
 from core.apr_baseline import run_apr_pipeline
+from core.apr_mutation import run_mutation_pipeline
 from evaluation.eval_fl import evaluate_fl
 from evaluation.eval_apr import evaluate_apr
 from configs.path import EXPERIMENTS_DIR
@@ -45,14 +46,15 @@ def run_fl():
 def main():
     parser = argparse.ArgumentParser(description="Unified Debugging Pipeline")
     parser.add_argument('--fl', action='store_true', help='Chỉ chạy Fault Localization (Tarantula)')
-    parser.add_argument('--apr', action='store_true', help='Chỉ chạy Automated Program Repair (APR)')
+    parser.add_argument('--apr', action='store_true', help='Chỉ chạy Automated Program Repair (APR với LLM)')
+    parser.add_argument('--apr-mutation', action='store_true', help='Chỉ chạy APR sử dụng Local Heuristic Mutation (Không cần LLM)')
     parser.add_argument('--eval', action='store_true', help='Chỉ chạy đánh giá kết quả từ cả FL và APR (Evaluation)')
     parser.add_argument('--all', action='store_true', help='Chạy toàn bộ quy trình: FL -> APR -> Evaluation')
     args = parser.parse_args()
 
-    # Nếu chọn --all hoặc không truyền tham số nào thì chạy toàn bộ pipeline
-    if args.all or (not args.fl and not args.apr and not args.eval):
-        print("Đang chạy toàn bộ quy trình (FL -> APR -> Evaluation)...")
+    # Nếu chọn --all hoặc không truyền tham số nào thì chạy toàn bộ pipeline (ưu tiên LLM cho luồng chính)
+    if args.all or (not args.fl and not args.apr and not args.apr_mutation and not args.eval):
+        print("Đang chạy toàn bộ quy trình gốc (FL -> APR với LLM -> Evaluation)...")
         run_fl()
         run_apr_pipeline()
         evaluate_fl()
@@ -63,9 +65,13 @@ def main():
             run_fl()
             evaluate_fl()
         if args.apr:
-            print("Đang chạy quy trình Automated Program Repair...")
+            print("Đang chạy quy trình Automated Program Repair (LLM)...")
             run_apr_pipeline()
             evaluate_apr()
+        if args.apr_mutation:
+            print("Đang chạy quy trình APR (Mutation Local Baseline)...")
+            run_mutation_pipeline()
+            # Báo cáo sẽ được sinh ra ở json riêng, nhưng nếu muốn evaluate có thể trỏ script evaluation vào file đó!
         if args.eval:
             print("Đang chạy riêng quy trình thông kê Evaluation...")
             evaluate_fl()

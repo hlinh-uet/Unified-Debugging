@@ -122,8 +122,15 @@ def validate_patch(patched_file_path, bug_id):
             test_cmd = ["bash", "test-genprog.sh", tc]
             test_process = subprocess.run(test_cmd, cwd=bug_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             
-            # Map "p1" to "pos1" and "n1" to "neg1" for evaluation consistency
-            normalized_tc = tc.replace("p", "pos").replace("n", "neg")
+            # Map "p" to "pos" and "n" to "neg" for evaluation consistency
+            # To avoid messing up pos1 vs p1 by accidental replacing, only replace the first char if it's 'p' or 'n'
+            # e.g 'p1' -> 'pos1', 'n1' -> 'neg1' 
+            if tc.startswith('p'):
+                normalized_tc = "pos" + tc[1:]
+            elif tc.startswith('n'):
+                normalized_tc = "neg" + tc[1:]
+            else:
+                normalized_tc = tc
             
             # The script exits with 0 on success, >0 on failure
             if test_process.returncode != 0:
@@ -219,11 +226,69 @@ def run_apr_pipeline():
                 
             target_func = func_name
             
-            prompt = f"Đây là hàm C bị lỗi trong bug {bug_id}, hãy sửa nó:\n\n{func_code}\n\nChỉ trả về mã C đã sửa, không giải thích."
+            # Enhanced Context Collection for Prompt
+            failed_tests_context = ""
+            json_path = os.path.join(CODEFLAWS_RESULTS_DIR, f"{bug_id}.json")
+            if os.path.exists(json_path):
+                try:
+                    with open(json_path, 'r') as jf:
+                        bug_intel = json.load(jf)
+                    
+                    failed_tests = [t for t in bug_intel.get("tests", []) if t.get("outcome") == "FAIL"]
+                    if failed_tests:
+                        # Select the first failing test to keep context window manageable
+                        tc = failed_tests[0]
+                        tc_name = tc.get("test_id", "Unknown")
+                        tc_reason = tc.get("fail_reason", "Unknown")
+                        tc_expected = tc.get("expected_output", "N/A")
+                        tc_actual = tc.get("actual_output", "N/A")
+                        
+                        # Note: we truncate outputs if they are too long to save tokens
+                        if len(tc_expected) > 500: tc_expected = tc_expected[:500] + "\n...[truncated]"
+                        if len(tc_actual) > 500: tc_actual = tc_actual[:500] + "\n...[truncated]"
+                        
+                        failed_tests_context = f"""
+### Thông tin kiểm thử thất bại (Test Case: {tc_name})
+- **Lý do lỗi:** {tc_reason}
+- **Kết quả mong đợi (Expected Output):**
+```
+{tc_expected.strip()}
+```
+- **Kết quả thực tế (Actual Output):**
+```
+{tc_actual.strip()}
+```
+"""
+                except Exception as e:
+                    print(f"    WARNING: Could not load test context for {bug_id}: {e}")
+
+            # Combine full file context and the targeted function
+            prompt = f"""Bạn là một chuyên gia sửa lỗi chương trình C/C++.
+Nhiệm vụ của bạn là sửa một lỗi thuật toán hoặc biên dịch trong hàm `{func_name}` của đoạn mã dưới đây (Bug ID: {bug_id}).
+
+{failed_tests_context}
+
+### Toàn bộ file mã nguồn hiện tại (để hiểu scope, thư viện, và struct):
+```c
+{source_code}
+```
+
+### Yêu cầu:
+1. Hãy tìm và sửa lỗi bên trong hàm `{func_name}`.
+2. CHỈ TRẢ VỀ mã nguồn C của TỪNG HÀM `{func_name}` đã được sửa (để tôi có thể parse trực tiếp thay thế bằng Regex, bao gồm định dạng trả về, tên hàm, và ngoặc nhọn).
+3. Tuyệt đối KHÔNG kèm theo lời giải thích mào đầu, KHÔNG viết lại các thư viện `#include` nằm bên ngoài hàm, và KHÔNG đưa thêm main() nếu đang sửa hàm cục bộ khác.
+
+```c
+// Bắt đầu viết lại hàm {func_name} tại đây:
+"""
             
             # 3. Call LLM to get patch
             patched_func = call_llm(prompt)
             
+            if not patched_func:
+                print(f"    [ERROR] LLM returned Null (quá giới hạn API hoặc lỗi mạng). Bỏ qua việc sửa hàm này.")
+                continue
+                
             # Remove Markdown formatting specifically if present
             if patched_func:
                 if patched_func.startswith("```c"):
@@ -235,6 +300,12 @@ def run_apr_pipeline():
                     
                 if patched_func.endswith("```"):
                     patched_func = patched_func[:-3]
+                
+                if patched_func.startswith("// Bắt đầu viết lại hàm"):
+                    # Remove the prompt prefix if it repeated it
+                    lines = patched_func.split("\n")
+                    if len(lines) > 0 and lines[0].startswith("// Bắt đầu"):
+                        patched_func = "\n".join(lines[1:])
                 
                 patched_func = patched_func.strip()
             
