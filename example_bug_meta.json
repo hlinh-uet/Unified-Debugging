@@ -1,0 +1,25 @@
+{
+    "bug_id": "Defects4C-01",
+    "dataset_name": "defects4c",
+    "language": "C",
+    "source_file": "/app/project/src/main.c",
+    "compile_cmd": "gcc src/main.c -o a.out",
+    "test_cmd_template": "bash run_test.sh {test_id}",
+    "tests": [
+        {
+            "test_id": "pos1",
+            "outcome": "PASS"
+        },
+        {
+            "test_id": "pos2",
+            "outcome": "PASS"
+        },
+        {
+            "test_id": "neg1",
+            "outcome": "FAIL",
+            "expected_output": "15\n",
+            "actual_output": "0\n",
+            "fail_reason": "Output mismatch"
+        }
+    ]
+}

@@ -4,7 +4,9 @@
 
 - `core/`: Chứa các thuật toán xử lý chính
   - `fl_tarantula.py`
-  - `apr_baseline.py`
+  - `apr_baseline.py`: Bộ sinh bản vá tự động dựa trên LLM prompt.
+  - `apr_mutation.py`: Môi trường sinh bản vá đột biến ngẫu nhiên (Local Heuristic Mutation) không sử dụng LLM API.
+  - `sandbox_adapter.py`: Khung chuyển đổi (Adapter) cho phép hệ thống gọi test-script và compiler của mọi bộ dữ liệu khác nhau một cách thống nhất.
 - `evaluation/`: Module đánh giá và báo cáo.
   - `eval_fl.py`: Đánh giá Fault Localization 
   - `eval_apr.py`: Đánh giá Automatic Program Repair 
@@ -69,10 +71,16 @@ python3 main.py --fl
 ```
 
 #### Bước 2: Chạy Automated Program Repair
-Đây là bước chỉ chạy luồng sửa lỗi tự động (APR), phần này sẽ đọc trực tiếp từ `tarantula_results.json` có sẵn trước đó để lên thứ tự ưu tiên Fix bằng Prompt LLM. 
+Hệ thống cung cấp sẵn hai công cụ để chạy luồng sửa lỗi tự động (APR), phần này sẽ đọc trực tiếp từ danh sách từ `tarantula_results.json` có sẵn trước đó để lên thứ tự ưu tiên Fix. 
 
+1. Nếu bạn đang cấu hình API Key và muốn **dùng LLM để Fix**:
 ```bash
 python3 main.py --apr
+```
+
+2. Nếu bạn không muốn kết nối LLM mà muốn **chạy mô phỏng đột biến Local (Mutation)** tốc độ cao:
+```bash
+python3 main.py --apr-mutation
 ```
 
 #### Bước 3: Đánh giá quá trình (Evaluation)

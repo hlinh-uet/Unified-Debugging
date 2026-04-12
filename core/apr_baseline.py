@@ -4,6 +4,7 @@ import re
 import subprocess
 
 from configs.path import EXPERIMENTS_DIR, CODEFLAWS_SOURCE_DIR, PATCHES_DIR, CODEFLAWS_RESULTS_DIR
+from core.sandbox_adapter import get_sandbox_adapter
 
 def extract_function_code(source_code, func_name):
     """
@@ -66,95 +67,27 @@ def call_llm(prompt):
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        print(f"Error calling LLM: {e}")
+        error_msg = str(e)
+        if "Quota" in error_msg or "limit" in error_msg:
+            print("Warning: API quota limit reached. Please try again later.")
+        else:
+            print(f"Error calling LLM: {error_msg}")
         return None
 
-def validate_patch(patched_file_path, bug_id):
+# Đã chuyển validation logic vào core/sandbox_adapter.py
+def validate_patch(patched_file_path, bug_id, dataset="codeflaws"):
     """
-    Placeholder for validation logic.
-    You can compile the patched_file_path and run tests manually, 
-    or call the existing `data_collector.py` script.
+    Sử dụng Adapter tương ứng với bộ dataset để kiểm chứng bản vá trong hộp cát (Sandbox).
     """
-    print(f"Validating patch for {bug_id}...")
-    
-    # We will use the test-valid.sh script from codeflaws project to validate the patch
-    import shutil
-    
-    bug_dir = os.path.join(CODEFLAWS_SOURCE_DIR, bug_id)
-    bug_file_prefix = "-".join(bug_id.split("-bug-")[0].split("-"))
-    bug_file_suffix = bug_id.split("-bug-")[1].split("-")[0]
-    expected_name = f"{bug_file_prefix}-{bug_file_suffix}.c"
-    
-    original_file = os.path.join(bug_dir, expected_name)
-    backup_file = os.path.join(bug_dir, f"{expected_name}.bak")
-    
-    if not os.path.exists(original_file):
+    print(f"Validating patch for {bug_id} using {dataset} adapter...")
+    try:
+        adapter = get_sandbox_adapter(dataset, bug_id)
+        return adapter.validate(patched_file_path)
+    except Exception as e:
+        print(f"    [Error] Cannot validate patch using adapter: {e}")
         return False, [], []
 
-    is_valid = False
-    try:
-        shutil.copy2(original_file, backup_file)
-        shutil.copy2(patched_file_path, original_file)
-
-        # Run compilation using Makefile inside the bug dir (since they have it)
-        compile_cmd = ["make", f"FILENAME={expected_name.replace('.c', '')}"]
-        compile_process = subprocess.run(compile_cmd, cwd=bug_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if compile_process.returncode != 0:
-            # Fallback to gcc if make fails (sometimes makefile uses different format)
-            compile_cmd = ["gcc", expected_name, "-o", expected_name.replace(".c", "")]
-            compile_process = subprocess.run(compile_cmd, cwd=bug_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if compile_process.returncode != 0:
-                return False, [], ["Compilation Error"]
-
-        # Build list of tests dynamically by looking at test-genprog.sh
-        test_script_content = ""
-        with open(os.path.join(bug_dir, "test-genprog.sh"), 'r') as f:
-            test_script_content = f.read()
-
-        import re
-        # Find all test cases e.g., p1), p2), n1)
-        test_cases = re.findall(r'^([np]\d+)\)', test_script_content, re.MULTILINE)
-        
-        all_passed = True
-        failed_tests = []
-        passed_tests = []
-        for tc in test_cases:
-            test_cmd = ["bash", "test-genprog.sh", tc]
-            test_process = subprocess.run(test_cmd, cwd=bug_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            
-            # Map "p" to "pos" and "n" to "neg" for evaluation consistency
-            # To avoid messing up pos1 vs p1 by accidental replacing, only replace the first char if it's 'p' or 'n'
-            # e.g 'p1' -> 'pos1', 'n1' -> 'neg1' 
-            if tc.startswith('p'):
-                normalized_tc = "pos" + tc[1:]
-            elif tc.startswith('n'):
-                normalized_tc = "neg" + tc[1:]
-            else:
-                normalized_tc = tc
-            
-            # The script exits with 0 on success, >0 on failure
-            if test_process.returncode != 0:
-                all_passed = False
-                failed_tests.append(normalized_tc)
-            else:
-                passed_tests.append(normalized_tc)
-
-        if all_passed and len(test_cases) > 0:
-            is_valid = True
-
-    finally:
-        shutil.move(backup_file, original_file)
-        # Cleanup binary
-        exe_file = os.path.join(bug_dir, expected_name.replace(".c", ""))
-        a_out_path = os.path.join(bug_dir, "a.out")
-        if os.path.exists(exe_file):
-            os.remove(exe_file)
-        if os.path.exists(a_out_path):
-            os.remove(a_out_path)
-
-    return is_valid, passed_tests if 'passed_tests' in locals() else [], failed_tests if 'failed_tests' in locals() else []
-
-def run_apr_pipeline():
+def run_apr_pipeline(dataset="codeflaws"):
     os.makedirs(EXPERIMENTS_DIR, exist_ok=True)
     tarantula_results_file = os.path.join(EXPERIMENTS_DIR, "tarantula_results.json")
     if not os.path.exists(tarantula_results_file):
@@ -195,16 +128,14 @@ def run_apr_pipeline():
         sorted_funcs = sorted(scores.items(), key=lambda item: item[1], reverse=True)
         print(f"Processing bug {bug_id}...")
         
-        # Load source code
-        # Tìm file source logic thực tế của dataset codeflaws (đôi khi nằm dưới các sub-directories)
-        bug_dir = os.path.join(CODEFLAWS_SOURCE_DIR, bug_id)
-        
-        # Format Codeflaws thường là source file giống ID
-        # Ví dụ 104-A-bug-13890222-13890242.c -> 104-A-13890222.c
-        bug_file_prefix = "-".join(bug_id.split("-bug-")[0].split("-"))
-        bug_file_suffix = bug_id.split("-bug-")[1].split("-")[0]
-        bug_source_path = os.path.join(bug_dir, f"{bug_file_prefix}-{bug_file_suffix}.c")
-        
+        # Load source code qua Adapter thay vì tự phân tích chuỗi Codeflaws tĩnh
+        try:
+            adapter = get_sandbox_adapter(dataset, bug_id)
+            bug_source_path = adapter.get_source_path()
+        except Exception as e:
+            print(f"Error getting adapter for {bug_id}: {e}")
+            continue
+            
         if not os.path.exists(bug_source_path):
             print(f"Source file not found for {bug_id} at {bug_source_path}, skipping...")
             continue
@@ -318,6 +249,8 @@ Nhiệm vụ của bạn là sửa một lỗi thuật toán hoặc biên dịch
                 
             # Copy real accepted code for evaluation baseline!
             import shutil
+            # Đoạn này sau này cần đưa vào Adapter nếu dataset không theo đuôi phân cách Codeflaws
+            bug_dir = os.path.dirname(bug_source_path)
             bug_file_prefix = "-".join(bug_id.split("-bug-")[0].split("-"))
             bug_file_suffix_accepted = bug_id.split("-bug-")[1].split("-")[1]
             accepted_source = os.path.join(bug_dir, f"{bug_file_prefix}-{bug_file_suffix_accepted}.c")

@@ -9,18 +9,20 @@ Hệ thống được thiết kế dưới dạng một pipeline nối tiếp nh
 
 *   **Chạy toàn bộ pipeline:** `python3 main.py --all` (hoặc `python3 main.py`)
 *   **Chỉ chạy định vị lỗi (FL):** `python3 main.py --fl`
-*   **Chỉ chạy sửa lỗi tự động (APR):** `python3 main.py --apr`
+*   **Chỉ chạy APR sử dụng LLM:** `python3 main.py --apr`
+*   **Chỉ chạy APR sử dụng Heuristic Mutation (Không LLM):** `python3 main.py --apr-mutation`
 *   **Chỉ chạy đánh giá kết quả (Evaluation):** `python3 main.py --eval`
 
 ---
 
-## 2. Giao tiếp với dữ liệu
+## 2. Giao tiếp với dữ liệu (Sandbox Adapter)
 
-Dự án tương tác với mã nguồn và dữ liệu test của các benchmark (như Codeflaws) thông qua cấu hình đường dẫn linh hoạt trong `configs/path.py`:
+Dự án tương tác với mã nguồn và dữ liệu test của các benchmark thông qua kiến trúc **Sandbox Adapter** (khai báo tại `core/sandbox_adapter.py`). 
+Điều này cho phép hệ thống làm việc với mọi bộ dữ liệu như Codeflaws, Defects4C,... mà không cần phải thay đổi mã nguồn cốt lõi (hardcode). Tham khảo File `DATASET_STANDARDS.md` để tự tạo File Adapter nếu bạn muốn cắm một bộ dữ liệu hoàn toàn mới vào.
 
 *   **Đầu vào của FL (Thông tin Độ bao phủ - Coverage Info):** Hệ thống đọc các file kết quả (metadata JSON) chứa thông tin test (P/F) cùng với độ bao phủ lệnh (statement coverage) tại môi trường gốc.
-*   **Đầu vào của APR (Mã nguồn & kịch bản kiểm thử):** Đọc mã nguồn lỗi (ví dụ file `*.c`), các file bản vá đúng (nếu có để tham chiếu đánh giá) và mã lệnh thực thi test (`test-genprog.sh` hoặc framework tương đương).
-*   **Đầu ra của hệ thống:** Mọi file kết quả JSON, log thực thi, kết hợp đánh giá và file bản vá thành công được lưu tại tập trung trong thư mục `experiments/`.
+*   **Đầu vào của APR (Mã nguồn & kịch bản kiểm thử):** Đọc mã nguồn lỗi (ví dụ file `*.c`), các file bản vá đúng (nếu có để tham chiếu đánh giá) thông qua Adapter được chỉ định.
+*   **Đầu ra của hệ thống:** Mọi file kết quả JSON, log thực thi, kết hợp đánh giá và file bản vá thành công được lưu tập trung trong thư mục `experiments/`.
 
 ---
 
@@ -38,21 +40,28 @@ Mục tiêu của quá trình này là tìm ra chính xác các hàm (functions)
 
 ## 4. Sửa lỗi tự động (Automated Program Repair - APR)
 
-Sau khi có trong tay các hàm dễ bị lỗi nhất, hệ thống tiến hành giao tiếp với mô hình ngôn ngữ lớn (LLM - Gemini) để sinh ra bản vá và kiểm chứng cục bộ hộp cát (Sandbox validation).
+Hệ thống cung cấp **2 phương pháp (Baseline)** để tự động sinh ra bản vá dựa trên lỗi do FL truyền vào. Cả hai phương pháp đều tái sử dụng chung cơ chế kiểm chứng hộp cát (Sandbox Validation).
 
-**Các bước thực hiện (**`core/apr_baseline.py`**):**
-1.  **Trích xuất mã nguồn con:** Đọc `tarantula_results.json` để xác định C-function tiềm ẩn lỗi. Sử dụng Regex nội bộ để tách riêng phần mã nguồn của hàm đó.
-2.  **Giao tiếp Mô hình LLM:** Tạo một prompt kết hợp code lỗi cùng thông tin báo cáo lỗi, gửi đến Google Gemini (thông qua `google-generativeai`). LLM trả về source code được kỳ vọng đã fix lỗi.
-3.  **Hộp cát kiểm thử (Sandbox Validation):** 
+### Phương pháp 1: Sửa lỗi bằng Generative AI (LLM - Gemini)
+**Tệp thực thi:** `core/apr_baseline.py`
+1.  **Trích xuất mã nguồn:** Đọc `tarantula_results.json` để xác định C-function tiềm ẩn lỗi. Tách riêng phần mã nguồn của hàm đó.
+2.  **Giao tiếp Mô hình LLM:** Tạo một prompt kết hợp toàn bộ code lỗi cùng thông tin File JSON Test-Case bị FAIL, gửi đến Google Gemini. LLM trả về source code được kỳ vọng đã fix lỗi.
+3.  **Hộp cát kiểm thử (Adapter Sandbox Validation):** 
     *   Tự động *backup* mã nguồn gốc.
     *   Bơm trực tiếp đoạn mã sửa lỗi của LLM đè lên nội dung hàm bị lỗi.
-    *   Tiến hành biên dịch cục bộ bằng `make` hoặc `gcc`.
-    *   Thực thi bộ test script nội bộ (`test-genprog.sh` hoặc tương tự) với các test case gốc.
-    *   Thu thập log Pass/Fail mới nhất từ môi trường thực thi (so sánh cả `post_passed_tests` và `post_failed_tests`).
+    *   Adapter sẽ tùy biến lệnh Sandbox để gọi Compile và chạy từng script test của bộ dữ liệu đó.
+    *   Thu thập log Pass/Fail mới nhất từ môi trường thực thi để lọc bản vá sai.
 4.  **Xử lý hậu kỳ (Cleanup & Export):** 
-    *   Lưu toàn bộ quá trình xác thực vào `experiments/apr_results.json` liên tục theo thời gian thực (đảm bảo an toàn khi Ctrl+C).
-    *   Phục hồi (revert) source code file để tránh làm hỏng bộ Dữ liệu gốc.
-    *   Nếu Plausible/Correct: Đẩy bản vá vào `experiments/correct_patches/`.
+    *   Lưu quá trình vào `experiments/apr_results.json`.
+    *   Phục hồi (revert) source code file để tránh làm hỏng bộ dữ liệu. Nếu Plausible: Đẩy bản vá vào `experiments/correct_patches/`.
+
+### Phương pháp 2: Sửa lỗi bằng Heuristic Mutation (Local, No LLM)
+**Tệp thực thi:** `core/apr_mutation.py`
+Đây là phương pháp học hỏi theo các Baseline kinh điển (như GenProg, SPR), hoạt động bằng 100% tài nguyên CPU thực tế cục bộ mà không sử dụng bất kỳ API Token nào.
+1.  **Trích xuất mã nguồn:** Tương tự như dùng LLM.
+2.  **Đột biến mã (Mutagenesis):** Bộ biểu thức chính quy (Regex) quét qua hàm bị lỗi để sinh ra hàng tá phiên bản thay thế (Mutants). Chẳng hạn: hoán đổi `<`, `>` thành `<=`, hoặc sửa dấu `+`, `-` để khắc phục lỗi biên ngụy (Off-by-one errors) rất hay gặp ở Codeforces.
+3.  **Dò tìm (Heuristic Search):** Nạp toàn bộ Mutants vừa tạo vào Adapter Sandbox Validation để quét liên tục.
+4.  **Xử lý hậu kỳ:** Mutant nào qua 100% Test Case sẽ được ghi nhận vào file báo cáo `experiments/apr_mutation_results.json`.
 
 ---
 
