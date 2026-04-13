@@ -178,10 +178,14 @@ def run_mutation_pipeline(dataset: str = "codeflaws"):
                 else:
                     if len(post_passed) > best_pass_count:
                         best_pass_count  = len(post_passed)
+                        patched_func     = m_code
+                        best_mutant_desc = m_desc
                         best_post_passed = post_passed
                         best_post_failed = post_failed
-                    if os.path.exists(tmp_path):
+                    try:
                         os.remove(tmp_path)
+                    except FileNotFoundError:
+                        pass
 
             if found_fix:
                 break

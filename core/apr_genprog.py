@@ -42,6 +42,7 @@ from dotenv import load_dotenv
 
 from configs.path import EXPERIMENTS_DIR, PATCHES_DIR, CODEFLAWS_SOURCE_DIR
 from data_loaders.base_loader import get_loader, BugRecord
+from core.utils import extract_function_code
 
 load_dotenv()
 
@@ -292,6 +293,51 @@ def _determine_status(output: str) -> str:
 # ---------------------------------------------------------------------------
 # Helpers: validate và lưu patch
 # ---------------------------------------------------------------------------
+
+def _extract_changed_function(work_dir: str, cfile: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    So sánh file gốc và file repair để tìm hàm bị thay đổi bởi GenProg.
+    Trả về (patched_function_code, function_name) hoặc (None, None).
+    """
+    orig_file   = os.path.join(work_dir, cfile + ".bak")
+    repair_file = os.path.join(work_dir, "repair", cfile)
+
+    if not os.path.exists(orig_file):
+        orig_file = os.path.join(work_dir, cfile)
+    if not os.path.exists(repair_file):
+        return None, None
+
+    try:
+        with open(orig_file, "r") as f:
+            orig_code = f.read()
+        with open(repair_file, "r") as f:
+            repair_code = f.read()
+    except Exception:
+        return None, None
+
+    func_pattern = re.compile(
+        r'\b(?:(?:int|void|char|double|float|long|unsigned|short|struct|static|inline|const)\s+)*'
+        r'\**\s*(\w+)\s*\([^)]*\)\s*\{',
+        re.MULTILINE
+    )
+
+    for m in func_pattern.finditer(repair_code):
+        func_name = m.group(1)
+        if func_name in ("if", "while", "for", "switch", "sizeof"):
+            continue
+        repaired_func, _, _ = extract_function_code(repair_code, func_name)
+        original_func, _, _ = extract_function_code(orig_code, func_name)
+        if repaired_func and original_func and repaired_func != original_func:
+            return repaired_func, func_name
+        if repaired_func and not original_func:
+            return repaired_func, func_name
+
+    main_func, _, _ = extract_function_code(repair_code, "main")
+    if main_func:
+        return main_func, "main"
+
+    return None, None
+
 
 def _save_patch(work_dir: str, bug_id: str, cfile: str) -> Optional[str]:
     """
@@ -555,16 +601,22 @@ def run_genprog_pipeline(dataset: str = "codeflaws",
         print(f"    [STATUS] GenProg → {genprog_status}")
 
         # --- Bước 6: Xử lý kết quả ---
-        patch_path   = None
+        patch_path      = None
         passed_tests: List[str] = []
         failed_tests: List[str] = []
-        final_status = genprog_status
+        final_status    = genprog_status
+        patched_func    = None
+        selected_func   = None
 
         if genprog_status == "repair_found":
             patch_path = _save_patch(work_dir, bug_id, cfile)
 
+            patched_func, selected_func = _extract_changed_function(work_dir, cfile)
+            if patched_func:
+                print(f"    [INFO] Trích xuất patched_function: hàm '{selected_func}'")
+
             if patch_path:
-                print(f"    [VALIDATE] Đang xác nhận bản vá với test-genprog.sh...")
+                print(f"    [VALIDATE] Đang xác nhận bản vá...")
                 passed_tests, failed_tests = _validate_patch(work_dir, cfile, bug_id)
                 if not failed_tests:
                     final_status = "success"
@@ -585,6 +637,8 @@ def run_genprog_pipeline(dataset: str = "codeflaws",
             genprog_log=log_path,
             pos_count=pos_count,
             neg_count=neg_count,
+            patched_function=patched_func,
+            selected_function=selected_func,
         )
 
         # Tuỳ chọn: giữ lại workdir để debug, bỏ comment dòng dưới để xoá
@@ -605,7 +659,9 @@ def _write_result(results: Dict, results_file: str, bug_id: str, status: str,
                   failed_tests: Optional[List[str]] = None,
                   genprog_log: Optional[str] = None,
                   pos_count: int = 0,
-                  neg_count: int = 0):
+                  neg_count: int = 0,
+                  patched_function: Optional[str] = None,
+                  selected_function: Optional[str] = None):
     """Ghi kết quả một bug vào dict và flush xuống file JSON."""
     tests = bug_record.tests if bug_record else []
     init_passed = [t.get("test_id") for t in tests if t.get("outcome") in ("PASS", "PASSED")]
@@ -613,6 +669,8 @@ def _write_result(results: Dict, results_file: str, bug_id: str, status: str,
 
     results[bug_id] = {
         "status":             status,
+        "patched_function":   patched_function,
+        "selected_function":  selected_function,
         "patch_file":         patch_path,
         "init_passed_tests":  init_passed,
         "init_failed_tests":  init_failed,

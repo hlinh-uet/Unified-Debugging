@@ -1,7 +1,8 @@
 import os
 import json
 
-from configs.path import EXPERIMENTS_DIR, PATCHES_DIR
+from configs.path import EXPERIMENTS_DIR, PATCHES_DIR, CODEFLAWS_SOURCE_DIR
+from core.utils import extract_function_code
 
 try:
     import Levenshtein
@@ -12,20 +13,20 @@ except ImportError:
 
 def evaluate_apr(dataset: str = "codeflaws"):
     """
-    Đánh giá APR trên tất cả các kết quả APR có trong experiments/:
-      - apr_results.json        (LLM-based APR)
-      - apr_mutation_results.json (Mutation-based APR)
-      - apr_genprog_results.json  (GenProg APR)
+    Đánh giá APR trên tất cả các kết quả APR có trong experiments/.
 
     Metrics:
-      - Plausible Fix Rate: % bugs mà patch pass 100% tests (trên bugs đã thực sự thử, không kể skipped)
-      - Fixed Initial Fails: patch sửa được các test fail ban đầu (dù có thể tạo regression)
-      - Regression Rate: % bugs mà patch sửa fail cũ nhưng gây fail test pass cũ
-      - Edit Distance trung bình so với accepted patch (nếu có file accepted)
+      - Plausible Fix Rate
+      - Fixed Initial Fails / Regression Rate
+      - Edit Distance (function-level): patched_function vs accepted_function
     """
     print(f"\n{'='*70}")
     print(f"  BÁO CÁO ĐÁNH GIÁ AUTOMATED PROGRAM REPAIR (APR) — '{dataset}'")
     print(f"{'='*70}")
+
+    if not HAS_LEVENSHTEIN:
+        print("  [WARN] Thư viện 'python-Levenshtein' chưa cài. Edit Distance sẽ không được tính.")
+        print("         Cài bằng: pip install python-Levenshtein")
 
     apr_files = [
         ("LLM-based APR",       "apr_results.json"),
@@ -58,8 +59,7 @@ def _evaluate_one_apr(label: str, apr_results_file: str, dataset: str):
     fixed_fails  = 0
     regressions  = 0
 
-    total_edit_dist = 0
-    edit_dist_count = 0
+    edit_distances = []
 
     col_w = (35, 12, 12, 22, 10)
     header = (
@@ -113,10 +113,9 @@ def _evaluate_one_apr(label: str, apr_results_file: str, dataset: str):
             elif init_failed_list:
                 fixed_label = "No"
 
-            edit_dist = _calc_edit_distance(bug_id, bug_res)
+            edit_dist = _calc_edit_distance(bug_id, bug_res, dataset)
             if edit_dist >= 0:
-                total_edit_dist += edit_dist
-                edit_dist_count += 1
+                edit_distances.append(edit_dist)
 
         print(
             f"{bug_id:<{col_w[0]}} | "
@@ -136,45 +135,74 @@ def _evaluate_one_apr(label: str, apr_results_file: str, dataset: str):
         print(f"  Sửa được fail ban đầu:   {fixed_fails}/{attempted} ({fixed_fails/attempted*100:.2f}%)")
         print(f"  Gây regression:          {regressions}/{attempted} ({regressions/attempted*100:.2f}%)")
 
-    if edit_dist_count > 0:
-        avg_dist = total_edit_dist / edit_dist_count
-        print(f"  Edit Distance TB so với accepted: {avg_dist:.2f} ký tự ({edit_dist_count} bugs có dữ liệu)")
+    if edit_distances:
+        _print_edit_distance_stats(edit_distances, attempted)
+    elif HAS_LEVENSHTEIN:
+        print(f"\n  Edit Distance: Không bug nào có patched_function để so sánh.")
 
 
-def _calc_edit_distance(bug_id: str, bug_res: dict) -> int:
+def _print_edit_distance_stats(edit_distances, attempted):
+    """In thống kê edit distance."""
+    n = len(edit_distances)
+    avg_dist = sum(edit_distances) / n
+    sorted_d = sorted(edit_distances)
+    median_dist = sorted_d[n // 2]
+    min_dist = sorted_d[0]
+    max_dist = sorted_d[-1]
+
+    print(f"\n  --- Edit Distance (patched_function vs accepted_function) ---")
+    print(f"  Số bugs có dữ liệu:   {n}/{attempted}")
+    print(f"  Trung bình (Mean):     {avg_dist:.2f}")
+    print(f"  Trung vị (Median):     {median_dist}")
+    print(f"  Min:                   {min_dist}")
+    print(f"  Max:                   {max_dist}")
+
+
+def _get_accepted_path(bug_id: str) -> str:
     """
-    Tính Levenshtein edit distance giữa patched code và accepted patch.
-    So sánh toàn bộ file patched vs toàn bộ file accepted (cùng granularity).
+    Lấy đường dẫn file accepted từ benchmark.
+    bug_id='104-A-bug-15369048-15370159' → benchmark/.../104-A-15370159.c
+    """
+    try:
+        parts = bug_id.split("-bug-")
+        prefix = parts[0]
+        accepted_ver = parts[1].split("-")[1]
+        return os.path.join(CODEFLAWS_SOURCE_DIR, bug_id, f"{prefix}-{accepted_ver}.c")
+    except (IndexError, ValueError):
+        return ""
+
+
+def _calc_edit_distance(bug_id: str, bug_res: dict, dataset: str) -> int:
+    """
+    Tính Levenshtein edit distance giữa patched_function (hàm do APR tạo)
+    và accepted_function (hàm tương ứng trích từ file accepted của benchmark).
+
+    So sánh ở mức function-level: cùng hàm, cùng granularity.
     Trả về -1 nếu không tính được.
     """
     if not HAS_LEVENSHTEIN:
         return -1
 
-    patched_code = bug_res.get("patched_function", "")
-    if not patched_code or not patched_code.strip():
+    patched_func = bug_res.get("patched_function")
+    if not patched_func or not patched_func.strip():
         return -1
 
-    correct_patch_path = os.path.join(EXPERIMENTS_DIR, "correct_patches", f"{bug_id}_accepted.c")
-    patch_file_path = bug_res.get("patch_file") or os.path.join(PATCHES_DIR, f"{bug_id}_patch.c")
+    selected_func = bug_res.get("selected_function", "")
+    if not selected_func:
+        return -1
 
-    if os.path.exists(correct_patch_path) and os.path.exists(patch_file_path):
-        try:
-            with open(correct_patch_path, "r") as f:
-                correct_code = f.read().strip()
-            with open(patch_file_path, "r") as f:
-                patched_full = f.read().strip()
-            if correct_code and patched_full:
-                return Levenshtein.distance(patched_full, correct_code)
-        except Exception:
-            pass
+    accepted_path = _get_accepted_path(bug_id)
+    if not accepted_path or not os.path.exists(accepted_path):
+        return -1
 
-    if os.path.exists(correct_patch_path):
-        try:
-            with open(correct_patch_path, "r") as f:
-                correct_code = f.read().strip()
-            if correct_code:
-                return Levenshtein.distance(patched_code.strip(), correct_code)
-        except Exception:
-            pass
+    try:
+        with open(accepted_path, "r") as f:
+            accepted_code = f.read()
+    except Exception:
+        return -1
 
-    return -1
+    accepted_func, _, _ = extract_function_code(accepted_code, selected_func)
+    if not accepted_func:
+        return -1
+
+    return Levenshtein.distance(patched_func.strip(), accepted_func.strip())
