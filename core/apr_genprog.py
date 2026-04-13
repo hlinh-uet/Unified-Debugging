@@ -325,69 +325,119 @@ def _save_patch(work_dir: str, bug_id: str, cfile: str) -> Optional[str]:
 
 def _validate_patch(work_dir: str, cfile: str, bug_id: str) -> Tuple[List[str], List[str]]:
     """
-    Chạy test-genprog.sh trên toàn bộ test case để xác nhận bản vá.
+    Validate bản vá GenProg bằng cách compile và chạy test trực tiếp (không dùng
+    test-genprog.sh vì script đó phụ thuộc GNU time/diff, không chạy trên macOS).
 
-    Tương đương validate-fix-genprog.sh:
     1. Copy repair/<cfile> đè lên <cfile> trong workdir.
-    2. Make lại với CFLAGS chuẩn (không dùng cilly).
-    3. Chạy từng test case p<n>, n<n> qua test-genprog.sh.
+    2. Make lại.
+    3. Chạy exe với từng input file, so sánh output.
 
     Trả về (passed_tests, failed_tests).
     """
+    import glob as globmod
+
     repair_dir  = os.path.join(work_dir, "repair")
     repair_file = os.path.join(repair_dir, cfile)
     orig_file   = os.path.join(work_dir, cfile)
-    test_script = os.path.join(work_dir, "test-genprog.sh")
+    exe_name    = cfile.replace(".c", "")
+    exe_path    = os.path.join(work_dir, exe_name)
 
-    if not os.path.exists(repair_file) or not os.path.exists(test_script):
+    if not os.path.exists(repair_file):
         return [], []
 
-    # Backup và ghi đè bản vá
     backup = orig_file + ".bak"
+    passed, failed = [], []
     try:
         shutil.copy2(orig_file, backup)
         shutil.copy2(repair_file, orig_file)
 
-        # Build lại (không cần cilly)
-        build_flags = "-std=c99 -fno-optimize-sibling-calls -fno-strict-aliasing -fno-asm"
         subprocess.run(
             ["make", "clean"], cwd=work_dir,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
         build_res = subprocess.run(
-            ["make", f"CFLAGS={build_flags}"], cwd=work_dir,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            ["make", f"FILENAME={exe_name}"], cwd=work_dir,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=30
         )
         if build_res.returncode != 0:
-            return [], ["Build failed after patch injection"]
+            build_res = subprocess.run(
+                [
+                    "gcc",
+                    "-fno-optimize-sibling-calls", "-fno-strict-aliasing",
+                    "-fno-asm", "-std=c99",
+                    "-Wno-error=implicit-function-declaration",
+                    "-O0", cfile, "-o", exe_name, "-lm"
+                ],
+                cwd=work_dir,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=30
+            )
+            if build_res.returncode != 0:
+                return [], ["Build failed after patch injection"]
 
-        # Lấy danh sách test case từ test-genprog.sh
-        with open(test_script, "r") as f:
-            content = f.read()
-        test_ids = re.findall(r"^([pn]\d+)\)", content, re.MULTILINE)
-
-        passed, failed = [], []
-        for tc in test_ids:
-            try:
-                res = subprocess.run(
-                    ["bash", "test-genprog.sh", tc],
-                    cwd=work_dir,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    timeout=TEST_TIMEOUT, text=True
-                )
-                if res.returncode == 0:
-                    passed.append(tc)
+        for inp in sorted(globmod.glob(os.path.join(work_dir, "input-pos*"))):
+            basename = os.path.basename(inp)
+            num = basename.replace("input-pos", "")
+            out = os.path.join(work_dir, f"output-pos{num}")
+            tc_id = f"pos{num}"
+            if os.path.exists(out):
+                if _run_one_test(exe_path, inp, out):
+                    passed.append(tc_id)
                 else:
-                    failed.append(tc)
-            except subprocess.TimeoutExpired:
-                failed.append(f"{tc}(timeout)")
+                    failed.append(tc_id)
+
+        for inp in sorted(globmod.glob(os.path.join(work_dir, "input-neg*"))):
+            basename = os.path.basename(inp)
+            num = basename.replace("input-neg", "")
+            out = os.path.join(work_dir, f"output-neg{num}")
+            tc_id = f"neg{num}"
+            if os.path.exists(out):
+                if _run_one_test(exe_path, inp, out):
+                    passed.append(tc_id)
+                else:
+                    failed.append(tc_id)
 
     finally:
-        # Phục hồi file gốc dù có exception
         if os.path.exists(backup):
             shutil.move(backup, orig_file)
+        for artifact in [exe_path, os.path.join(work_dir, f"{exe_name}.o")]:
+            if os.path.exists(artifact):
+                os.remove(artifact)
 
     return passed, failed
+
+
+def _run_one_test(exe_path: str, input_file: str, expected_output_file: str,
+                  timeout: int = 10) -> bool:
+    """Chạy exe với input, so sánh stdout với expected output (ignore trailing space)."""
+    try:
+        with open(input_file, "r") as f_in:
+            proc = subprocess.run(
+                [exe_path],
+                stdin=f_in,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout
+            )
+    except (subprocess.TimeoutExpired, Exception):
+        return False
+
+    actual = proc.stdout or ""
+    try:
+        with open(expected_output_file, "r") as f:
+            expected = f.read()
+    except Exception:
+        return False
+
+    actual_lines = [line.rstrip() for line in actual.splitlines()]
+    expected_lines = [line.rstrip() for line in expected.splitlines()]
+    while actual_lines and actual_lines[-1] == "":
+        actual_lines.pop()
+    while expected_lines and expected_lines[-1] == "":
+        expected_lines.pop()
+    return actual_lines == expected_lines
 
 
 # ---------------------------------------------------------------------------

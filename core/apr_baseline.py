@@ -92,18 +92,20 @@ def _build_failed_test_context(bug: BugRecord) -> str:
 
 def _clean_llm_patch(patched_func: str) -> str:
     """Loại bỏ markdown wrapper mà LLM thêm vào nếu có."""
-    if patched_func.startswith("```c"):
-        patched_func = patched_func[4:]
-    elif patched_func.startswith("```cpp"):
-        patched_func = patched_func[6:]
-    elif patched_func.startswith("```"):
-        patched_func = patched_func[3:]
+    patched_func = patched_func.strip()
 
-    if patched_func.endswith("```"):
-        patched_func = patched_func[:-3]
+    # Trường hợp LLM trả về text giải thích + code block
+    code_fence = re.search(r'```(?:c|cpp)?\s*\n', patched_func)
+    if code_fence:
+        start = code_fence.end()
+        end_fence = patched_func.rfind("```")
+        if end_fence > start:
+            patched_func = patched_func[start:end_fence]
+        else:
+            patched_func = patched_func[start:]
 
     lines = patched_func.split("\n")
-    if lines and lines[0].startswith("// Bắt đầu"):
+    if lines and lines[0].strip().startswith("// Bắt đầu"):
         patched_func = "\n".join(lines[1:])
 
     return patched_func.strip()
@@ -177,6 +179,20 @@ def run_apr_pipeline(dataset: str = "codeflaws"):
         target_func  = None
         post_passed  = []
         post_failed  = []
+        attempted    = False
+
+        # Sao lưu accepted patch một lần (cho evaluation sau này)
+        import shutil
+        bug_dir = os.path.dirname(bug_source_path)
+        try:
+            prefix  = "-".join(bug_id.split("-bug-")[0].split("-"))
+            suffix_accepted = bug_id.split("-bug-")[1].split("-")[1]
+            accepted_src = os.path.join(bug_dir, f"{prefix}-{suffix_accepted}.c")
+            os.makedirs(os.path.join(EXPERIMENTS_DIR, "correct_patches"), exist_ok=True)
+            if os.path.exists(accepted_src):
+                shutil.copy2(accepted_src, os.path.join(EXPERIMENTS_DIR, "correct_patches", f"{bug_id}_accepted.c"))
+        except (IndexError, ValueError):
+            pass
 
         for func_name, score in sorted_funcs:
             if score == 0.0:
@@ -189,6 +205,7 @@ def run_apr_pipeline(dataset: str = "codeflaws"):
                 continue
 
             target_func = func_name
+            attempted = True
 
             prompt = f"""Bạn là một chuyên gia sửa lỗi chương trình C/C++.
 Nhiệm vụ của bạn là sửa một lỗi thuật toán hoặc biên dịch trong hàm `{func_name}` của đoạn mã dưới đây (Bug ID: {bug_id}).
@@ -221,19 +238,6 @@ Nhiệm vụ của bạn là sửa một lỗi thuật toán hoặc biên dịch
             with open(tmp_path, "w") as f:
                 f.write(patched_source)
 
-            # Sao lưu accepted patch (nếu có) để đánh giá so sánh
-            import shutil
-            bug_dir = os.path.dirname(bug_source_path)
-            try:
-                prefix  = "-".join(bug_id.split("-bug-")[0].split("-"))
-                suffix_accepted = bug_id.split("-bug-")[1].split("-")[1]
-                accepted_src = os.path.join(bug_dir, f"{prefix}-{suffix_accepted}.c")
-                os.makedirs(os.path.join(EXPERIMENTS_DIR, "correct_patches"), exist_ok=True)
-                if os.path.exists(accepted_src):
-                    shutil.copy2(accepted_src, os.path.join(EXPERIMENTS_DIR, "correct_patches", f"{bug_id}_accepted.c"))
-            except (IndexError, ValueError):
-                pass
-
             is_valid, post_passed, post_failed = validate_patch(tmp_path, bug_id, dataset)
 
             if is_valid:
@@ -247,6 +251,9 @@ Nhiệm vụ của bạn là sửa một lỗi thuật toán hoặc biên dịch
                 print(f"    [FAIL] Bản vá không vượt qua kiểm tra.")
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
+
+        if attempted and status == "skipped":
+            status = "failed"
 
         apr_results[bug_id] = {
             "status":            status,

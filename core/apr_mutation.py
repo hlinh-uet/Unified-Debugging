@@ -152,6 +152,7 @@ def run_mutation_pipeline(dataset: str = "codeflaws"):
             print(f"    → Tạo {len(mutants)} mutants để đưa vào Sandbox...")
 
             found_fix = False
+            best_pass_count = -1
             for i, (m_code, m_desc) in enumerate(mutants):
                 patched_source = source_code[:start_idx] + m_code + source_code[end_idx:]
                 tmp_path = os.path.join(EXPERIMENTS_DIR, f"tmp_{bug_id}.c")
@@ -167,7 +168,7 @@ def run_mutation_pipeline(dataset: str = "codeflaws"):
                     patched_func     = m_code
                     best_mutant_desc = m_desc
                     best_post_passed = post_passed
-                    best_post_failed = []
+                    best_post_failed = post_failed
 
                     patch_path = os.path.join(PATCHES_DIR, f"{bug_id}_mutation_patch.c")
                     os.makedirs(PATCHES_DIR, exist_ok=True)
@@ -175,8 +176,10 @@ def run_mutation_pipeline(dataset: str = "codeflaws"):
                     found_fix = True
                     break
                 else:
-                    best_post_passed = post_passed
-                    best_post_failed = post_failed
+                    if len(post_passed) > best_pass_count:
+                        best_pass_count  = len(post_passed)
+                        best_post_passed = post_passed
+                        best_post_failed = post_failed
                     if os.path.exists(tmp_path):
                         os.remove(tmp_path)
 
