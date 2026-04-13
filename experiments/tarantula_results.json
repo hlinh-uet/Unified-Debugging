@@ -1,5 +1,5 @@
 {
-    "46-D-bug-208314-208422": {
+    "10-A-bug-5914564-5914663": {
         "scores": {
             "main": 0.5
         },
@@ -7,7 +7,7 @@
             "main"
         ]
     },
-    "508-C-bug-9723064-9723081": {
+    "104-A-bug-15369048-15370159": {
         "scores": {
             "main": 0.5
         },
@@ -15,7 +15,7 @@
             "main"
         ]
     },
-    "546-B-bug-13932383-13932411": {
+    "11-A-bug-12698258-12698286": {
         "scores": {
             "main": 0.5
         },
@@ -23,15 +23,15 @@
             "main"
         ]
     },
-    "62-A-bug-7067912-7067978": {
+    "136-A-bug-17335859-17335870": {
         "scores": {
-            "main": 0.5
+            "main": 1.0
         },
         "ground_truth": [
             "main"
         ]
     },
-    "81-B-bug-512758-512761": {
+    "139-A-bug-15693490-15693540": {
         "scores": {
             "main": 0.5
         },
@@ -47,7 +47,15 @@
             "main"
         ]
     },
-    "336-A-bug-6855346-6855367": {
+    "149-B-bug-1170222-1170231": {
+        "scores": {
+            "main": 0.0
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "158-A-bug-18297232-18297267": {
         "scores": {
             "main": 0.5
         },
@@ -55,12 +63,104 @@
             "main"
         ]
     },
-    "490-C-bug-11355146-11356082": {
+    "169-A-bug-16599196-16599272": {
+        "scores": {
+            "compare": 0.5,
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "17-A-bug-13897450-13897498": {
+        "scores": {
+            "isPrime": 0.5,
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "185-A-bug-1914012-1914022": {
+        "scores": {
+            "main": 0.5,
+            "mod": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "190-A-bug-12987931-12987965": {
         "scores": {
             "main": 0.5
         },
         "ground_truth": [
             "main"
+        ]
+    },
+    "190-A-bug-15278915-15278934": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "192-C-bug-1743547-1743565": {
+        "scores": {
+            "max": 0.6470588235294118,
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "197-A-bug-4539529-4539541": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "204-A-bug-10222131-10222140": {
+        "scores": {
+            "power": 0.5454545454545454,
+            "first": 0.5454545454545454,
+            "middle": 0.5454545454545454,
+            "length": 0.5,
+            "nways": 0.5,
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "204-A-bug-2022696-2022698": {
+        "scores": {
+            "x1": 0.5,
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "218-A-bug-2095800-2095813": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "222-E-bug-3016637-3016641": {
+        "scores": {
+            "multiply": 0.6000000000000001,
+            "matexp": 0.5,
+            "main": 0.5
+        },
+        "ground_truth": [
+            "matexp"
         ]
     },
     "236-A-bug-18003976-18004085": {
@@ -71,7 +171,15 @@
             "main"
         ]
     },
-    "447-B-bug-10225828-10225902": {
+    "242-A-bug-16500031-16500336": {
+        "scores": {
+            "main": 1.0
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "258-A-bug-11354670-11354681": {
         "scores": {
             "main": 0.5
         },
@@ -79,42 +187,25 @@
             "main"
         ]
     },
-    "407-B-bug-14668576-14668597": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": []
+    "260-B-bug-2848106-2848120": {
+        "scores": {},
+        "ground_truth": [
+            "FoundDate"
+        ]
     },
-    "158-A-bug-18297232-18297267": {
+    "264-C-bug-16384531-16384572": {
         "scores": {
+            "work": 0.5,
+            "max": 0.5,
             "main": 0.5
         },
         "ground_truth": [
             "main"
         ]
     },
-    "10-A-bug-5914564-5914663": {
+    "27-A-bug-14171055-14171115": {
         "scores": {
-            "main": 0.5
-        },
-        "ground_truth": []
-    },
-    "476-A-bug-15778161-15778167": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": []
-    },
-    "456-A-bug-17586003-17586007": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "518-E-bug-10006532-10006662": {
-        "scores": {
+            "selectionSort": 0.5,
             "main": 0.5
         },
         "ground_truth": [
@@ -129,13 +220,7 @@
             "main"
         ]
     },
-    "298-A-bug-5138379-5138386": {
-        "scores": {},
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "552-A-bug-13285238-13285270": {
+    "271-C-bug-13011289-13011297": {
         "scores": {
             "main": 0.5
         },
@@ -143,12 +228,141 @@
             "main"
         ]
     },
-    "630-I-bug-17126325-17126330": {
+    "272-C-bug-8396359-8396369": {
         "scores": {
             "main": 1.0
         },
         "ground_truth": [
             "main"
+        ]
+    },
+    "276-B-bug-16707425-16707470": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "284-B-bug-4852792-4852817": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "288-A-bug-12735587-12735603": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "298-A-bug-5138379-5138386": {
+        "scores": {},
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "302-A-bug-9364836-9364867": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "31-A-bug-13024144-13024178": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "312-C-bug-3777692-3777976": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "313-B-bug-15165597-15165618": {
+        "scores": {
+            "memoize": 0.5,
+            "main": 0.5
+        },
+        "ground_truth": [
+            "memoize"
+        ]
+    },
+    "315-A-bug-6149995-6150754": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "316-A1-bug-3992417-3992575": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "336-A-bug-6855346-6855367": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "337-A-bug-17720226-17720281": {
+        "scores": {
+            "cmp": 0.5,
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "344-B-bug-14428743-14428779": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "344-B-bug-17327402-17327661": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "355-A-bug-12485897-12485900": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "365-B-bug-11573175-11573200": {
+        "scores": {
+            "checker": 0.5,
+            "main": 0.5
+        },
+        "ground_truth": [
+            "checker"
         ]
     },
     "371-C-bug-5389891-5390013": {
@@ -159,7 +373,7 @@
             "main"
         ]
     },
-    "197-A-bug-4539529-4539541": {
+    "376-A-bug-16700130-16700468": {
         "scores": {
             "main": 0.5
         },
@@ -167,7 +381,15 @@
             "main"
         ]
     },
-    "48-A-bug-18336507-18336566": {
+    "385-B-bug-9215199-9215223": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "399-A-bug-18007016-18007035": {
         "scores": {
             "main": 0.5
         },
@@ -183,11 +405,132 @@
             "main"
         ]
     },
+    "400-A-bug-11086966-11086988": {
+        "scores": {},
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "401-A-bug-16437058-16437078": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "404-B-bug-6177761-6177790": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "407-B-bug-14668576-14668597": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "420-A-bug-14755133-14755144": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
     "430-C-bug-10726761-10726771": {
         "scores": {
             "insert": 1.0,
-            "main": 1.0,
-            "dfs": 1.0
+            "dfs": 1.0,
+            "main": 1.0
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "443-B-bug-6991415-6991443": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "447-A-bug-18296332-18296341": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "447-B-bug-10225828-10225902": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "448-B-bug-10617841-10617857": {
+        "scores": {
+            "manuString": 0.5,
+            "main": 0.5
+        },
+        "ground_truth": [
+            "manuString"
+        ]
+    },
+    "45-D-bug-191189-191239": {
+        "scores": {
+            "match": 0.5,
+            "find": 0.5,
+            "main": 0.5
+        },
+        "ground_truth": [
+            "match"
+        ]
+    },
+    "456-A-bug-17586003-17586007": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "46-D-bug-208314-208422": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "469-A-bug-18026769-18026789": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "476-A-bug-15778161-15778167": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "476-A-bug-16608008-16608059": {
+        "scores": {
+            "main": 0.5
         },
         "ground_truth": [
             "main"
@@ -198,32 +541,11 @@
             "comp": 0.625,
             "main": 0.5
         },
-        "ground_truth": []
-    },
-    "490-E-bug-8866315-8866373": {
-        "scores": {
-            "main": 0.5
-        },
         "ground_truth": [
-            "main"
+            "comp"
         ]
     },
-    "575-D-bug-12872706-12872745": {
-        "scores": {
-            "main": 1.0
-        },
-        "ground_truth": []
-    },
-    "612-C-bug-15186001-15186009": {
-        "scores": {
-            "main": 0.5,
-            "isPair": 0.0
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "139-A-bug-15693490-15693540": {
+    "48-A-bug-18336507-18336566": {
         "scores": {
             "main": 0.5
         },
@@ -240,7 +562,7 @@
             "main"
         ]
     },
-    "31-A-bug-13024144-13024178": {
+    "490-C-bug-11355146-11356082": {
         "scores": {
             "main": 0.5
         },
@@ -248,170 +570,7 @@
             "main"
         ]
     },
-    "242-A-bug-16500031-16500336": {
-        "scores": {
-            "main": 1.0
-        },
-        "ground_truth": []
-    },
-    "11-A-bug-12698258-12698286": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "218-A-bug-2095800-2095813": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "204-A-bug-2022696-2022698": {
-        "scores": {
-            "main": 0.5,
-            "x1": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "192-C-bug-1743547-1743565": {
-        "scores": {
-            "max": 0.6470588235294118,
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "315-A-bug-6149995-6150754": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": []
-    },
-    "5-A-bug-15644200-15644332": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "258-A-bug-11354670-11354681": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "185-A-bug-1914012-1914022": {
-        "scores": {
-            "main": 0.5,
-            "mod": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "344-B-bug-14428743-14428779": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "190-A-bug-12987931-12987965": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "385-B-bug-9215199-9215223": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "260-B-bug-2848106-2848120": {
-        "scores": {},
-        "ground_truth": [
-            "FoundDate"
-        ]
-    },
-    "510-A-bug-16335384-16335403": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": []
-    },
-    "272-C-bug-8396359-8396369": {
-        "scores": {
-            "main": 1.0
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "98-C-bug-792005-792008": {
-        "scores": {
-            "f": 1.0,
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "27-A-bug-14171055-14171115": {
-        "scores": {
-            "main": 0.5,
-            "selectionSort": 0.5
-        },
-        "ground_truth": []
-    },
-    "476-A-bug-16608008-16608059": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "149-B-bug-1170222-1170231": {
-        "scores": {
-            "main": 0.0
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "469-A-bug-18026769-18026789": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "276-B-bug-16707425-16707470": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "633-A-bug-17179947-17180046": {
+    "490-E-bug-8866315-8866373": {
         "scores": {
             "main": 0.5
         },
@@ -423,233 +582,11 @@
         "scores": {
             "main": 0.5
         },
-        "ground_truth": []
-    },
-    "190-A-bug-15278915-15278934": {
-        "scores": {
-            "main": 0.5
-        },
         "ground_truth": [
             "main"
         ]
     },
-    "420-A-bug-14755133-14755144": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "68-A-bug-340593-340627": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "264-C-bug-16384531-16384572": {
-        "scores": {
-            "work": 0.5,
-            "main": 0.5,
-            "max": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "204-A-bug-10222131-10222140": {
-        "scores": {
-            "first": 0.5454545454545454,
-            "power": 0.5454545454545454,
-            "middle": 0.5454545454545454,
-            "nways": 0.5,
-            "length": 0.5,
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "6-C-bug-11148576-11150029": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "658-A-bug-17124240-17124253": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "222-E-bug-3016637-3016641": {
-        "scores": {
-            "multiply": 0.6000000000000001,
-            "main": 0.5,
-            "matexp": 0.5
-        },
-        "ground_truth": [
-            "matexp"
-        ]
-    },
-    "104-A-bug-15369048-15370159": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": []
-    },
-    "443-B-bug-6991415-6991443": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "399-A-bug-18007016-18007035": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "169-A-bug-16599196-16599272": {
-        "scores": {
-            "main": 0.5,
-            "compare": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "558-A-bug-12908146-12908196": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "136-A-bug-17335859-17335870": {
-        "scores": {
-            "main": 1.0
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "284-B-bug-4852792-4852817": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "69-B-bug-350935-350951": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "344-B-bug-17327402-17327661": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "447-A-bug-18296332-18296341": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "17-A-bug-13897450-13897498": {
-        "scores": {
-            "main": 0.5,
-            "isPrime": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "400-A-bug-11086966-11086988": {
-        "scores": {},
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "513-B2-bug-13172231-13172292": {
-        "scores": {
-            "main": 1.0,
-            "permutation": 1.0
-        },
-        "ground_truth": [
-            "permutation"
-        ]
-    },
-    "71-A-bug-18330328-18330409": {
-        "scores": {
-            "main": 1.0
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "365-B-bug-11573175-11573200": {
-        "scores": {
-            "main": 0.5,
-            "checker": 0.5
-        },
-        "ground_truth": []
-    },
-    "316-A1-bug-3992417-3992575": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "53-C-bug-10604859-10605014": {
-        "scores": {
-            "main": 1.0
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "313-B-bug-15165597-15165618": {
-        "scores": {
-            "memoize": 0.5,
-            "main": 0.5
-        },
-        "ground_truth": [
-            "memoize"
-        ]
-    },
-    "312-C-bug-3777692-3777976": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "658-A-bug-18213201-18219933": {
+    "5-A-bug-15644200-15644332": {
         "scores": {
             "main": 0.5
         },
@@ -665,16 +602,123 @@
             "main"
         ]
     },
-    "337-A-bug-17720226-17720281": {
+    "508-C-bug-9723064-9723081": {
         "scores": {
-            "main": 0.5,
-            "cmp": 0.5
+            "main": 0.5
         },
         "ground_truth": [
             "main"
         ]
     },
-    "288-A-bug-12735587-12735603": {
+    "510-A-bug-16335384-16335403": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "513-B2-bug-13172231-13172292": {
+        "scores": {
+            "permutation": 1.0,
+            "main": 1.0
+        },
+        "ground_truth": [
+            "permutation"
+        ]
+    },
+    "518-E-bug-10006532-10006662": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "53-C-bug-10604859-10605014": {
+        "scores": {
+            "main": 1.0
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "546-B-bug-13932383-13932411": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "552-A-bug-13285238-13285270": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "558-A-bug-12908146-12908196": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "575-D-bug-12872706-12872745": {
+        "scores": {
+            "main": 1.0
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "585-B-bug-15514693-15514749": {
+        "scores": {
+            "f": 0.5,
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "592-C-bug-14117787-14117792": {
+        "scores": {
+            "gcd": 1.0,
+            "main": 1.0
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "6-C-bug-11148576-11150029": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "612-C-bug-15186001-15186009": {
+        "scores": {
+            "main": 0.5,
+            "isPair": 0.0
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "614-A-bug-17036012-17036054": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "62-A-bug-7067912-7067978": {
         "scores": {
             "main": 0.5
         },
@@ -686,25 +730,19 @@
         "scores": {
             "main": 0.5
         },
-        "ground_truth": []
+        "ground_truth": [
+            "main"
+        ]
     },
-    "585-B-bug-15514693-15514749": {
+    "630-I-bug-17126325-17126330": {
         "scores": {
-            "main": 0.5,
-            "f": 0.5
+            "main": 1.0
         },
         "ground_truth": [
             "main"
         ]
     },
-    "448-B-bug-10617841-10617857": {
-        "scores": {
-            "main": 0.5,
-            "manuString": 0.5
-        },
-        "ground_truth": []
-    },
-    "376-A-bug-16700130-16700468": {
+    "632-A-bug-16772686-16772703": {
         "scores": {
             "main": 0.5
         },
@@ -712,7 +750,7 @@
             "main"
         ]
     },
-    "302-A-bug-9364836-9364867": {
+    "633-A-bug-17179947-17180046": {
         "scores": {
             "main": 0.5
         },
@@ -720,7 +758,7 @@
             "main"
         ]
     },
-    "355-A-bug-12485897-12485900": {
+    "658-A-bug-17124240-17124253": {
         "scores": {
             "main": 0.5
         },
@@ -728,17 +766,7 @@
             "main"
         ]
     },
-    "45-D-bug-191189-191239": {
-        "scores": {
-            "find": 0.5,
-            "main": 0.5,
-            "match": 0.5
-        },
-        "ground_truth": [
-            "match"
-        ]
-    },
-    "614-A-bug-17036012-17036054": {
+    "658-A-bug-18213201-18219933": {
         "scores": {
             "main": 0.5
         },
@@ -746,7 +774,7 @@
             "main"
         ]
     },
-    "271-C-bug-13011289-13011297": {
+    "68-A-bug-340593-340627": {
         "scores": {
             "main": 0.5
         },
@@ -754,17 +782,33 @@
             "main"
         ]
     },
-    "592-C-bug-14117787-14117792": {
+    "69-B-bug-350935-350951": {
         "scores": {
-            "main": 1.0,
-            "gcd": 1.0
+            "main": 0.5
         },
         "ground_truth": [
             "main"
         ]
     },
-    "404-B-bug-6177761-6177790": {
+    "71-A-bug-18330328-18330409": {
         "scores": {
+            "main": 1.0
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "81-B-bug-512758-512761": {
+        "scores": {
+            "main": 0.5
+        },
+        "ground_truth": [
+            "main"
+        ]
+    },
+    "98-C-bug-792005-792008": {
+        "scores": {
+            "f": 1.0,
             "main": 0.5
         },
         "ground_truth": [

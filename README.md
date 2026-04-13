@@ -108,13 +108,16 @@ python3 main.py --all --dataset codeflaws
 
 ```bash
 # Bước 1 – Fault Localization
-python3 main.py --fl [--dataset codeflaws]
+python3 main.py --fl --dataset codeflaws
 
 # Bước 2a – APR bằng LLM (cần GEMINI_API_KEY)
-python3 main.py --apr [--dataset codeflaws]
+python3 main.py --apr --dataset codeflaws
 
-# Bước 2b – APR bằng Heuristic Mutation (không cần LLM)
-python3 main.py --apr-mutation [--dataset codeflaws]
+# Bước 2b – APR bằng Heuristic Mutation 
+python3 main.py --apr-mutation --dataset codeflaws
+
+# Bước 2c – APR bằng GenProg (Cần cài đặt GenProg)
+python3 main.py --apr-genprog --dataset codeflaws
 
 # Bước 3 – Evaluation
 python3 main.py --eval
@@ -128,6 +131,7 @@ python3 main.py --eval
 | `--fl` | Chỉ chạy Fault Localization |
 | `--apr` | Chỉ chạy APR với LLM |
 | `--apr-mutation` | Chỉ chạy APR với Heuristic Mutation |
+| `--apr-mutation` | Chỉ chạy APR với Genprog |
 | `--eval` | Chỉ chạy Evaluation |
 | `--all` | Chạy FL → APR LLM → Evaluation |
 
@@ -184,3 +188,56 @@ if dataset_name.lower() == "defects4c":
 | Trích xuất hàm C bằng Regex dễ sai với macro/comment chứa `{}` | Dùng `pycparser`, Clang AST hoặc `tree-sitter` |
 | Context window LLM bị giới hạn với file C lớn | Nén prompt, chỉ truyền hàm liên quan thay vì toàn bộ file |
 | `google-generativeai` đã deprecated | Chuyển sang `google.genai` (SDK mới) |
+
+
+## Cài đặt GenProg (tool APR)
+### Cách 1: Dùng Docker: 
+```bash
+# Pull image có sẵn GenProg + CIL
+docker pull squareslab/genprog
+
+# Chạy container, mount workspace vào
+docker run -it \
+  -v "/Users/linhnh/Documents/Fault Localization:/workspace" \
+  squareslab/genprog \
+  /bin/bash
+
+# Trong container, kiểm tra GenProg binary
+which repair
+# => /root/genprog-code/src/repair (hoặc tương tự)
+```
+
+Sau khi biết path của binary `repair` trong container, bạn có thể chạy pipeline từ trong container, hoặc set `GENPROG_BIN` trong file `.env`: 
+```bash
+GENPROG_BIN=/root/genprog-code/src/repair
+```
+
+### Cách 2: Build từ source
+
+```bash
+# 1. Cài OCaml + opam
+brew install opam ocaml
+opam init -y
+eval $(opam env)
+
+# 2. Cài CIL (C Intermediate Language) - GenProg phụ thuộc vào nó
+opam install cil
+
+# 3. Clone GenProg source v3.0
+cd ~/
+git clone https://github.com/squaresLab/genprog-code.git
+cd genprog-code/src
+
+# 4. Build
+make
+
+# 5. Kiểm tra binary
+./repair --help
+```
+
+Nếu build thành công, set trong file `.env` ở thư mục `Unified-Debugging/`: 
+
+```bash
+GENPROG_BIN=/Users/linhnh/genprog-code/src/repair
+```
+

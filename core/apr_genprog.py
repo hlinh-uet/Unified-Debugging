@@ -54,10 +54,8 @@ GENPROG_TIMEOUT = int(os.getenv("GENPROG_TIMEOUT", "3600"))  # giây (mặc đ�
 TEST_TIMEOUT    = int(os.getenv("GENPROG_TEST_TIMEOUT", "50"))  # giây mỗi test case
 
 # Thư mục chứa file configuration-default và compile.pl (copy từ all-script)
-GENPROG_SCRIPTS_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(EXPERIMENTS_DIR))),
-    "codeflaws", "all-script"
-)
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+GENPROG_SCRIPTS_DIR = os.path.join(_BASE_DIR, "codeflaws", "all-script")
 
 # Thư mục tạm để GenProg chạy (workdir)
 GENPROG_RUN_DIR = os.path.join(EXPERIMENTS_DIR, "genprog-run")
@@ -286,7 +284,7 @@ def _determine_status(output: str) -> str:
         return "timeout"
     if "Failed to make" in output or "BUILDFAILED" in output:
         return "build_failed"
-    if "ERROR" in output and "not found" in output:
+    if "ERROR" in output and ("not found" in output or "không tìm thấy" in output):
         return "error"
     return "no_repair"
 
