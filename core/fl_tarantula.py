@@ -6,8 +6,8 @@ def calculate_tarantula(test_data):
     """
     total_passed = 0
     total_failed = 0
-    method_passed = {}
-    method_failed = {}
+    method_passed = {} # Số lần mỗi hàm được kiểm tra và pass
+    method_failed = {} # Số lần mỗi hàm được kiểm tra và fail
 
     for test in test_data:
         outcome = test.get('outcome', '').upper()

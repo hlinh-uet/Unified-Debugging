@@ -1,76 +1,255 @@
-# Hướng dẫn Quy trình Hoạt động của Dự án Unified-Debugging
+# Kiến trúc và Luồng hoạt động – Unified-Debugging
 
 ---
 
-## 1. Tổng quan luồng hệ thống (Pipeline)
+## 1. Tổng quan kiến trúc
 
-Hệ thống được thiết kế dưới dạng một pipeline nối tiếp nhau, thực thi theo luồng:
-**Data Loader** ➔ **Fault Localization (FL)** ➔ **Automated Program Repair (APR)** ➔ **Evaluation**
-
-*   **Chạy toàn bộ pipeline:** `python3 main.py --all` (hoặc `python3 main.py`)
-*   **Chỉ chạy định vị lỗi (FL):** `python3 main.py --fl`
-*   **Chỉ chạy APR sử dụng LLM:** `python3 main.py --apr`
-*   **Chỉ chạy APR sử dụng Heuristic Mutation (Không LLM):** `python3 main.py --apr-mutation`
-*   **Chỉ chạy đánh giá kết quả (Evaluation):** `python3 main.py --eval`
-
----
-
-## 2. Giao tiếp với dữ liệu (Sandbox Adapter)
-
-Dự án tương tác với mã nguồn và dữ liệu test của các benchmark thông qua kiến trúc **Sandbox Adapter** (khai báo tại `core/sandbox_adapter.py`). 
-Điều này cho phép hệ thống làm việc với mọi bộ dữ liệu như Codeflaws, Defects4C,... mà không cần phải thay đổi mã nguồn cốt lõi (hardcode). Tham khảo File `DATASET_STANDARDS.md` để tự tạo File Adapter nếu bạn muốn cắm một bộ dữ liệu hoàn toàn mới vào.
-
-*   **Đầu vào của FL (Thông tin Độ bao phủ - Coverage Info):** Hệ thống đọc các file kết quả (metadata JSON) chứa thông tin test (P/F) cùng với độ bao phủ lệnh (statement coverage) tại môi trường gốc.
-*   **Đầu vào của APR (Mã nguồn & kịch bản kiểm thử):** Đọc mã nguồn lỗi (ví dụ file `*.c`), các file bản vá đúng (nếu có để tham chiếu đánh giá) thông qua Adapter được chỉ định.
-*   **Đầu ra của hệ thống:** Mọi file kết quả JSON, log thực thi, kết hợp đánh giá và file bản vá thành công được lưu tập trung trong thư mục `experiments/`.
-
----
-
-## 3. Định vị lỗi (Fault Localization - FL)
-
-Mục tiêu của quá trình này là tìm ra chính xác các hàm (functions) có nguy cơ chứa lỗi cao nhất, rút gọn độ lớn ngữ cảnh cho LLM bước tiếp theo.
-
-**Các bước thực hiện:**
-1.  **Dữ liệu đầu vào:** Trích xuất ma trận thông tin bao phủ lệnh của từng test case bằng công cụ thu thập (`data_collector.py`).
-2.  **Tính điểm nghi ngờ (Suspiciousness Score):** Module `core/fl_tarantula.py` chạy thuật toán Tarantula trên toàn bộ mã nguồn để chấm điểm. Hàm được bao phủ nhiều bởi failed-tests sẽ có điểm số cao.
-3.  **Lưu trữ vị trí lỗi:** Danh sách các hàm sắp xếp theo điểm nghi ngờ từ cao xuống thấp được lưu trữ vào `experiments/tarantula_results.json`.
-4.  **Đánh giá độ chính xác (FL Evaluation):** Scripts `evaluation/eval_fl.py` tra cứu tệp lỗi gốc (ground truth) có nằm trong Top-1, Top-3, Top-5 danh sách từ thuật toán hay không.
-
----
-
-## 4. Sửa lỗi tự động (Automated Program Repair - APR)
-
-Hệ thống cung cấp **2 phương pháp (Baseline)** để tự động sinh ra bản vá dựa trên lỗi do FL truyền vào. Cả hai phương pháp đều tái sử dụng chung cơ chế kiểm chứng hộp cát (Sandbox Validation).
-
-### Phương pháp 1: Sửa lỗi bằng Generative AI (LLM - Gemini)
-**Tệp thực thi:** `core/apr_baseline.py`
-1.  **Trích xuất mã nguồn:** Đọc `tarantula_results.json` để xác định C-function tiềm ẩn lỗi. Tách riêng phần mã nguồn của hàm đó.
-2.  **Giao tiếp Mô hình LLM:** Tạo một prompt kết hợp toàn bộ code lỗi cùng thông tin File JSON Test-Case bị FAIL, gửi đến Google Gemini. LLM trả về source code được kỳ vọng đã fix lỗi.
-3.  **Hộp cát kiểm thử (Adapter Sandbox Validation):** 
-    *   Tự động *backup* mã nguồn gốc.
-    *   Bơm trực tiếp đoạn mã sửa lỗi của LLM đè lên nội dung hàm bị lỗi.
-    *   Adapter sẽ tùy biến lệnh Sandbox để gọi Compile và chạy từng script test của bộ dữ liệu đó.
-    *   Thu thập log Pass/Fail mới nhất từ môi trường thực thi để lọc bản vá sai.
-4.  **Xử lý hậu kỳ (Cleanup & Export):** 
-    *   Lưu quá trình vào `experiments/apr_results.json`.
-    *   Phục hồi (revert) source code file để tránh làm hỏng bộ dữ liệu. Nếu Plausible: Đẩy bản vá vào `experiments/correct_patches/`.
-
-### Phương pháp 2: Sửa lỗi bằng Heuristic Mutation (Local, No LLM)
-**Tệp thực thi:** `core/apr_mutation.py`
-Đây là phương pháp học hỏi theo các Baseline kinh điển (như GenProg, SPR), hoạt động bằng 100% tài nguyên CPU thực tế cục bộ mà không sử dụng bất kỳ API Token nào.
-1.  **Trích xuất mã nguồn:** Tương tự như dùng LLM.
-2.  **Đột biến mã (Mutagenesis):** Bộ biểu thức chính quy (Regex) quét qua hàm bị lỗi để sinh ra hàng tá phiên bản thay thế (Mutants). Chẳng hạn: hoán đổi `<`, `>` thành `<=`, hoặc sửa dấu `+`, `-` để khắc phục lỗi biên ngụy (Off-by-one errors) rất hay gặp ở Codeforces.
-3.  **Dò tìm (Heuristic Search):** Nạp toàn bộ Mutants vừa tạo vào Adapter Sandbox Validation để quét liên tục.
-4.  **Xử lý hậu kỳ:** Mutant nào qua 100% Test Case sẽ được ghi nhận vào file báo cáo `experiments/apr_mutation_results.json`.
+```
+┌─────────────────────── main.py ────────────────────────────┐
+│  python3 main.py --dataset <name> [--fl|--apr|--eval|--all] │
+└─────────────────────┬──────────────────────────────────────┘
+                      │
+          ┌───────────▼────────────┐
+          │   data_loaders/        │   ← Entry-point duy nhất để nạp dữ liệu
+          │   get_loader(dataset)  │
+          │   → List[BugRecord]    │
+          └───────┬────────────────┘
+                  │  (một lần duy nhất, dùng chung cho FL + APR)
+        ┌─────────┴──────────────┐
+        │                        │
+┌───────▼──────┐        ┌────────▼──────────────────────────┐
+│  core/       │        │  core/                             │
+│  fl_tarantula│        │  apr_baseline.py  (LLM – Gemini)  │
+│  .py         │        │  apr_mutation.py  (Heuristic)      │
+└───────┬──────┘        └────────┬──────────────────────────┘
+        │                        │
+        │                ┌───────▼───────────────────────────┐
+        │                │  data_loaders/sandbox_adapter.py  │
+        │                │  SandboxAdapter.validate()        │
+        │                │  → compile + chạy test            │
+        │                └───────────────────────────────────┘
+        │
+┌───────▼─────────────────────────┐
+│  experiments/                    │
+│  tarantula_results.json          │
+│  apr_results.json                │
+│  apr_mutation_results.json       │
+└───────┬─────────────────────────┘
+        │
+┌───────▼──────────────────────────┐
+│  evaluation/                     │
+│  eval_fl.py   eval_apr.py        │
+└──────────────────────────────────┘
+```
 
 ---
 
-## 5. Đánh giá hệ thống (Evaluation)
+## 2. Lớp Data Loader (Thống nhất)
 
-Hệ thống có cơ chế tự động đánh giá sự hiệu quả của toàn bộ Pipeline để đưa ra báo cáo chi tiết. Toàn quyền thay đổi bởi `evaluation/eval_apr.py` & `evaluation/eval_fl.py`.
+### 2.1 Tại sao cần lớp này?
 
-*   **Tỉ lệ sửa thành công (Plausible Fix Rate):** Tính tỉ lệ số lượng bugs được vá thành công vĩnh viễn chia cho tổng số bugs thực thi.
-*   **Regression Tracking:** Đếm số lượng test cases thất bại (Fail) ban đầu có được vá hay không (Fixed Init Fails?), đồng thời báo cáo nếu patch làm vỡ logic của test cases đang chạy đúng (Regressions).
-*   **Edit Distance (Levenshtein):** Với các bản code đã fix, đo đạc khoảng cách chuỗi (Levenshtein distance) so với đoạn code chuẩn mà nhà phát triển (developer) thực tế đã sửa (Ground-truth accepted patches). Giúp đánh giá độ "tự nhiên" và "ngắn gọn" của AI sinh ra.
+Trước đây FL và APR mỗi bước tự đọc lại file JSON riêng, gây rời rạc và khó mở rộng sang dataset mới. Giờ toàn bộ đi qua một interface duy nhất:
 
+```python
+from data_loaders.base_loader import get_loader
 
+loader = get_loader("codeflaws")   # hoặc "defects4c", ...
+bugs   = loader.load_all()         # → List[BugRecord]
+```
+
+### 2.2 BugRecord – Chuẩn dữ liệu dùng chung
+
+```python
+@dataclass
+class BugRecord:
+    bug_id            : str           # ID của bug
+    dataset           : str           # tên dataset
+    tests             : List[dict]    # danh sách test case (PASS/FAIL)
+    ground_truth      : List[str]     # hàm lỗi thực sự (nếu có)
+    source_file       : str           # đường dẫn tuyệt đối file .c
+    compile_cmd       : Optional[str] # lệnh compile (nếu cần)
+    test_cmd_template : Optional[str] # template lệnh chạy test
+    raw               : Optional[dict]# raw JSON gốc
+```
+
+Cấu trúc `tests` bên trong mỗi `BugRecord` tuân theo chuẩn trong `DATASET_STANDARDS.md`:
+
+```json
+{
+  "test_id": "neg1",
+  "outcome": "FAIL",
+  "expected_output": "10",
+  "actual_output": "0",
+  "fail_reason": "Output mismatch"
+}
+```
+
+### 2.3 Thêm dataset mới
+
+**Bước 1 – Tạo Loader** (`data_loaders/<dataset>_loader.py`):
+
+```python
+from data_loaders.base_loader import BugLoader, BugRecord
+
+class Defects4CLoader(BugLoader):
+    def load_all(self) -> List[BugRecord]:
+        # Đọc file JSON / thư mục dataset của bạn
+        # Trả về List[BugRecord] theo chuẩn
+        ...
+```
+
+**Bước 2 – Tạo Sandbox Adapter** (`data_loaders/sandbox_adapter.py`):
+
+```python
+class Defects4CAdapter(SandboxAdapter):
+    def get_source_path(self) -> str:
+        # Đường dẫn tuyệt đối đến file .c cần sửa
+        ...
+
+    def validate(self, patched_file_path: str):
+        # 1. Backup file gốc
+        # 2. Ghi đè bằng bản vá
+        # 3. Compile → test
+        # 4. Phục hồi file gốc
+        # 5. return (is_valid, passed_tests, failed_tests)
+        ...
+```
+
+**Bước 3 – Đăng ký** vào factory:
+
+```python
+# data_loaders/base_loader.py → get_loader()
+if name == "defects4c":
+    from data_loaders.defects4c_loader import Defects4CLoader
+    return Defects4CLoader()
+
+# data_loaders/sandbox_adapter.py → get_sandbox_adapter()
+if dataset_name.lower() == "defects4c":
+    return Defects4CAdapter(bug_id)
+```
+
+---
+
+## 3. Fault Localization (FL)
+
+**File:** `core/fl_tarantula.py`  
+**Input:** `List[BugRecord]` từ `get_loader()`  
+**Output:** `experiments/tarantula_results.json`
+
+### Thuật toán Tarantula
+
+Với mỗi hàm $m$, di số nghi ngờ được tính:
+
+$$\text{score}(m) = \frac{ \frac{f_m}{T_f} }{ \frac{f_m}{T_f} + \frac{p_m}{T_p} }$$
+
+Trong đó:
+- $f_m$ = số test FAIL có cover hàm $m$
+- $p_m$ = số test PASS có cover hàm $m$
+- $T_f$, $T_p$ = tổng số test FAIL / PASS
+
+### Output format
+
+```json
+{
+  "476-A-bug-16608008-16608059": {
+    "scores": {
+      "solve": 1.0,
+      "main": 0.5
+    },
+    "ground_truth": ["solve"]
+  }
+}
+```
+
+---
+
+## 4. Automated Program Repair (APR)
+
+APR đọc `tarantula_results.json` để lấy thứ tự ưu tiên hàm, đồng thời nạp lại `BugRecord` (qua `get_loader()`) để lấy thông tin test context mà **không cần đọc file disk thêm lần nào**.
+
+### 4.1 APR bằng LLM (`core/apr_baseline.py`)
+
+```
+Với mỗi bug:
+  1. Lấy danh sách hàm nghi ngờ từ tarantula_results.json (sắp xếp giảm dần)
+  2. extract_function_code() → trích xuất mã nguồn hàm (từ core/utils.py)
+  3. Xây dựng prompt với context test FAIL từ BugRecord.tests
+  4. Gọi call_llm() → Gemini sinh bản vá
+  5. SandboxAdapter.validate() → compile + chạy test
+  6. Nếu pass 100%: lưu vào experiments/patches/
+  7. Ghi kết quả vào experiments/apr_results.json (incremental)
+```
+
+### 4.2 APR bằng Heuristic Mutation (`core/apr_mutation.py`)
+
+Không cần LLM. Sinh các biến thể (mutants) bằng Regex trên mã nguồn hàm:
+
+| Loại đột biến | Ví dụ |
+|---|---|
+| Quan hệ so sánh | `<` → `<=`, `>`, `>=`, `==`, `!=` |
+| Toán tử số học | `+` → `-` và ngược lại |
+| Off-by-one | `+ 1` → `- 1` hoặc bỏ hẳn |
+
+Mỗi mutant được nạp vào `SandboxAdapter.validate()`. Mutant nào vượt qua 100% test sẽ được lưu vào `experiments/patches/`.
+
+### 4.3 Sandbox Adapter
+
+`data_loaders/sandbox_adapter.py` thực hiện kiểm chứng an toàn trong sandbox:
+
+1. **Backup** file gốc (`*.bak`)
+2. **Ghi đè** bản vá lên file gốc
+3. **Compile** (make hoặc gcc)
+4. **Chạy test** (`bash test-genprog.sh <test_id>`)
+5. **Phục hồi** file gốc từ backup
+6. Trả về `(is_valid, passed_tests, failed_tests)`
+
+File gốc **luôn được phục hồi** ngay cả khi có exception (`finally` block).
+
+---
+
+## 5. Tiện ích dùng chung (`core/utils.py`)
+
+### `extract_function_code(source_code, func_name)`
+
+Trích xuất mã nguồn của một hàm C từ chuỗi source:
+- Dùng Regex để tìm điểm bắt đầu (signature + `{`)
+- Đếm ngoặc nhọn để tìm điểm kết thúc
+- Có fallback riêng cho hàm `main`
+
+> **Giới hạn:** Hoạt động không đúng nếu `{` / `}` xuất hiện trong string literals hoặc macro. Hướng nâng cấp: dùng `pycparser` hoặc `tree-sitter`.
+
+---
+
+## 6. Evaluation
+
+### FL – `evaluation/eval_fl.py`
+
+Đọc `tarantula_results.json`, so ground truth với Top-K hàm nghi ngờ:
+
+- **Top-1 Hit Rate**: hàm lỗi thực sự nằm ở vị trí #1
+- **Top-3 Hit Rate**: nằm trong Top 3
+- **Top-5 Hit Rate**: nằm trong Top 5
+
+### APR – `evaluation/eval_apr.py`
+
+Đọc `apr_results.json` (dữ liệu init test được lấy từ trường đã lưu trong file, không đọc lại disk):
+
+| Chỉ số | Mô tả |
+|---|---|
+| **Plausible Fix Rate** | % bug pass 100% test sau vá |
+| **Fixed Initial Fails** | APR đã sửa được các test fail ban đầu chưa |
+| **Yes (Regressions)** | Sửa được lỗi gốc nhưng làm hỏng test khác |
+| **Edit Distance** | Khoảng cách Levenshtein so với accepted patch |
+
+---
+
+## 7. Cấu hình đường dẫn (`configs/path.py`)
+
+Tất cả đường dẫn được định nghĩa một chỗ duy nhất. Nếu muốn thay đổi vị trí dataset hoặc thư mục kết quả, chỉ cần sửa file này:
+
+```python
+CODEFLAWS_RESULTS_DIR  # Thư mục chứa file JSON kết quả test
+CODEFLAWS_SOURCE_DIR   # Thư mục chứa mã nguồn C của benchmark
+EXPERIMENTS_DIR        # Thư mục lưu kết quả pipeline
+PATCHES_DIR            # Thư mục lưu các bản vá thành công
+```

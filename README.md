@@ -1,113 +1,186 @@
 # Unified-Debugging Pipeline
 
-## Cấu trúc 
+Hệ thống tự động **Định vị lỗi (Fault Localization)** và **Sửa lỗi tự động (Automated Program Repair)** cho các chương trình C, hỗ trợ nhiều bộ dữ liệu (Codeflaws, Defects4C, ...) thông qua kiến trúc mở rộng Adapter.
 
-- `core/`: Chứa các thuật toán xử lý chính
-  - `fl_tarantula.py`
-  - `apr_baseline.py`: Bộ sinh bản vá tự động dựa trên LLM prompt.
-  - `apr_mutation.py`: Môi trường sinh bản vá đột biến ngẫu nhiên (Local Heuristic Mutation) không sử dụng LLM API.
-  - `sandbox_adapter.py`: Khung chuyển đổi (Adapter) cho phép hệ thống gọi test-script và compiler của mọi bộ dữ liệu khác nhau một cách thống nhất.
-- `evaluation/`: Module đánh giá và báo cáo.
-  - `eval_fl.py`: Đánh giá Fault Localization 
-  - `eval_apr.py`: Đánh giá Automatic Program Repair 
-- `data_loaders/`: Các module đọc kết quả JSON / nguồn C của bug.
-- `configs/path.py`: Nơi thiết lập thư mục trỏ đến `codeflaws` repository (Tự động config)
-- `experiments/`: Khởi tạo sau khi chạy test để lưu trữ kết quả phân tích Tarantula (`tarantula_results.json`) và nơi lưu Patch thành công (`patches/`).
+---
+
+## Cấu trúc dự án
+
+```
+Unified-Debugging/
+├── main.py                    # Entry-point duy nhất – điều phối toàn bộ pipeline
+├── requirements.txt
+├── .env.example               # Mẫu biến môi trường (API Key)
+│
+├── configs/
+│   └── path.py                # Cấu hình đường dẫn tập trung
+│
+├── data_loaders/              # Lớp tải dữ liệu thống nhất
+│   ├── __init__.py
+│   ├── base_loader.py         # Abstract BugLoader + BugRecord + factory get_loader()
+│   ├── codeflaws_loader.py    # Concrete loader cho dataset Codeflaws
+│   └── sandbox_adapter.py     # Sandbox Adapter (compile + chạy test) theo dataset
+│
+├── core/                      # Logic nghiệp vụ chính
+│   ├── utils.py               # Tiện ích dùng chung (extract_function_code, ...)
+│   ├── fl_tarantula.py        # Thuật toán Fault Localization – Tarantula
+│   ├── apr_baseline.py        # APR với LLM (Gemini)
+│   └── apr_mutation.py        # APR với Heuristic Mutation (không cần LLM)
+│
+├── evaluation/                # Đánh giá và báo cáo
+│   ├── eval_fl.py             # Đánh giá FL: Top-1/3/5 Hit Rate
+│   └── eval_apr.py            # Đánh giá APR: Fix Rate, Regression, Edit Distance
+│
+├── experiments/               # Sinh ra sau khi chạy – chứa kết quả
+│   ├── tarantula_results.json
+│   ├── apr_results.json
+│   ├── apr_mutation_results.json
+│   └── correct_patches/       # Bản vá tham chiếu (accepted patches)
+│
+├── DATASET_STANDARDS.md       # Chuẩn định dạng dữ liệu để thêm dataset mới
+├── INSTRUCTION.md             # Chi tiết kiến trúc và luồng hoạt động
+└── README.md                  # Tài liệu này
+```
+
+---
+
+## Luồng hoạt động
+
+```
+get_loader(dataset)
+      │
+      ▼
+ [BugRecord list]
+      │
+      ├──► FL (Tarantula) ──► tarantula_results.json
+      │
+      └──► APR ─┬─► LLM (Gemini)       ──► apr_results.json
+                └─► Heuristic Mutation  ──► apr_mutation_results.json
+                        │
+                        ▼
+                Sandbox Adapter (compile + test)
+                        │
+                        ▼
+                  Evaluation Report
+```
+
+**Điểm quan trọng:** FL và APR đều dùng **một lần load dữ liệu duy nhất** thông qua `get_loader()` → trả về `List[BugRecord]`. Không module nào đọc lại file JSON gốc sau bước này.
+
+---
 
 ## Thiết lập môi trường
-### 1. Tạo môi trường ảo
+
+### 1. Tạo và kích hoạt môi trường ảo
+
 ```bash
 python3 -m venv .venv
+source .venv/bin/activate        # Mac / Linux
+# .venv\Scripts\activate         # Windows
 ```
 
-### 2. Kích hoạt môi trường:
-- Trên Mac/Linux:
-```bash
-source .venv/bin/activate
-```
-- Trên Windows:
-```bash
-.venv\Scripts\activate
-```
+### 2. Cài đặt thư viện
 
-### 3. Cài đặt thư viện:
 ```bash
 pip install -r requirements.txt
 ```
 
-### 4. Cấu hình biến môi trường (API Keys):
-Sao chép file mẫu và cấu hình thư viện LLM.
+### 3. Cấu hình API Key
+
 ```bash
 cp .env.example .env
-```
-Mở tệp `.env` vừa sao chép, tìm biến `GEMINI_API_KEY=YOUR_KEY_HERE` hoặc `OPENAI_API_KEY` và thay thế giá trị ảo bằng khóa API thực tế.
-
-## Hướng dẫn sử dụng
-
-```bash
-# Di chuyển vào thư mục dự án
-cd Unified-Debugging
-
-# Cài đặt 
-pip install -r requirements.txt
+# Mở .env, thay YOUR_KEY_HERE bằng Gemini API Key thực tế
 ```
 
-### 1. Chạy tất cả tự động (Automated Pipeline)
-Mặc định nếu không truyền argument hoặc truyền `--all` thì hệ thống sẽ thực hiện theo thứ tự: Loading Codeflaws Bugs -> Chạy Tarantula -> Ghi kết quả -> Chạy APR theo Tarantula Ranking -> Cố gắng compile kết quả rồi lưu patch thành công.
+---
+
+## Sử dụng
+
+Tất cả lệnh chạy từ thư mục `Unified-Debugging/`.
+
+### Chạy toàn bộ pipeline
 
 ```bash
-python3 main.py
-# Hoặc
-python3 main.py --all
+python3 main.py                          # mặc định: dataset=codeflaws
+python3 main.py --all --dataset codeflaws
 ```
 
-### 2. Chạy từng bước (Step-by-Step)
-
-#### Bước 1: Chạy Fault Localization
-Đây là bước nếu chỉ muốn chạy Fault Localization. Truyền `--fl`. Điểm số này sẽ lưu trữ trong file `experiments/tarantula_results.json`.
+### Chạy từng bước
 
 ```bash
-python3 main.py --fl
-```
+# Bước 1 – Fault Localization
+python3 main.py --fl [--dataset codeflaws]
 
-#### Bước 2: Chạy Automated Program Repair
-Hệ thống cung cấp sẵn hai công cụ để chạy luồng sửa lỗi tự động (APR), phần này sẽ đọc trực tiếp từ danh sách từ `tarantula_results.json` có sẵn trước đó để lên thứ tự ưu tiên Fix. 
+# Bước 2a – APR bằng LLM (cần GEMINI_API_KEY)
+python3 main.py --apr [--dataset codeflaws]
 
-1. Nếu bạn đang cấu hình API Key và muốn **dùng LLM để Fix**:
-```bash
-python3 main.py --apr
-```
+# Bước 2b – APR bằng Heuristic Mutation (không cần LLM)
+python3 main.py --apr-mutation [--dataset codeflaws]
 
-2. Nếu bạn không muốn kết nối LLM mà muốn **chạy mô phỏng đột biến Local (Mutation)** tốc độ cao:
-```bash
-python3 main.py --apr-mutation
-```
-
-#### Bước 3: Đánh giá quá trình (Evaluation)
-In ra lại số điểm thống kê Fault Localization và Tỉ lệ thành công của các Patch APR mà không cần phải thực thi luồng tải mô hình lại.
-```bash
+# Bước 3 – Evaluation
 python3 main.py --eval
 ```
 
-## Đánh giá hiệu suất (Evaluation)
+### Tham số dòng lệnh
 
-### 1. Đánh giá Fault Localization (`eval_fl.py`)
-- **Top-1** Hit Rate
-- **Top-3** Hit Rate
-- **Top-5** Hit Rate
+| Tham số | Mô tả |
+|---|---|
+| `--dataset` | Tên dataset: `codeflaws` (mặc định), `defects4c`, ... |
+| `--fl` | Chỉ chạy Fault Localization |
+| `--apr` | Chỉ chạy APR với LLM |
+| `--apr-mutation` | Chỉ chạy APR với Heuristic Mutation |
+| `--eval` | Chỉ chạy Evaluation |
+| `--all` | Chạy FL → APR LLM → Evaluation |
 
-### 2. Đánh giá Automated Program Repair (`eval_apr.py`)
-Các độ đo bao gồm:
-- **Plausible Fix Rate (%):** Tỷ lệ phần trăm các file báo lỗi (Bug ID) được vá thành công hoàn toàn sao cho *vượt qua 100% test cases* gốc.
-- **Fixed Initial Fails / Regressions:** Theo dõi các tests bị Fail ở nguyên bản. Báo cáo "Yes" nếu AI đã sửa triệt để. Báo cáo "Yes (Regressions)" nếu AI sửa được lỗi gốc nhưng vô tình làm gãy một test-case khác vốn đang chạy đúng.
-- **Edit Distance (Levenshtein):** Tính toán khoảng cách sửa lỗi ký tự giữa bản vá do AI (LLM) đề xuất và **Ground truth patch** (Bản patch đúng do con người làm). Từ đó suy ra mức độ hiệu quả và ngắn gọn của Prompt AI.
+---
 
-## Các hạn chế và Hướng phát triển
+## Thêm dataset mới
 
-### Chỉnh sửa Code C (Source Extraction & Injection)
-- **Trích xuất bằng Regex:** Hàm `extract_function_code()` hiện vẫn sử dụng biểu thức chính quy tĩnh và tìm ngoặc ngẫu nhiên (`{`, `}`). Có thể hoạt động không đúng nếu C macro, strings, hoặc comment chứa các dấu ngoặc nhọn này.
-- **Đề xuất công nghệ:** Cần áp dụng các thư viện như `pycparser`, Clang AST hay `tree-sitter` để trích xuất hoặc thay thế nguyên dòng (statement/function-level) chuẩn hóa hơn.
+Xem chi tiết tại [`DATASET_STANDARDS.md`](./DATASET_STANDARDS.md). Tóm tắt:
 
-### Hệ thống Generative AI (LLM APIs)
-- **API Placeholder:** Hàm `call_llm()` đã được kết nối thực tế thông qua SDK Google Generative AI (Gemini).
-- **Ràng buộc mã (Context Windows):** Đối với các tệp C dung lượng siêu lớn, cần nén prompt tốt hơn là chèn nguyên mã hàm.
+1. **Tạo Loader** – kế thừa `BugLoader` trong `data_loaders/base_loader.py`, implement `load_all()` trả về `List[BugRecord]`.
+2. **Tạo Adapter** – kế thừa `SandboxAdapter` trong `data_loaders/sandbox_adapter.py`, implement `get_source_path()` và `validate()`.
+3. **Đăng ký** cả hai trong `get_loader()` và `get_sandbox_adapter()`.
+
+```python
+# data_loaders/base_loader.py  →  get_loader()
+if name == "defects4c":
+    from data_loaders.defects4c_loader import Defects4CLoader
+    return Defects4CLoader()
+
+# data_loaders/sandbox_adapter.py  →  get_sandbox_adapter()
+if dataset_name.lower() == "defects4c":
+    return Defects4CAdapter(bug_id)
+```
+
+---
+
+## Evaluation
+
+### Fault Localization (`eval_fl.py`)
+
+| Chỉ số | Mô tả |
+|---|---|
+| **Top-1 Hit Rate** | % bug có hàm lỗi thực sự nằm ở vị trí nghi ngờ số 1 |
+| **Top-3 Hit Rate** | % bug có hàm lỗi nằm trong Top 3 |
+| **Top-5 Hit Rate** | % bug có hàm lỗi nằm trong Top 5 |
+
+> Chỉ tính trên các bug có `ground_truth` trong dữ liệu.
+
+### Automated Program Repair (`eval_apr.py`)
+
+| Chỉ số | Mô tả |
+|---|---|
+| **Plausible Fix Rate** | % bug được vá vượt qua 100% test case |
+| **Fixed Initial Fails** | APR có sửa được các test fail ban đầu không |
+| **Regressions** | Bản vá sửa được lỗi gốc nhưng làm hỏng test khác |
+| **Edit Distance** | Khoảng cách Levenshtein giữa bản vá AI và accepted patch |
+
+---
+
+## Giới hạn & Hướng phát triển
+
+| Vấn đề | Hướng giải quyết |
+|---|---|
+| Trích xuất hàm C bằng Regex dễ sai với macro/comment chứa `{}` | Dùng `pycparser`, Clang AST hoặc `tree-sitter` |
+| Context window LLM bị giới hạn với file C lớn | Nén prompt, chỉ truyền hàm liên quan thay vì toàn bộ file |
+| `google-generativeai` đã deprecated | Chuyển sang `google.genai` (SDK mới) |
