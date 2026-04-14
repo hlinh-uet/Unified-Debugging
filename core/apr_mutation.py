@@ -1,8 +1,18 @@
 import os
 import json
 import re
+import time
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from configs.path import EXPERIMENTS_DIR, PATCHES_DIR
+
+# Timeout tổng cho mỗi bug (tính tổng thời gian validate tất cả mutants của bug đó)
+# Nếu quá thời gian này, dừng sớm và lấy best-effort patch đã có.
+# Set về 0 để tắt timeout.
+MUTATION_BUG_TIMEOUT = int(os.getenv("MUTATION_BUG_TIMEOUT", "120"))
 from data_loaders.base_loader import get_loader, BugRecord
 from data_loaders.sandbox_adapter import get_sandbox_adapter
 from core.utils import extract_function_code, parse_qualified_func
@@ -131,18 +141,29 @@ def run_mutation_pipeline(dataset: str = "codeflaws"):
         init_passed  = [t.get("test_id") for t in tests if t.get("outcome") in ("PASS", "PASSED")]
         init_failed  = [t.get("test_id") for t in tests if t.get("outcome") in ("FAIL", "FAILED")]
 
-        status              = "skipped"   # sẽ chuyển sang 'failed' nếu đã thử nhưng không fix được
+        status              = "skipped"
         attempted           = False
         patched_func        = None
-        patched_source_best = None   # toàn bộ file của mutant tốt nhất
+        patched_source_best = None
         target_func         = None
         best_post_passed    = []
         best_post_failed    = []
         best_mutant_desc    = ""
+        timed_out           = False
+
+        bug_start = time.time()
 
         for qualified_name, score in sorted_funcs:
             if score == 0.0:
                 continue
+
+            # --- Kiểm tra timeout per-bug ---
+            if MUTATION_BUG_TIMEOUT > 0:
+                elapsed = time.time() - bug_start
+                if elapsed >= MUTATION_BUG_TIMEOUT:
+                    print(f"    [TIMEOUT] Đã dùng {elapsed:.0f}s / {MUTATION_BUG_TIMEOUT}s → dừng sớm, giữ best-effort patch.")
+                    timed_out = True
+                    break
 
             _, func_name = parse_qualified_func(qualified_name)
             print(f"  - Đang đột biến hàm '{func_name}' (Score: {score:.4f})")
@@ -158,9 +179,15 @@ def run_mutation_pipeline(dataset: str = "codeflaws"):
             print(f"    → Tạo {len(mutants)} mutants để đưa vào Sandbox...")
             attempted = True
 
-            found_fix = False
+            found_fix       = False
             best_pass_count = -1
             for i, (m_code, m_desc) in enumerate(mutants):
+                # --- Kiểm tra timeout giữa chừng trong vòng lặp mutant ---
+                if MUTATION_BUG_TIMEOUT > 0 and (time.time() - bug_start) >= MUTATION_BUG_TIMEOUT:
+                    print(f"    [TIMEOUT] Hết {MUTATION_BUG_TIMEOUT}s khi đang validate mutant #{i} → dừng.")
+                    timed_out = True
+                    break
+
                 patched_source = source_code[:start_idx] + m_code + source_code[end_idx:]
                 tmp_path = os.path.join(EXPERIMENTS_DIR, f"tmp_{bug_id}.c")
 
@@ -177,10 +204,10 @@ def run_mutation_pipeline(dataset: str = "codeflaws"):
                     best_mutant_desc    = m_desc
                     best_post_passed    = post_passed
                     best_post_failed    = post_failed
-
-                    patch_path = os.path.join(PATCHES_DIR, f"{bug_id}_mutation_patch.c")
-                    os.makedirs(PATCHES_DIR, exist_ok=True)
-                    os.rename(tmp_path, patch_path)
+                    try:
+                        os.remove(tmp_path)
+                    except FileNotFoundError:
+                        pass
                     found_fix = True
                     break
                 else:
@@ -196,18 +223,39 @@ def run_mutation_pipeline(dataset: str = "codeflaws"):
                     except FileNotFoundError:
                         pass
 
-            if found_fix:
+            if found_fix or timed_out:
                 break
 
         if attempted and status == "skipped":
-            status = "failed"
+            status = "timeout" if timed_out else "failed"
+
+        # --- Lưu file patch .c cho mọi trường hợp ---
+        os.makedirs(PATCHES_DIR, exist_ok=True)
+        patch_path = None
+        if patched_source_best is not None:
+            if status == "success":
+                patch_filename = f"{bug_id}_mutation_patch.c"
+            elif status == "timeout":
+                patch_filename = f"{bug_id}_mutation_timeout.c"
+            else:
+                patch_filename = f"{bug_id}_mutation_best_effort.c"
+            patch_path = os.path.join(PATCHES_DIR, patch_filename)
+            with open(patch_path, "w") as f:
+                f.write(patched_source_best)
+
+        elapsed_total = time.time() - bug_start
+        print(f"  → [{status.upper()}] Thời gian: {elapsed_total:.1f}s | "
+              f"pass={len(best_post_passed)} fail={len(best_post_failed)}"
+              + (f" | patch → {os.path.basename(patch_path)}" if patch_path else ""))
 
         apr_results[bug_id] = {
             "status":            status,
             "patched_function":  patched_func,
-            "patched_file":      patched_source_best,   # toàn bộ file sau khi vá (để tính ED file-level)
+            "patched_file":      patched_source_best,
             "selected_function": target_func,
             "mutation_strategy": best_mutant_desc,
+            "patch_file":        patch_path,
+            "elapsed_seconds":   round(elapsed_total, 1),
             "init_passed_tests": init_passed,
             "init_failed_tests": init_failed,
             "post_passed_tests": best_post_passed,

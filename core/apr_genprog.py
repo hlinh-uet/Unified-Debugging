@@ -34,6 +34,7 @@ import os
 import re
 import json
 import glob
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -340,23 +341,39 @@ def _run_genprog(work_dir: str, config_path: str,
                  bug_id: str, run_dir: str) -> Tuple[str, str]:
     """
     Chạy GenProg với timeout. Trả về (stdout+stderr, log_path).
+
+    Khi timeout: kill toàn bộ process group (bao gồm Docker container bên trong
+    wrapper script), thu thập partial output đã có, append marker "Timeout".
     """
     log_path = os.path.join(run_dir, f"temp-{bug_id}.out")
+    output = ""
 
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             [GENPROG_BIN, os.path.basename(config_path)],
             cwd=work_dir,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            timeout=GENPROG_TIMEOUT,
-            text=True
+            text=True,
+            start_new_session=True,   # tạo process group riêng để killpg an toàn
         )
-        output = result.stdout or ""
-    except subprocess.TimeoutExpired:
-        output = "Timeout"
+        try:
+            stdout, _ = proc.communicate(timeout=GENPROG_TIMEOUT)
+            output = stdout or ""
+        except subprocess.TimeoutExpired:
+            # Kill toàn bộ process group (Docker wrapper + container bên trong)
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, _ = proc.communicate()
+            output = (stdout or "") + "\nTimeout"
+
     except FileNotFoundError:
-        output = f"ERROR: GenProg binary '{GENPROG_BIN}' không tìm thấy. Hãy set GENPROG_BIN trong .env"
+        output = (
+            f"ERROR: GenProg binary '{GENPROG_BIN}' không tìm thấy. "
+            f"Hãy set GENPROG_BIN trong .env"
+        )
 
     with open(log_path, "w") as f:
         f.write(output)
@@ -738,37 +755,50 @@ def run_genprog_pipeline(dataset: str = "codeflaws",
         selected_func   = None
         patched_file_content: Optional[str] = None  # toàn bộ file sau khi vá
 
-        if genprog_status == "repair_found":
-            patch_path = _save_patch(work_dir, bug_id, cfile)
-
-            # Đọc nội dung file đã vá (cần cho file-level edit distance)
+        if genprog_status in ("repair_found", "timeout"):
             repair_file = os.path.join(work_dir, "repair", cfile)
-            if os.path.exists(repair_file):
-                try:
-                    with open(repair_file, "r") as f:
-                        patched_file_content = f.read()
-                except Exception:
-                    pass
 
-            patched_func, raw_func_name = _extract_changed_function(work_dir, cfile)
-            if patched_func and raw_func_name:
-                selected_func = qualify_func(bug_record.source_file, raw_func_name)
-                print(f"    [INFO] Trích xuất patched_function: hàm '{raw_func_name}'")
-            elif raw_func_name:
-                selected_func = qualify_func(bug_record.source_file, raw_func_name)
+            if genprog_status == "timeout" and not os.path.exists(repair_file):
+                # Timeout và không có candidate nào trong repair/ → thực sự không có patch
+                final_status = "timeout"
+                print(f"    [TIMEOUT] Không tìm thấy candidate trong repair/")
 
-            if patch_path:
-                print(f"    [VALIDATE] Đang xác nhận bản vá...")
-                passed_tests, failed_tests = _validate_patch(work_dir, cfile, bug_id)
-                if not failed_tests:
-                    final_status = "success"
-                    print(f"    [SUCCESS] Bản vá hợp lệ! pass={len(passed_tests)} fail=0")
-                else:
-                    final_status = "plausible_only"
-                    print(f"    [PLAUSIBLE] GenProg tìm được patch nhưng fail {len(failed_tests)} tests")
             else:
-                final_status = "repair_found_no_file"
-                print(f"    [WARN] GenProg báo 'Repair Found' nhưng không tìm được repair file")
+                # Có file trong repair/ (dù là repair_found hay timeout best-effort)
+                if genprog_status == "timeout":
+                    print(f"    [TIMEOUT-BESTFIT] Tìm thấy candidate trong repair/ → thử validate...")
+
+                patch_path = _save_patch(work_dir, bug_id, cfile)
+
+                # Đọc nội dung file đã vá (cần cho file-level edit distance)
+                if os.path.exists(repair_file):
+                    try:
+                        with open(repair_file, "r") as f:
+                            patched_file_content = f.read()
+                    except Exception:
+                        pass
+
+                patched_func, raw_func_name = _extract_changed_function(work_dir, cfile)
+                if patched_func and raw_func_name:
+                    selected_func = qualify_func(bug_record.source_file, raw_func_name)
+                    print(f"    [INFO] Trích xuất patched_function: hàm '{raw_func_name}'")
+                elif raw_func_name:
+                    selected_func = qualify_func(bug_record.source_file, raw_func_name)
+
+                if patch_path:
+                    print(f"    [VALIDATE] Đang xác nhận bản vá...")
+                    passed_tests, failed_tests = _validate_patch(work_dir, cfile, bug_id)
+                    if not failed_tests:
+                        final_status = "timeout_repaired" if genprog_status == "timeout" else "success"
+                        print(f"    [SUCCESS] Bản vá hợp lệ! pass={len(passed_tests)} fail=0"
+                              + (" (from timeout best-fit)" if genprog_status == "timeout" else ""))
+                    else:
+                        final_status = "timeout_plausible" if genprog_status == "timeout" else "plausible_only"
+                        print(f"    [PLAUSIBLE] Patch có nhưng fail {len(failed_tests)} tests"
+                              + (" (from timeout best-fit)" if genprog_status == "timeout" else ""))
+                else:
+                    final_status = "repair_found_no_file"
+                    print(f"    [WARN] GenProg báo 'Repair Found' nhưng không tìm được repair file")
 
         # --- Bước 7: Lưu incremental ---
         _write_result(
@@ -832,26 +862,31 @@ def _write_result(results: Dict, results_file: str, bug_id: str, status: str,
 
 def _print_summary(results: Dict):
     """In bảng tóm tắt kết quả GenProg."""
-    total     = len(results)
-    success   = sum(1 for v in results.values() if v.get("status") == "success")
-    plausible = sum(1 for v in results.values() if v.get("status") == "plausible_only")
-    no_repair = sum(1 for v in results.values() if v.get("status") == "no_repair")
-    timeout   = sum(1 for v in results.values() if v.get("status") == "timeout")
-    error     = sum(1 for v in results.values() if v.get("status") in ("error", "build_failed", "skipped"))
+    total           = len(results)
+    success         = sum(1 for v in results.values() if v.get("status") == "success")
+    plausible       = sum(1 for v in results.values() if v.get("status") == "plausible_only")
+    no_repair       = sum(1 for v in results.values() if v.get("status") == "no_repair")
+    timeout         = sum(1 for v in results.values() if v.get("status") == "timeout")
+    to_repaired     = sum(1 for v in results.values() if v.get("status") == "timeout_repaired")
+    to_plausible    = sum(1 for v in results.values() if v.get("status") == "timeout_plausible")
+    error           = sum(1 for v in results.values() if v.get("status") in ("error", "build_failed", "skipped"))
 
-    print("\n" + "=" * 55)
+    print("\n" + "=" * 60)
     print("  KẾT QUẢ GENPROG APR")
-    print("=" * 55)
-    print(f"  Tổng bugs đã xử lý:    {total}")
-    print(f"  ✅ Success (100% pass): {success}")
-    print(f"  🟡 Plausible only:     {plausible}")
-    print(f"  ❌ No repair:          {no_repair}")
-    print(f"  ⏱  Timeout:            {timeout}")
-    print(f"  💥 Error/Skip:         {error}")
+    print("=" * 60)
+    print(f"  Tổng bugs đã xử lý:         {total}")
+    print(f"  ✅ Success (100% pass):      {success}")
+    print(f"  🟢 Timeout → Repaired:       {to_repaired}")
+    print(f"  🟡 Plausible only:           {plausible}")
+    print(f"  🟠 Timeout → Plausible:      {to_plausible}")
+    print(f"  ❌ No repair:               {no_repair}")
+    print(f"  ⏱  Timeout (no candidate):  {timeout}")
+    print(f"  💥 Error/Skip:              {error}")
     if total > 0:
-        fix_rate = (success / total) * 100
-        print(f"  Fix Rate:              {fix_rate:.1f}%")
-    print("=" * 55)
+        repaired = success + to_repaired
+        fix_rate = (repaired / total) * 100
+        print(f"  Fix Rate (incl. timeout):   {fix_rate:.1f}%")
+    print("=" * 60)
 
 
 # ---------------------------------------------------------------------------
