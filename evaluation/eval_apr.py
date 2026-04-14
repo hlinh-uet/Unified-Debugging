@@ -10,29 +10,78 @@ try:
 except ImportError:
     HAS_LEVENSHTEIN = False
 
+# ---------------------------------------------------------------------------
+# Fix category labels (in display order)
+# ---------------------------------------------------------------------------
+# CleanFix : any number of init-fails fixed (including all), no regression
+# NoiseFix : any number of init-fails fixed (including all), caused regression
+# NoneFix  : nothing fixed, nothing broken
+# NegFix   : nothing fixed, made things worse (regression)
+#
+# "Plausible" (all init-fails fixed + no regression) is a sub-set of CleanFix
+# and is reported separately in the aggregated summary.
+
+FIX_CATEGORIES = ["CleanFix", "NoiseFix", "NoneFix", "NegFix"]
+
+
+def _classify_fix(init_failed: list, post_failed: list) -> str:
+    """
+    Classify the outcome of an APR attempt into one of four categories.
+
+    Args:
+        init_failed : list of test IDs that were failing before the patch.
+        post_failed : list of test IDs that are failing after the patch.
+
+    Returns:
+        One of: "CleanFix", "NoiseFix", "NoneFix", "NegFix".
+
+    Notes:
+        CleanFix covers both partial and full fixes with no regression.
+        NoiseFix covers both partial and full fixes that also caused regression.
+        "Plausible" (all init-fails fixed, no regression) is a CleanFix sub-type
+        tracked separately in the aggregated summary.
+    """
+    init_failed_set = set(init_failed)
+    post_failed_set = set(post_failed)
+
+    fixed      = init_failed_set - post_failed_set   # were failing, now pass
+    regression = post_failed_set - init_failed_set   # were passing, now fail
+
+    any_fixed = bool(fixed)
+    has_reg   = bool(regression)
+
+    if     any_fixed and not has_reg: return "CleanFix"
+    if     any_fixed and     has_reg: return "NoiseFix"
+    if not any_fixed and not has_reg: return "NoneFix"
+    # not any_fixed and has_reg
+    return "NegFix"
+
 
 def evaluate_apr(dataset: str = "codeflaws"):
     """
-    Đánh giá APR trên tất cả các kết quả APR có trong experiments/.
+    Evaluate APR results across all engines found in experiments/.
 
-    Metrics:
-      - Plausible Fix Rate
-      - Fixed Initial Fails / Regression Rate
+    Metrics per bug:
+      - Fix category  (Plausible / PlausibleReg / CleanFix / NoiseFix / NoneFix / NegFix)
       - Edit Distance (function-level): patched_function vs accepted_function
-      - Edit Distance (file-level):     patched_file vs accepted_file
+      - Edit Distance (file-level):     patched_file     vs accepted_file
+
+    Summary:
+      - Count & rate for each fix category
+      - Edit Distance statistics
     """
-    print(f"\n{'='*70}")
-    print(f"  BÁO CÁO ĐÁNH GIÁ AUTOMATED PROGRAM REPAIR (APR) — '{dataset}'")
-    print(f"{'='*70}")
+    print(f"\n{'='*80}")
+    print(f"  APR EVALUATION REPORT — '{dataset}'")
+    print(f"{'='*80}")
 
     if not HAS_LEVENSHTEIN:
-        print("  [WARN] Thư viện 'python-Levenshtein' chưa cài. Edit Distance sẽ không được tính.")
-        print("         Cài bằng: pip install python-Levenshtein")
+        print("  [WARN] 'python-Levenshtein' not installed — Edit Distance will be skipped.")
+        print("         Install with: pip install python-Levenshtein")
 
     apr_files = [
-        ("LLM-based APR",       "apr_results.json"),
-        ("Mutation-based APR",  "apr_mutation_results.json"),
-        ("GenProg APR",         "apr_genprog_results.json"),
+        ("LLM-based APR",      "apr_results.json"),
+        ("Mutation-based APR", "apr_mutation_results.json"),
+        ("GenProg APR",        "apr_genprog_results.json"),
     ]
 
     for label, filename in apr_files:
@@ -40,40 +89,42 @@ def evaluate_apr(dataset: str = "codeflaws"):
         if os.path.exists(filepath):
             _evaluate_one_apr(label, filepath, dataset)
 
-    print(f"{'='*70}\n")
+    print(f"{'='*80}\n")
 
 
 def _evaluate_one_apr(label: str, apr_results_file: str, dataset: str):
-    """Đánh giá một file kết quả APR."""
+    """Evaluate a single APR result file."""
     print(f"\n--- {label} ({os.path.basename(apr_results_file)}) ---")
 
     with open(apr_results_file, "r") as f:
         apr_results = json.load(f)
 
     if not apr_results:
-        print("  (Không có kết quả)")
+        print("  (No results)")
         return
 
-    total_bugs   = len(apr_results)
-    attempted    = 0
-    patched      = 0
-    fixed_fails  = 0
-    regressions  = 0
+    total_bugs = len(apr_results)
+    attempted  = 0
 
-    edit_distances_func = []   # function-level
-    edit_distances_file = []   # file-level
+    category_counts = {cat: 0 for cat in FIX_CATEGORIES}
+    edit_distances_func: list[int] = []
+    edit_distances_file: list[int] = []
 
-    col_w = (35, 12, 12, 22, 12, 12)
+    # Column widths: Bug ID | Init P/F | Post P/F | Fix Category | ED(func) | ED(file)
+    col_w = (35, 10, 10, 15, 10, 10)
+    sep   = " | "
+    total_w = sum(col_w) + len(sep) * (len(col_w) - 1)
+
     header = (
-        f"{'Bug ID':<{col_w[0]}} | "
-        f"{'Init P/F':<{col_w[1]}} | "
-        f"{'Post P/F':<{col_w[2]}} | "
-        f"{'Fixed Init Fails?':<{col_w[3]}} | "
-        f"{'ED(func)':<{col_w[4]}} | "
+        f"{'Bug ID':<{col_w[0]}}{sep}"
+        f"{'Init P/F':<{col_w[1]}}{sep}"
+        f"{'Post P/F':<{col_w[2]}}{sep}"
+        f"{'Fix Category':<{col_w[3]}}{sep}"
+        f"{'ED(func)':<{col_w[4]}}{sep}"
         f"{'ED(file)':<{col_w[5]}}"
     )
     print(header)
-    print("-" * (sum(col_w) + 17))
+    print("-" * total_w)
 
     for bug_id, bug_res in apr_results.items():
         status = bug_res.get("status", "skipped")
@@ -83,39 +134,28 @@ def _evaluate_one_apr(label: str, apr_results_file: str, dataset: str):
         init_pass = len(init_passed_list)
         init_fail = len(init_failed_list)
 
-        post_pass = 0
-        post_fail = 0
-        fixed_label = "N/A"
+        post_pass      = 0
+        post_fail      = 0
+        fix_label      = "N/A"
         edit_dist_func = -1
         edit_dist_file = -1
 
-        if status in ("skipped", "llm_failed"):
-            pass
-        else:
+        if status not in ("skipped", "llm_failed"):
             attempted += 1
 
             post_passed_tests = bug_res.get("post_passed_tests", [])
             post_failed_tests = bug_res.get("post_failed_tests", [])
-            post_pass = len(post_passed_tests)
-            post_fail = len(post_failed_tests)
 
-            if status == "success":
-                patched += 1
-                post_pass = len(post_passed_tests) if post_passed_tests else (init_pass + init_fail)
+            # For successful patches, fall back to full test count if lists are empty
+            if status == "success" and not post_passed_tests:
+                post_pass = init_pass + init_fail
+                post_fail = 0
+            else:
+                post_pass = len(post_passed_tests)
                 post_fail = len(post_failed_tests)
 
-            still_failing_init = set(init_failed_list) & set(post_failed_tests)
-            newly_failing = set(post_failed_tests) - set(init_failed_list)
-
-            if init_failed_list and not still_failing_init:
-                fixed_fails += 1
-                if newly_failing:
-                    fixed_label = "Yes (Regressions)"
-                    regressions += 1
-                else:
-                    fixed_label = "Yes"
-            elif init_failed_list:
-                fixed_label = "No"
+            fix_label = _classify_fix(init_failed_list, post_failed_tests)
+            category_counts[fix_label] += 1
 
             edit_dist_func = _calc_func_edit_distance(bug_id, bug_res, dataset)
             if edit_dist_func >= 0:
@@ -126,70 +166,78 @@ def _evaluate_one_apr(label: str, apr_results_file: str, dataset: str):
                 edit_distances_file.append(edit_dist_file)
 
         print(
-            f"{bug_id:<{col_w[0]}} | "
-            f"{f'{init_pass}/{init_fail}':<{col_w[1]}} | "
-            f"{f'{post_pass}/{post_fail}':<{col_w[2]}} | "
-            f"{fixed_label:<{col_w[3]}} | "
-            f"{'N/A' if edit_dist_func < 0 else edit_dist_func:<{col_w[4]}} | "
+            f"{bug_id:<{col_w[0]}}{sep}"
+            f"{f'{init_pass}/{init_fail}':<{col_w[1]}}{sep}"
+            f"{f'{post_pass}/{post_fail}':<{col_w[2]}}{sep}"
+            f"{fix_label:<{col_w[3]}}{sep}"
+            f"{'N/A' if edit_dist_func < 0 else edit_dist_func:<{col_w[4]}}{sep}"
             f"{'N/A' if edit_dist_file < 0 else edit_dist_file:<{col_w[5]}}"
         )
 
-    llm_failed_count = sum(
-        1 for r in apr_results.values() if r.get("status") == "llm_failed"
-    )
-    skipped_count = sum(
-        1 for r in apr_results.values() if r.get("status") == "skipped"
-    )
+    llm_failed_count = sum(1 for r in apr_results.values() if r.get("status") == "llm_failed")
+    skipped_count    = sum(1 for r in apr_results.values() if r.get("status") == "skipped")
 
-    print("-" * (sum(col_w) + 17))
-    print(f"  Tổng bugs:                {total_bugs}")
-    print(f"  Đã thử sửa (attempted):  {attempted}")
-    print(f"  LLM không trả patch:     {llm_failed_count}  ← API error/quota")
-    print(f"  Bỏ qua (skipped):        {skipped_count}")
+    print("-" * total_w)
+    print(f"  Total bugs          : {total_bugs}")
+    print(f"  Attempted           : {attempted}")
+    print(f"  LLM returned nothing: {llm_failed_count}  (API error / quota)")
+    print(f"  Skipped             : {skipped_count}")
 
     if attempted > 0:
-        print(f"  Plausible patches (100% pass): {patched}/{attempted} ({patched/attempted*100:.2f}%)")
-        print(f"  Sửa được fail ban đầu:   {fixed_fails}/{attempted} ({fixed_fails/attempted*100:.2f}%)")
-        print(f"  Gây regression:          {regressions}/{attempted} ({regressions/attempted*100:.2f}%)")
+        # Count Plausible as sub-metric: all init-fails fixed + no regression
+        plausible_n = sum(
+            1 for r in apr_results.values()
+            if r.get("status") not in ("skipped", "llm_failed")
+            and set(r.get("init_failed_tests", [])) - set(r.get("post_failed_tests", [])) == set(r.get("init_failed_tests", []))
+            and bool(r.get("init_failed_tests", []))
+            and not (set(r.get("post_failed_tests", [])) - set(r.get("init_failed_tests", [])))
+        )
 
-    if edit_distances_func:
-        _print_edit_distance_stats(edit_distances_func, attempted, level="function")
-    elif HAS_LEVENSHTEIN:
-        print(f"\n  Edit Distance (func): Không bug nào có patched_function để so sánh.")
+        print(f"\n  Fix Category Breakdown (out of {attempted} attempted):")
+        print(f"  {'Category':<15} {'Count':>6}   {'Rate':>7}")
+        print(f"  {'-'*32}")
+        for cat in FIX_CATEGORIES:
+            n = category_counts[cat]
+            print(f"  {cat:<15} {n:>6}   {n/attempted*100:>6.2f}%")
 
-    if edit_distances_file:
-        _print_edit_distance_stats(edit_distances_file, attempted, level="file")
-    elif HAS_LEVENSHTEIN:
-        print(f"\n  Edit Distance (file): Không bug nào có patched_file để so sánh.")
+        cleanfix_n  = category_counts["CleanFix"]
+        noisefix_n  = category_counts["NoiseFix"]
+        any_reg_n   = noisefix_n + category_counts["NegFix"]
+
+        print(f"\n  --- Aggregated ---")
+        print(f"  Plausible  (all fixed, no regression) : {plausible_n}/{attempted} ({plausible_n/attempted*100:.2f}%)  ← subset of CleanFix")
+        print(f"  Any fix    (CleanFix + NoiseFix)      : {cleanfix_n + noisefix_n}/{attempted} ({(cleanfix_n + noisefix_n)/attempted*100:.2f}%)")
+        print(f"  Regression (NoiseFix + NegFix)        : {any_reg_n}/{attempted} ({any_reg_n/attempted*100:.2f}%)")
+
+    _print_edit_distance_stats(edit_distances_func, attempted, level="function")
+    _print_edit_distance_stats(edit_distances_file, attempted, level="file")
 
 
-def _print_edit_distance_stats(edit_distances, attempted, level: str = "function"):
-    """In thống kê edit distance (function-level hoặc file-level)."""
+def _print_edit_distance_stats(edit_distances: list, attempted: int, level: str = "function"):
+    """Print edit distance statistics."""
     n = len(edit_distances)
-    avg_dist = sum(edit_distances) / n
-    sorted_d = sorted(edit_distances)
+    if not n:
+        if HAS_LEVENSHTEIN:
+            print(f"\n  Edit Distance ({level}): no data available.")
+        return
+
+    avg_dist    = sum(edit_distances) / n
+    sorted_d    = sorted(edit_distances)
     median_dist = sorted_d[n // 2]
-    min_dist = sorted_d[0]
-    max_dist = sorted_d[-1]
+    min_dist    = sorted_d[0]
+    max_dist    = sorted_d[-1]
 
-    if level == "file":
-        label = "patched_file vs accepted_file"
-    else:
-        label = "patched_function vs accepted_function"
-
+    label = "patched_function vs accepted_function" if level == "function" else "patched_file vs accepted_file"
     print(f"\n  --- Edit Distance [{level}-level] ({label}) ---")
-    print(f"  Số bugs có dữ liệu:   {n}/{attempted}")
-    print(f"  Trung bình (Mean):     {avg_dist:.2f}")
-    print(f"  Trung vị (Median):     {median_dist}")
-    print(f"  Min:                   {min_dist}")
-    print(f"  Max:                   {max_dist}")
+    print(f"  Bugs with data : {n}/{attempted}")
+    print(f"  Mean           : {avg_dist:.2f}")
+    print(f"  Median         : {median_dist}")
+    print(f"  Min            : {min_dist}")
+    print(f"  Max            : {max_dist}")
 
 
 def _get_accepted_path(bug_id: str) -> str:
-    """
-    Lấy đường dẫn file accepted từ benchmark.
-    bug_id='104-A-bug-15369048-15370159' → benchmark/.../104-A-15370159.c
-    """
+    """Return the path to the benchmark accepted file for a given bug_id."""
     cfilename = get_codeflaws_accepted_cfile(bug_id)
     if not cfilename:
         return ""
@@ -198,21 +246,16 @@ def _get_accepted_path(bug_id: str) -> str:
 
 def _calc_func_edit_distance(bug_id: str, bug_res: dict, dataset: str) -> int:
     """
-    Tính Levenshtein edit distance giữa patched_function (hàm do APR tạo)
-    và accepted_function (hàm tương ứng trích từ file accepted của benchmark).
-
-    So sánh ở mức function-level: cùng hàm, cùng granularity.
-    Trả về -1 nếu không tính được.
+    Compute Levenshtein distance between the patched function and the
+    corresponding function extracted from the benchmark accepted file.
+    Returns -1 if the distance cannot be computed.
     """
     if not HAS_LEVENSHTEIN:
         return -1
 
-    patched_func = bug_res.get("patched_function")
-    if not patched_func or not patched_func.strip():
-        return -1
-
+    patched_func  = bug_res.get("patched_function")
     selected_func = bug_res.get("selected_function", "")
-    if not selected_func:
+    if not patched_func or not patched_func.strip() or not selected_func:
         return -1
 
     _, func_name = parse_qualified_func(selected_func)
@@ -236,12 +279,10 @@ def _calc_func_edit_distance(bug_id: str, bug_res: dict, dataset: str) -> int:
 
 def _calc_file_edit_distance(bug_id: str, bug_res: dict, dataset: str) -> int:
     """
-    Tính Levenshtein edit distance giữa patched_file (toàn bộ file sau khi vá)
-    và accepted_file (file accepted của benchmark).
-
-    Ý nghĩa: đánh giá khoảng cách chỉnh sửa ở mức file — hữu ích khi FL
-    chỉ ra sai function (edit_dist function = -1 nhưng file vẫn đo được).
-    Trả về -1 nếu không tính được.
+    Compute Levenshtein distance between the full patched file content and
+    the benchmark accepted file.  Useful when FL targeted the wrong function
+    (func-level ED would be -1 but file-level ED is still measurable).
+    Returns -1 if the distance cannot be computed.
     """
     if not HAS_LEVENSHTEIN:
         return -1
