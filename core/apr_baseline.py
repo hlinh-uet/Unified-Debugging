@@ -74,8 +74,8 @@ def _call_openai(prompt: str, model: str = "gpt-4o-mini") -> Optional[str]:
                 {
                     "role": "system",
                     "content": (
-                        "Bạn là một chuyên gia sửa lỗi chương trình C/C++. "
-                        "CHỈ trả về mã nguồn C của hàm đã được sửa, không kèm lời giải thích."
+                        "You are an expert in fixing C/C++ program bugs. "
+                        "Return ONLY the fixed C function source code, with no explanation."
                     ),
                 },
                 {"role": "user", "content": prompt},
@@ -156,13 +156,13 @@ def _build_failed_test_context(bug: BugRecord) -> str:
         tc_actual = tc_actual[:500] + "\n...[truncated]"
 
     return f"""
-### Thông tin kiểm thử thất bại (Test Case: {tc_name})
-- **Lý do lỗi:** {tc_reason}
-- **Kết quả mong đợi (Expected Output):**
+### Failed test information (Test Case: {tc_name})
+- **Failure reason:** {tc_reason}
+- **Expected output:**
 ```
 {tc_expected.strip()}
 ```
-- **Kết quả thực tế (Actual Output):**
+- **Actual output:**
 ```
 {tc_actual.strip()}
 ```
@@ -289,23 +289,23 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
             target_func = qualified_name
             attempted = True
 
-            prompt = f"""Bạn là một chuyên gia sửa lỗi chương trình C/C++.
-Nhiệm vụ của bạn là sửa một lỗi thuật toán hoặc biên dịch trong hàm `{func_name}` của đoạn mã dưới đây (Bug ID: {bug_id}).
+            prompt = f"""You are an expert in fixing C/C++ bugs.
+Your task is to fix an algorithmic or compilation bug in function `{func_name}` from the code below (Bug ID: {bug_id}).
 
 {failed_tests_context}
 
-### Toàn bộ file mã nguồn hiện tại (để hiểu scope, thư viện, và struct):
+### Full current source file (for scope, libraries, and struct context):
 ```c
 {source_code}
 ```
 
-### Yêu cầu:
-1. Hãy tìm và sửa lỗi bên trong hàm `{func_name}`.
-2. CHỈ TRẢ VỀ mã nguồn C của HÀM `{func_name}` đã được sửa (để tôi có thể parse trực tiếp thay thế bằng Regex).
-3. Tuyệt đối KHÔNG kèm theo lời giải thích mào đầu, KHÔNG viết lại các `#include`, KHÔNG thêm main() nếu đang sửa hàm khác.
+### Requirements:
+1. Find and fix the bug inside function `{func_name}`.
+2. RETURN ONLY the fixed C source code of function `{func_name}` (so I can parse and replace it directly using regex).
+3. Do NOT include any explanation or preface text, do NOT rewrite `#include` lines, and do NOT add `main()` if you are fixing another function.
 
 ```c
-// Bắt đầu viết lại hàm {func_name} tại đây:
+// Start rewriting function {func_name} here:
 """
 
             raw_patch = call_llm(prompt, provider=llm_provider)
