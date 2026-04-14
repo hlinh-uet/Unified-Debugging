@@ -54,12 +54,20 @@ def main():
     parser.add_argument("--fl",           action="store_true", help="Chỉ chạy Fault Localization (Tarantula)")
     parser.add_argument("--apr",          action="store_true", help="Chỉ chạy APR với LLM")
     parser.add_argument("--apr-mutation", action="store_true", help="Chỉ chạy APR Heuristic Mutation (không cần LLM)")
-    parser.add_argument("--apr-genprog", action="store_true", help="Chỉ chạy APR sử dụng GenProg (cần cài genprog binary)")
+    parser.add_argument("--apr-genprog",  action="store_true", help="Chỉ chạy APR sử dụng GenProg (cần cài genprog binary)")
     parser.add_argument("--eval",         action="store_true", help="Chỉ chạy Evaluation")
     parser.add_argument("--all",          action="store_true", help="Chạy toàn bộ: FL → APR → Evaluation")
+    parser.add_argument(
+        "--llm",
+        default=None,
+        choices=["gemini", "openai"],
+        help="LLM provider cho APR: 'gemini' (mặc định) hoặc 'openai' (gpt-4o-mini). "
+             "Override biến môi trường LLM_PROVIDER.",
+    )
     args = parser.parse_args()
 
-    dataset = args.dataset
+    dataset      = args.dataset
+    llm_provider = args.llm   # None → đọc từ LLM_PROVIDER trong .env
 
     # Nếu không truyền flag nào thì mặc định chạy toàn bộ
     run_all = args.all or (not args.fl and not args.apr and not args.apr_mutation
@@ -68,7 +76,7 @@ def main():
     if run_all:
         print(f"[Pipeline] Chạy toàn bộ quy trình trên dataset '{dataset}' (FL → APR LLM → Evaluation)...")
         run_fl(dataset)
-        run_apr_pipeline(dataset)
+        run_apr_pipeline(dataset, llm_provider=llm_provider)
         evaluate_fl()
         evaluate_apr()
     else:
@@ -78,8 +86,8 @@ def main():
             evaluate_fl()
 
         if args.apr:
-            print(f"[Pipeline] Chạy APR (LLM) trên dataset '{dataset}'...")
-            run_apr_pipeline(dataset)
+            print(f"[Pipeline] Chạy APR (LLM: {llm_provider or 'default'}) trên dataset '{dataset}'...")
+            run_apr_pipeline(dataset, llm_provider=llm_provider)
             evaluate_apr()
 
         if args.apr_mutation:

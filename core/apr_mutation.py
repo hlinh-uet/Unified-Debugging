@@ -5,7 +5,7 @@ import re
 from configs.path import EXPERIMENTS_DIR, PATCHES_DIR
 from data_loaders.base_loader import get_loader, BugRecord
 from data_loaders.sandbox_adapter import get_sandbox_adapter
-from core.utils import extract_function_code
+from core.utils import extract_function_code, parse_qualified_func
 
 
 # ---------------------------------------------------------------------------
@@ -131,25 +131,32 @@ def run_mutation_pipeline(dataset: str = "codeflaws"):
         init_passed  = [t.get("test_id") for t in tests if t.get("outcome") in ("PASS", "PASSED")]
         init_failed  = [t.get("test_id") for t in tests if t.get("outcome") in ("FAIL", "FAILED")]
 
-        status           = "failed"
-        patched_func     = None
-        target_func      = None
-        best_post_passed = []
-        best_post_failed = []
-        best_mutant_desc = ""
+        status              = "skipped"   # sẽ chuyển sang 'failed' nếu đã thử nhưng không fix được
+        attempted           = False
+        patched_func        = None
+        patched_source_best = None   # toàn bộ file của mutant tốt nhất
+        target_func         = None
+        best_post_passed    = []
+        best_post_failed    = []
+        best_mutant_desc    = ""
 
-        for func_name, score in sorted_funcs:
+        for qualified_name, score in sorted_funcs:
             if score == 0.0:
                 continue
 
+            _, func_name = parse_qualified_func(qualified_name)
             print(f"  - Đang đột biến hàm '{func_name}' (Score: {score:.4f})")
             func_code, start_idx, end_idx = extract_function_code(source_code, func_name)
             if not func_code:
                 continue
 
-            target_func = func_name
+            target_func = qualified_name
             mutants     = generate_mutants(func_code)
+            if not mutants:
+                print(f"    [WARN] Không sinh được mutant nào cho hàm '{func_name}'. Bỏ qua.")
+                continue
             print(f"    → Tạo {len(mutants)} mutants để đưa vào Sandbox...")
+            attempted = True
 
             found_fix = False
             best_pass_count = -1
@@ -164,11 +171,12 @@ def run_mutation_pipeline(dataset: str = "codeflaws"):
 
                 if is_valid:
                     print(f"    [SUCCESS] Mutant #{i} vượt qua test! ({m_desc})")
-                    status           = "success"
-                    patched_func     = m_code
-                    best_mutant_desc = m_desc
-                    best_post_passed = post_passed
-                    best_post_failed = post_failed
+                    status              = "success"
+                    patched_func        = m_code
+                    patched_source_best = patched_source
+                    best_mutant_desc    = m_desc
+                    best_post_passed    = post_passed
+                    best_post_failed    = post_failed
 
                     patch_path = os.path.join(PATCHES_DIR, f"{bug_id}_mutation_patch.c")
                     os.makedirs(PATCHES_DIR, exist_ok=True)
@@ -177,11 +185,12 @@ def run_mutation_pipeline(dataset: str = "codeflaws"):
                     break
                 else:
                     if len(post_passed) > best_pass_count:
-                        best_pass_count  = len(post_passed)
-                        patched_func     = m_code
-                        best_mutant_desc = m_desc
-                        best_post_passed = post_passed
-                        best_post_failed = post_failed
+                        best_pass_count     = len(post_passed)
+                        patched_func        = m_code
+                        patched_source_best = patched_source
+                        best_mutant_desc    = m_desc
+                        best_post_passed    = post_passed
+                        best_post_failed    = post_failed
                     try:
                         os.remove(tmp_path)
                     except FileNotFoundError:
@@ -190,9 +199,13 @@ def run_mutation_pipeline(dataset: str = "codeflaws"):
             if found_fix:
                 break
 
+        if attempted and status == "skipped":
+            status = "failed"
+
         apr_results[bug_id] = {
             "status":            status,
             "patched_function":  patched_func,
+            "patched_file":      patched_source_best,   # toàn bộ file sau khi vá (để tính ED file-level)
             "selected_function": target_func,
             "mutation_strategy": best_mutant_desc,
             "init_passed_tests": init_passed,

@@ -15,6 +15,7 @@ from typing import List
 
 from data_loaders.base_loader import BugLoader, BugRecord
 from configs.path import CODEFLAWS_RESULTS_DIR, CODEFLAWS_SOURCE_DIR
+from core.utils import qualify_func, get_codeflaws_buggy_cfile
 
 
 class CodeflawsLoader(BugLoader):
@@ -33,20 +34,40 @@ class CodeflawsLoader(BugLoader):
     # Helpers
     # ------------------------------------------------------------------
 
+    def _qualify_names(self, names: List[str], source_file: str) -> List[str]:
+        """
+        Gắn đường dẫn file nguồn vào mỗi tên hàm.
+        Nếu tên đã chứa "::" (đã được qualify) thì giữ nguyên.
+        """
+        return [
+            fn if "::" in fn else qualify_func(source_file, fn)
+            for fn in names
+        ]
+
+    def _qualify_tests(self, tests: List[dict], source_file: str) -> List[dict]:
+        """
+        Trả về bản sao của danh sách test với covered_methods đã được qualify.
+        """
+        result = []
+        for t in tests:
+            t_copy = dict(t)
+            covered = t_copy.get("covered_methods", [])
+            t_copy["covered_methods"] = self._qualify_names(covered, source_file)
+            result.append(t_copy)
+        return result
+
     def _resolve_source_file(self, bug_id: str) -> str:
         """
         Tính đường dẫn file .c lỗi của Codeflaws từ bug_id.
         Codeflaws đặt tên theo mẫu:  {prefix}-{version_id}.c
         bên trong thư mục:           {source_dir}/{bug_id}/
         """
-        bug_dir = os.path.join(self.source_dir, bug_id)
-        try:
-            prefix  = "-".join(bug_id.split("-bug-")[0].split("-"))
-            suffix  = bug_id.split("-bug-")[1].split("-")[0]
-            return os.path.join(bug_dir, f"{prefix}-{suffix}.c")
-        except (IndexError, ValueError):
-            # Fallback: trả về thư mục nếu không parse được
-            return bug_dir
+        bug_dir  = os.path.join(self.source_dir, bug_id)
+        cfilename = get_codeflaws_buggy_cfile(bug_id)
+        if cfilename:
+            return os.path.join(bug_dir, cfilename)
+        # Fallback: trả về thư mục nếu không parse được
+        return bug_dir
 
     # ------------------------------------------------------------------
     # BugLoader interface
@@ -75,16 +96,17 @@ class CodeflawsLoader(BugLoader):
                 print(f"[CodeflawsLoader] Lỗi đọc {file_path}: {e}")
                 continue
 
-            bug_id = filename.replace(".json", "")
+            bug_id      = filename.replace(".json", "")
+            source_file = self._resolve_source_file(bug_id)
 
             bugs.append(BugRecord(
                 bug_id          = bug_id,
                 dataset         = "codeflaws",
-                tests           = raw.get("tests", []),
-                ground_truth    = raw.get("ground_truth_functions", []),
-                source_file     = self._resolve_source_file(bug_id),
-                compile_cmd     = raw.get("compile_cmd"),       # tuỳ chọn
-                test_cmd_template = raw.get("test_cmd_template"),  # tuỳ chọn
+                tests           = self._qualify_tests(raw.get("tests", []), source_file),
+                ground_truth    = self._qualify_names(raw.get("ground_truth_functions", []), source_file),
+                source_file     = source_file,
+                compile_cmd     = raw.get("compile_cmd"),
+                test_cmd_template = raw.get("test_cmd_template"),
                 raw             = raw,
             ))
 
@@ -105,12 +127,13 @@ class CodeflawsLoader(BugLoader):
             print(f"[CodeflawsLoader] Lỗi đọc {file_path}: {e}")
             return None
 
+        source_file = self._resolve_source_file(bug_id)
         return BugRecord(
             bug_id          = bug_id,
             dataset         = "codeflaws",
-            tests           = raw.get("tests", []),
-            ground_truth    = raw.get("ground_truth_functions", []),
-            source_file     = self._resolve_source_file(bug_id),
+            tests           = self._qualify_tests(raw.get("tests", []), source_file),
+            ground_truth    = self._qualify_names(raw.get("ground_truth_functions", []), source_file),
+            source_file     = source_file,
             compile_cmd     = raw.get("compile_cmd"),
             test_cmd_template = raw.get("test_cmd_template"),
             raw             = raw,

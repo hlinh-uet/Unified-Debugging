@@ -1,9 +1,11 @@
 import os
+import signal
 import shutil
 import subprocess
 import re
 import glob
 from configs.path import CODEFLAWS_SOURCE_DIR
+from core.utils import get_codeflaws_buggy_cfile
 
 class SandboxAdapter:
     """Class Cầu nối cơ sở để chuẩn hoá mọi dataset (Codeflaws, Defects4C, Defects4J)"""
@@ -32,10 +34,9 @@ class CodeflawsAdapter(SandboxAdapter):
     adapter tự compile bằng Makefile, chạy chương trình, và so sánh output bằng Python.
     """
     def get_source_path(self):
-        bug_dir = os.path.join(CODEFLAWS_SOURCE_DIR, self.bug_id)
-        bug_file_prefix = "-".join(self.bug_id.split("-bug-")[0].split("-"))
-        bug_file_suffix = self.bug_id.split("-bug-")[1].split("-")[0]
-        return os.path.join(bug_dir, f"{bug_file_prefix}-{bug_file_suffix}.c")
+        bug_dir   = os.path.join(CODEFLAWS_SOURCE_DIR, self.bug_id)
+        cfilename = get_codeflaws_buggy_cfile(self.bug_id)
+        return os.path.join(bug_dir, cfilename)
 
     def _parse_test_cases(self, bug_dir):
         """
@@ -94,7 +95,8 @@ class CodeflawsAdapter(SandboxAdapter):
 
             compile_ok = self._compile(bug_dir, expected_name, exe_name)
             if not compile_ok:
-                return False, [], ["Compilation Error"]
+                print(f"    [Sandbox] Compilation failed cho {self.bug_id}.")
+                return False, [], []   # không đưa 'Compilation Error' vào post_failed_tests để tránh sai metrics
 
             exe_path = os.path.join(bug_dir, exe_name)
             test_cases = self._parse_test_cases(bug_dir)
@@ -156,31 +158,51 @@ class CodeflawsAdapter(SandboxAdapter):
         """
         Chạy exe với input, so sánh stdout với expected output.
         So sánh ignore trailing whitespace mỗi dòng (tương đương diff --ignore-trailing-space).
+
+        Dùng stdin=PIPE + communicate(input=data) để Python quản lý cả stdin/stdout
+        qua pipe — timeout mới hoạt động đúng trên mọi nền tảng (kể cả macOS Python 3.9).
+        Dùng start_new_session=True + os.killpg(SIGKILL) để kill toàn process group.
         """
         try:
-            with open(input_file, "r") as f_in:
-                proc = subprocess.run(
-                    [exe_path],
-                    stdin=f_in,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    timeout=timeout
-                )
-        except subprocess.TimeoutExpired:
-            return False
-        except Exception:
-            return False
-
-        actual = proc.stdout or ""
-
-        try:
+            with open(input_file, "r") as f:
+                input_data = f.read()
             with open(expected_output_file, "r") as f:
                 expected = f.read()
         except Exception:
             return False
 
-        return _compare_output(actual, expected)
+        try:
+            proc = subprocess.Popen(
+                [exe_path],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,  # proc.pid == pgid khi dùng start_new_session
+            )
+            try:
+                stdout, _ = proc.communicate(input=input_data, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                # SIGKILL toàn bộ process group
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    proc.kill()
+                # Drain pipes với timeout ngắn để tránh block vô hạn
+                try:
+                    proc.communicate(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+                return False
+        except Exception:
+            try:
+                proc.kill()
+                proc.wait()
+            except Exception:
+                pass
+            return False
+
+        return _compare_output(stdout or "", expected)
 
 
 def _compare_output(actual: str, expected: str) -> bool:

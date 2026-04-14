@@ -1,30 +1,43 @@
 import os
 import json
 import re
+import shutil
 import subprocess
 from typing import Optional
 
-import google.generativeai as genai
 from dotenv import load_dotenv
 
 from configs.path import EXPERIMENTS_DIR, PATCHES_DIR
 from data_loaders.base_loader import get_loader, BugRecord
 from data_loaders.sandbox_adapter import get_sandbox_adapter
-from core.utils import extract_function_code
+from core.utils import (
+    extract_function_code,
+    parse_qualified_func,
+    get_codeflaws_accepted_cfile,
+)
 
 load_dotenv()
 
+# Provider mặc định – đọc từ .env, có thể override qua CLI
+_DEFAULT_LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
+
 
 # ---------------------------------------------------------------------------
-# LLM
+# LLM – provider-specific helpers
 # ---------------------------------------------------------------------------
 
-def call_llm(prompt: str) -> Optional[str]:
-    """Gọi Gemini để sinh bản vá."""
+def _call_gemini(prompt: str) -> Optional[str]:
+    """Gọi Google Gemini (gemini-2.5-flash) để sinh bản vá."""
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        print("[LLM] Thiếu thư viện 'google-generativeai'. Cài bằng: pip install google-generativeai")
+        return None
+
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        print("Warning: GEMINI_API_KEY chưa được đặt. Dùng dummy LLM.")
-        return "/* DUMMY PATCH */\n// TODO: Implement LLM call."
+        print("[LLM] Warning: GEMINI_API_KEY chưa được đặt trong .env.")
+        return None
 
     try:
         genai.configure(api_key=api_key)
@@ -33,11 +46,77 @@ def call_llm(prompt: str) -> Optional[str]:
         return response.text
     except Exception as e:
         error_msg = str(e)
-        if "Quota" in error_msg or "limit" in error_msg:
-            print("Warning: API quota limit đã đạt. Thử lại sau.")
+        if "Quota" in error_msg or "quota" in error_msg or "limit" in error_msg:
+            print("[LLM] Warning: Gemini API quota limit đã đạt. Thử lại sau.")
         else:
-            print(f"Error calling LLM: {error_msg}")
+            print(f"[LLM] Error calling Gemini: {error_msg}")
         return None
+
+
+def _call_openai(prompt: str, model: str = "gpt-4o-mini") -> Optional[str]:
+    """Gọi OpenAI ChatCompletion để sinh bản vá."""
+    try:
+        from openai import OpenAI
+    except ImportError:
+        print("[LLM] Thiếu thư viện 'openai'. Cài bằng: pip install openai")
+        return None
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        print("[LLM] Warning: OPENAI_API_KEY chưa được đặt trong .env.")
+        return None
+
+    try:
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Bạn là một chuyên gia sửa lỗi chương trình C/C++. "
+                        "CHỈ trả về mã nguồn C của hàm đã được sửa, không kèm lời giải thích."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        error_msg = str(e)
+        if "quota" in error_msg.lower() or "rate_limit" in error_msg.lower():
+            print("[LLM] Warning: OpenAI API quota/rate limit đã đạt. Thử lại sau.")
+        else:
+            print(f"[LLM] Error calling OpenAI: {error_msg}")
+        return None
+
+
+def call_llm(prompt: str, provider: Optional[str] = None) -> Optional[str]:
+    """
+    Gọi LLM để sinh bản vá.
+
+    Args:
+        prompt:   Nội dung prompt gửi đến LLM.
+        provider: 'gemini' | 'openai'. Nếu None, đọc từ biến môi trường
+                  LLM_PROVIDER (mặc định: 'gemini').
+
+    Returns:
+        Chuỗi mã nguồn do LLM trả về, hoặc None nếu lỗi.
+    """
+    chosen = (provider or _DEFAULT_LLM_PROVIDER).strip().lower()
+
+    if chosen == "openai":
+        openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        print(f"[LLM] Provider: OpenAI ({openai_model})")
+        return _call_openai(prompt, model=openai_model)
+
+    if chosen == "gemini":
+        print("[LLM] Provider: Gemini (gemini-2.5-flash)")
+        return _call_gemini(prompt)
+
+    print(f"[LLM] Warning: Provider không hỗ trợ '{chosen}'. Chọn 'gemini' hoặc 'openai'.")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -111,10 +190,14 @@ def _clean_llm_patch(patched_func: str) -> str:
     return patched_func.strip()
 
 
-def run_apr_pipeline(dataset: str = "codeflaws"):
+def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = None):
     """
     Pipeline APR (LLM-based).
     Load dữ liệu qua get_loader() – không đọc lại file JSON thủ công.
+
+    Args:
+        dataset:      Tên dataset (mặc định 'codeflaws').
+        llm_provider: 'gemini' | 'openai'. Nếu None, đọc từ LLM_PROVIDER trong .env.
     """
     os.makedirs(EXPERIMENTS_DIR, exist_ok=True)
 
@@ -174,37 +257,36 @@ def run_apr_pipeline(dataset: str = "codeflaws"):
         init_passed = [t.get("test_id") for t in (bug_record.tests if bug_record else []) if t.get("outcome") in ("PASS", "PASSED")]
         init_failed = [t.get("test_id") for t in (bug_record.tests if bug_record else []) if t.get("outcome") in ("FAIL", "FAILED")]
 
-        status      = "skipped"
-        patched_func = None
-        target_func  = None
-        post_passed  = []
-        post_failed  = []
-        attempted    = False
+        status        = "skipped"
+        patched_func  = None
+        patched_source = None   # toàn bộ nội dung file sau khi vá
+        target_func   = None
+        post_passed   = []
+        post_failed   = []
+        attempted     = False   # đã thử ít nhất 1 hàm
+        llm_attempted = False   # LLM đã thực sự sinh patch ít nhất 1 lần
 
         # Sao lưu accepted patch một lần (cho evaluation sau này)
-        import shutil
         bug_dir = os.path.dirname(bug_source_path)
-        try:
-            prefix  = "-".join(bug_id.split("-bug-")[0].split("-"))
-            suffix_accepted = bug_id.split("-bug-")[1].split("-")[1]
-            accepted_src = os.path.join(bug_dir, f"{prefix}-{suffix_accepted}.c")
+        accepted_cfile = get_codeflaws_accepted_cfile(bug_id)
+        if accepted_cfile:
+            accepted_src = os.path.join(bug_dir, accepted_cfile)
             os.makedirs(os.path.join(EXPERIMENTS_DIR, "correct_patches"), exist_ok=True)
             if os.path.exists(accepted_src):
                 shutil.copy2(accepted_src, os.path.join(EXPERIMENTS_DIR, "correct_patches", f"{bug_id}_accepted.c"))
-        except (IndexError, ValueError):
-            pass
 
-        for func_name, score in sorted_funcs:
+        for qualified_name, score in sorted_funcs:
             if score == 0.0:
                 continue
 
+            _, func_name = parse_qualified_func(qualified_name)
             print(f"  - Kiểm tra hàm '{func_name}' (Score: {score:.4f})")
             func_code, start_idx, end_idx = extract_function_code(source_code, func_name)
             if not func_code:
                 print(f"    WARNING: Không thể trích xuất hàm {func_name}")
                 continue
 
-            target_func = func_name
+            target_func = qualified_name
             attempted = True
 
             prompt = f"""Bạn là một chuyên gia sửa lỗi chương trình C/C++.
@@ -226,11 +308,12 @@ Nhiệm vụ của bạn là sửa một lỗi thuật toán hoặc biên dịch
 // Bắt đầu viết lại hàm {func_name} tại đây:
 """
 
-            raw_patch = call_llm(prompt)
+            raw_patch = call_llm(prompt, provider=llm_provider)
             if not raw_patch:
                 print("    [ERROR] LLM trả về None. Bỏ qua hàm này.")
                 continue
 
+            llm_attempted = True
             patched_func   = _clean_llm_patch(raw_patch)
             patched_source = source_code[:start_idx] + patched_func + source_code[end_idx:]
 
@@ -244,7 +327,12 @@ Nhiệm vụ của bạn là sửa một lỗi thuật toán hoặc biên dịch
                 print(f"    [SUCCESS] Bản vá hợp lệ cho {bug_id} trong hàm '{func_name}'!")
                 patch_path = os.path.join(PATCHES_DIR, f"{bug_id}_patch.c")
                 os.makedirs(PATCHES_DIR, exist_ok=True)
-                os.rename(tmp_path, patch_path)
+                try:
+                    shutil.move(tmp_path, patch_path)  # dùng move thay rename để an toàn cross-device
+                except Exception as e_mv:
+                    print(f"    [WARN] Không lưu được patch file: {e_mv}")
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
                 status = "success"
                 break
             else:
@@ -253,11 +341,13 @@ Nhiệm vụ của bạn là sửa một lỗi thuật toán hoặc biên dịch
                     os.remove(tmp_path)
 
         if attempted and status == "skipped":
-            status = "failed"
+            # Phân biệt: LLM không bao giờ sinh được patch vs. patch sinh ra nhưng fail test
+            status = "failed" if llm_attempted else "llm_failed"
 
         apr_results[bug_id] = {
             "status":            status,
             "patched_function":  patched_func,
+            "patched_file":      patched_source,   # toàn bộ file sau khi vá (để tính ED file-level)
             "selected_function": target_func,
             "init_passed_tests": init_passed,
             "init_failed_tests": init_failed,

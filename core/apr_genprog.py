@@ -33,6 +33,7 @@ Yêu cầu hệ thống:
 import os
 import re
 import json
+import glob
 import shutil
 import subprocess
 import tempfile
@@ -42,7 +43,7 @@ from dotenv import load_dotenv
 
 from configs.path import EXPERIMENTS_DIR, PATCHES_DIR, CODEFLAWS_SOURCE_DIR
 from data_loaders.base_loader import get_loader, BugRecord
-from core.utils import extract_function_code
+from core.utils import extract_function_code, qualify_func
 
 load_dotenv()
 
@@ -50,16 +51,23 @@ load_dotenv()
 # Cấu hình
 # ---------------------------------------------------------------------------
 
-GENPROG_BIN    = os.getenv("GENPROG_BIN", "repair")       # binary GenProg
-GENPROG_TIMEOUT = int(os.getenv("GENPROG_TIMEOUT", "3600"))  # giây (mặc định 1 giờ)
-TEST_TIMEOUT    = int(os.getenv("GENPROG_TEST_TIMEOUT", "50"))  # giây mỗi test case
+GENPROG_BIN         = os.getenv("GENPROG_BIN", "repair")        # binary GenProg
+GENPROG_TIMEOUT     = int(os.getenv("GENPROG_TIMEOUT", "3600"))  # giây (mặc định 1 giờ)
+TEST_TIMEOUT        = int(os.getenv("GENPROG_TEST_TIMEOUT", "50"))  # giây mỗi test case
+GENPROG_POPSIZE     = os.getenv("GENPROG_POPSIZE")     # None = dùng giá trị trong configuration-default
+GENPROG_GENERATIONS = os.getenv("GENPROG_GENERATIONS") # None = dùng giá trị trong configuration-default
 
 # Thư mục chứa file configuration-default và compile.pl (copy từ all-script)
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 GENPROG_SCRIPTS_DIR = os.path.join(_BASE_DIR, "codeflaws", "all-script")
 
 # Thư mục tạm để GenProg chạy (workdir)
-GENPROG_RUN_DIR = os.path.join(EXPERIMENTS_DIR, "genprog-run")
+# Phải là path KHÔNG có khoảng trắng vì GenProg truyền path này qua shell
+# (compile.pl nhận __EXE_NAME__ chưa được quote → shell split tại space)
+_default_run_dir = os.path.join(EXPERIMENTS_DIR, "genprog-run")
+GENPROG_RUN_DIR = os.getenv("GENPROG_RUN_DIR") or (
+    "/tmp/genprog-run" if " " in _default_run_dir else _default_run_dir
+)
 
 
 # ---------------------------------------------------------------------------
@@ -160,13 +168,25 @@ def _write_genprog_config(work_dir: str, bug_id: str,
         with open(config_default, "r") as f:
             base_lines = f.readlines()
 
-    # Lọc bỏ các dòng --pos-tests / --neg-tests nếu đã có trong default
+    # Các key bị override — lọc bỏ khỏi default để tránh trùng
+    override_keys = {"--pos-tests", "--neg-tests"}
+    if GENPROG_POPSIZE:
+        override_keys.add("--popsize")
+    if GENPROG_GENERATIONS:
+        override_keys.add("--generations")
+
     filtered = [ln for ln in base_lines
-                if not ln.startswith("--pos-tests") and not ln.startswith("--neg-tests")]
+                if not any(ln.startswith(k) for k in override_keys)]
 
     # Thêm pos/neg tests từ .revlog
     filtered.append(f"--pos-tests {pos_count}\n")
     filtered.append(f"--neg-tests {neg_count}\n")
+
+    # Override popsize / generations nếu được set trong .env
+    if GENPROG_POPSIZE:
+        filtered.append(f"--popsize {GENPROG_POPSIZE}\n")
+    if GENPROG_GENERATIONS:
+        filtered.append(f"--generations {GENPROG_GENERATIONS}\n")
 
     with open(config_out, "w") as f:
         f.writelines(filtered)
@@ -192,33 +212,105 @@ def _copy_compile_pl(work_dir: str, scripts_dir: str):
 # Helpers: chạy GenProg
 # ---------------------------------------------------------------------------
 
+_CILLY_FLAGS = (
+    "--save-temps -std=c99 "
+    "-fno-optimize-sibling-calls "
+    "-fno-strict-aliasing "
+    "-fno-asm"
+)
+_CILLY_DOCKER_IMAGE = "squareslab/genprog"
+_CILLY_IN_DOCKER    = "/root/.opam/system/bin/cilly"
+
+# Dòng gốc trong test-genprog.sh dùng `/usr/bin/time` không có trong Docker image
+_TEST_SCRIPT_OLD_LINE = (
+    'if ! `which time` -o time.out -f "(%es)" ./$EXEFILE < $test_case'
+    " | sed -e '/^$/d' -e 's/^[ \\t]*//' > $MY_NAME$test_case; then"
+)
+# Replacement: chạy trực tiếp + dùng PIPESTATUS để bắt exit code của executable
+_TEST_SCRIPT_NEW_LINES = (
+    './$EXEFILE < $test_case 2>/dev/null'
+    " | sed -e '/^$/d' -e 's/^[ \\t]*//' > $MY_NAME$test_case\n"
+    "_exe_rc=${PIPESTATUS[0]}\n"
+    "touch time.out\n"
+    "if [ $_exe_rc -ne 0 ]; then"
+)
+
+
+def _patch_test_script(work_dir: str) -> None:
+    """
+    Patch test-genprog.sh trong work_dir để không dùng `/usr/bin/time`.
+    Docker image squareslab/genprog không có /usr/bin/time → script bị lỗi ngay.
+    Thay bằng cách chạy exe trực tiếp và dùng PIPESTATUS để bắt exit code.
+    """
+    script_path = os.path.join(work_dir, "test-genprog.sh")
+    if not os.path.exists(script_path):
+        return
+    with open(script_path, "r") as f:
+        content = f.read()
+    if _TEST_SCRIPT_OLD_LINE in content:
+        content = content.replace(_TEST_SCRIPT_OLD_LINE, _TEST_SCRIPT_NEW_LINES)
+        with open(script_path, "w") as f:
+            f.write(content)
+
+
 def _cilly_build(work_dir: str) -> bool:
     """
-    Chạy `make CC="cilly" CFLAGS="..."` để sinh file .cil.c.
-    Trả về True nếu build thành công.
+    Chạy `make CC="cilly"` để sinh file .cil.c.
+
+    Thứ tự ưu tiên:
+    1. Nếu `cilly` có sẵn trên host → chạy trực tiếp.
+    2. Nếu không (macOS) và Docker khả dụng → chạy cilly bên trong
+       container squareslab/genprog (nơi cilly nằm ở _CILLY_IN_DOCKER).
+
+    Không fallback sang plain `make` vì sẽ tạo binary sai kiến trúc
+    (macOS) khiến GenProg Docker không thể chạy sanity check.
     """
-    cilly_flags = (
-        "--save-temps -std=c99 "
-        "-fno-optimize-sibling-calls "
-        "-fno-strict-aliasing "
-        "-fno-asm"
-    )
-    cmd = ["make", f"CC=cilly", f"CFLAGS={cilly_flags}"]
-
-    # Nếu không có cilly, thử build thông thường
-    result = subprocess.run(
-        cmd, cwd=work_dir,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE
-    )
-
-    if result.returncode != 0:
-        # Fallback: make không dùng cilly
+    if shutil.which("cilly"):
         result = subprocess.run(
-            ["make"], cwd=work_dir,
+            ["make", "CC=cilly", f"CFLAGS={_CILLY_FLAGS}"],
+            cwd=work_dir,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
+        return result.returncode == 0
 
-    return result.returncode == 0
+    if shutil.which("docker"):
+        make_cmd = (
+            f"make CC={_CILLY_IN_DOCKER} "
+            f"CFLAGS='{_CILLY_FLAGS}'"
+        )
+        docker_cmd = [
+            "docker", "run", "--rm",
+            "--platform", "linux/amd64",
+            "-v", f"{work_dir}:{work_dir}",
+            "-w", work_dir,
+            _CILLY_DOCKER_IMAGE,
+            "bash", "-c", make_cmd,
+        ]
+        result = subprocess.run(
+            docker_cmd,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        return result.returncode == 0
+
+    return False
+
+
+def _clean_compiled_artifacts(work_dir: str, cfile: str) -> None:
+    """
+    Xóa binary và object file đã compile trên host (macOS).
+
+    Cần thiết khi GenProg chạy qua Docker: nếu còn binary macOS trong work_dir,
+    `make` bên trong container sẽ thấy file đã up-to-date và không recompile,
+    dẫn đến sanity check thất bại vì binary sai kiến trúc (macOS vs Linux).
+    """
+    exe_name = cfile.replace(".c", "")
+    for artifact in [exe_name, exe_name + ".o"]:
+        fpath = os.path.join(work_dir, artifact)
+        if os.path.exists(fpath):
+            try:
+                os.remove(fpath)
+            except OSError:
+                pass
 
 
 def _move_cil_to_preprocessed(work_dir: str, cfile: str) -> bool:
@@ -276,17 +368,19 @@ def _determine_status(output: str) -> str:
     """
     Phân tích output GenProg để xác định kết quả.
     Trả về: 'repair_found' | 'no_repair' | 'timeout' | 'build_failed' | 'error'
+    Kiểm tra theo thứ tự: timeout → error → repair_found → build_failed → no_repair.
     """
-    if "Repair Found" in output:
-        return "repair_found"
-    if "no repair" in output.lower():
-        return "no_repair"
-    if "Timeout" in output or output.strip() == "Timeout":
+    # Timeout được set thủ công là string chính xác "Timeout" hoặc xuất hiện trong log GenProg
+    if output.strip() == "Timeout" or "Timeout" in output:
         return "timeout"
-    if "Failed to make" in output or "BUILDFAILED" in output:
-        return "build_failed"
     if "ERROR" in output and ("not found" in output or "không tìm thấy" in output):
         return "error"
+    if "Repair Found" in output:
+        return "repair_found"
+    if "Failed to make" in output or "BUILDFAILED" in output:
+        return "build_failed"
+    if "no repair" in output.lower():
+        return "no_repair"
     return "no_repair"
 
 
@@ -442,6 +536,25 @@ def _validate_patch(work_dir: str, cfile: str, bug_id: str) -> Tuple[List[str], 
                 else:
                     failed.append(tc_id)
 
+        # Bao gồm cả heldout tests (nhất quán với CodeflawsAdapter.validate())
+        for inp in sorted(globmod.glob(os.path.join(work_dir, "input-heldout-pos*"))):
+            tag = os.path.basename(inp).replace("input-", "")
+            out = os.path.join(work_dir, f"output-{tag}")
+            if os.path.exists(out):
+                if _run_one_test(exe_path, inp, out):
+                    passed.append(tag)
+                else:
+                    failed.append(tag)
+
+        for inp in sorted(globmod.glob(os.path.join(work_dir, "input-heldout-neg*"))):
+            tag = os.path.basename(inp).replace("input-", "")
+            out = os.path.join(work_dir, f"output-{tag}")
+            if os.path.exists(out):
+                if _run_one_test(exe_path, inp, out):
+                    passed.append(tag)
+                else:
+                    failed.append(tag)
+
     finally:
         if os.path.exists(backup):
             shutil.move(backup, orig_file)
@@ -530,6 +643,13 @@ def run_genprog_pipeline(dataset: str = "codeflaws",
     print(f"[GenProg] GenProg binary: '{GENPROG_BIN}' | Timeout: {GENPROG_TIMEOUT}s")
     print(f"[GenProg] Scripts dir: {scripts_dir}\n")
 
+    # Kiểm tra binary tồn tại trước khi chạy (early-exit để tránh loop vô ích)
+    import shutil as _shutil
+    if not _shutil.which(GENPROG_BIN):
+        print(f"[GenProg] Lỗi: Không tìm thấy binary '{GENPROG_BIN}' trong PATH.")
+        print(f"          Hãy cài GenProg hoặc set biến môi trường GENPROG_BIN trong .env.")
+        return
+
     for bug_id in fl_results:
         # Bỏ qua nếu đã xử lý (trừ khi bị skipped)
         if bug_id in genprog_results and genprog_results[bug_id].get("status") not in ("skipped", "error"):
@@ -569,6 +689,9 @@ def run_genprog_pipeline(dataset: str = "codeflaws",
             _write_result(genprog_results, results_file, bug_id, "error", bug_record)
             continue
 
+        # Patch test-genprog.sh: /usr/bin/time không có trong Docker image
+        _patch_test_script(work_dir)
+
         # --- Bước 3: Ghi config ---
         config_path = _write_genprog_config(
             work_dir, bug_id, cfile, pos_count, neg_count, scripts_dir
@@ -578,15 +701,21 @@ def run_genprog_pipeline(dataset: str = "codeflaws",
         # --- Bước 4: Tạo thư mục preprocessed + cilly build ---
         cilly_ok = _cilly_build(work_dir)
         if not cilly_ok:
-            print(f"    [WARN] cilly build thất bại → thử dùng .c gốc làm preprocessed")
+            print(f"    [WARN] cilly build thất bại → dùng .c gốc làm preprocessed")
 
         _move_cil_to_preprocessed(work_dir, cfile)
 
+        # Xóa binary/object do host compile ra (nếu có), tránh Docker dùng nhầm
+        # binary sai kiến trúc → make trong container sẽ recompile từ đầu
+        _clean_compiled_artifacts(work_dir, cfile)
+
         # Dọn dẹp các file coverage cũ để GenProg không bị nhầm cache
-        for leftover in ["repair.cache", "repair.debug.*", "coverage.path.*"]:
-            for fp in [os.path.join(work_dir, leftover)]:
-                if os.path.exists(fp):
+        for pattern in ["repair.cache", "repair.debug.*", "coverage.path.*"]:
+            for fp in glob.glob(os.path.join(work_dir, pattern)):
+                try:
                     os.remove(fp)
+                except OSError:
+                    pass
 
         # --- Bước 5: Gọi GenProg ---
         print(f"    [RUN] Gọi GenProg (timeout={GENPROG_TIMEOUT}s)...")
@@ -607,13 +736,26 @@ def run_genprog_pipeline(dataset: str = "codeflaws",
         final_status    = genprog_status
         patched_func    = None
         selected_func   = None
+        patched_file_content: Optional[str] = None  # toàn bộ file sau khi vá
 
         if genprog_status == "repair_found":
             patch_path = _save_patch(work_dir, bug_id, cfile)
 
-            patched_func, selected_func = _extract_changed_function(work_dir, cfile)
-            if patched_func:
-                print(f"    [INFO] Trích xuất patched_function: hàm '{selected_func}'")
+            # Đọc nội dung file đã vá (cần cho file-level edit distance)
+            repair_file = os.path.join(work_dir, "repair", cfile)
+            if os.path.exists(repair_file):
+                try:
+                    with open(repair_file, "r") as f:
+                        patched_file_content = f.read()
+                except Exception:
+                    pass
+
+            patched_func, raw_func_name = _extract_changed_function(work_dir, cfile)
+            if patched_func and raw_func_name:
+                selected_func = qualify_func(bug_record.source_file, raw_func_name)
+                print(f"    [INFO] Trích xuất patched_function: hàm '{raw_func_name}'")
+            elif raw_func_name:
+                selected_func = qualify_func(bug_record.source_file, raw_func_name)
 
             if patch_path:
                 print(f"    [VALIDATE] Đang xác nhận bản vá...")
@@ -639,6 +781,7 @@ def run_genprog_pipeline(dataset: str = "codeflaws",
             neg_count=neg_count,
             patched_function=patched_func,
             selected_function=selected_func,
+            patched_file=patched_file_content,
         )
 
         # Tuỳ chọn: giữ lại workdir để debug, bỏ comment dòng dưới để xoá
@@ -661,7 +804,8 @@ def _write_result(results: Dict, results_file: str, bug_id: str, status: str,
                   pos_count: int = 0,
                   neg_count: int = 0,
                   patched_function: Optional[str] = None,
-                  selected_function: Optional[str] = None):
+                  selected_function: Optional[str] = None,
+                  patched_file: Optional[str] = None):
     """Ghi kết quả một bug vào dict và flush xuống file JSON."""
     tests = bug_record.tests if bug_record else []
     init_passed = [t.get("test_id") for t in tests if t.get("outcome") in ("PASS", "PASSED")]
@@ -670,6 +814,7 @@ def _write_result(results: Dict, results_file: str, bug_id: str, status: str,
     results[bug_id] = {
         "status":             status,
         "patched_function":   patched_function,
+        "patched_file":       patched_file,   # toàn bộ file sau khi vá (để tính ED file-level)
         "selected_function":  selected_function,
         "patch_file":         patch_path,
         "init_passed_tests":  init_passed,

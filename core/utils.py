@@ -8,6 +8,44 @@ Tránh duplicate code giữa các module.
 import re
 from typing import Tuple, Optional
 
+# ---------------------------------------------------------------------------
+# Qualified function name helpers
+# ---------------------------------------------------------------------------
+# Format: "<absolute_source_file_path>::<func_name>"
+# Ví dụ: "/path/to/benchmark/10-A-bug-.../10-A-5914564.c::main"
+# Dùng "::" làm separator vì ký tự này không xuất hiện trong tên file Unix.
+
+def qualify_func(source_file: str, func_name: str) -> str:
+    """
+    Tạo tên hàm đầy đủ bao gồm đường dẫn file nguồn.
+
+    Args:
+        source_file: Đường dẫn tuyệt đối đến file nguồn chứa hàm.
+        func_name:   Tên hàm (identifier C/C++).
+
+    Returns:
+        Chuỗi dạng "<source_file>::<func_name>".
+    """
+    return f"{source_file}::{func_name}"
+
+
+def parse_qualified_func(qualified: str) -> Tuple[str, str]:
+    """
+    Phân tách chuỗi tên hàm đầy đủ thành (source_file, func_name).
+
+    Args:
+        qualified: Chuỗi dạng "<source_file>::<func_name>" hoặc tên hàm đơn giản.
+
+    Returns:
+        Tuple (source_file, func_name).
+        Nếu không chứa "::", trả về ("", qualified).
+    """
+    sep = "::"
+    idx = qualified.rfind(sep)
+    if idx < 0:
+        return "", qualified
+    return qualified[:idx], qualified[idx + len(sep):]
+
 
 def extract_function_code(
     source_code: str,
@@ -110,3 +148,33 @@ def _find_matching_brace(source: str, open_brace_pos: int) -> int:
         i += 1
 
     return -1
+
+
+# ---------------------------------------------------------------------------
+# Codeflaws-specific filename helpers (dùng chung cho tất cả modules)
+# ---------------------------------------------------------------------------
+
+def get_codeflaws_buggy_cfile(bug_id: str) -> str:
+    """
+    Tính tên file .c lỗi của Codeflaws từ bug_id.
+    Ví dụ: '476-A-bug-16608008-16608059' → '476-A-16608008.c'
+    """
+    try:
+        prefix    = bug_id.split("-bug-")[0]
+        buggy_ver = bug_id.split("-bug-")[1].split("-")[0]
+        return f"{prefix}-{buggy_ver}.c"
+    except (IndexError, ValueError):
+        return ""
+
+
+def get_codeflaws_accepted_cfile(bug_id: str) -> str:
+    """
+    Tính tên file .c accepted (đúng) của Codeflaws từ bug_id.
+    Ví dụ: '476-A-bug-16608008-16608059' → '476-A-16608059.c'
+    """
+    try:
+        prefix       = bug_id.split("-bug-")[0]
+        accepted_ver = bug_id.split("-bug-")[1].split("-")[1]
+        return f"{prefix}-{accepted_ver}.c"
+    except (IndexError, ValueError):
+        return ""
