@@ -1,0 +1,25 @@
+{
+    "bug_id": "476-A-bug-16608008-16608059",
+    "dataset_name": "codeflaws",
+    "language": "C",
+    "source_file": "/path/to/codeflaws/benchmark/476-A-bug-16608008-16608059/476-A-16608008.c",
+    "compile_cmd": "make",
+    "test_cmd_template": "bash test-genprog.sh {test_id}",
+    "tests": [
+        {
+            "test_id": "pos1",
+            "outcome": "PASS"
+        },
+        {
+            "test_id": "pos2",
+            "outcome": "PASS"
+        },
+        {
+            "test_id": "neg1",
+            "outcome": "FAIL",
+            "expected_output": "YES\n",
+            "actual_output": "NO\n",
+            "fail_reason": "Output mismatch"
+        }
+    ]
+}

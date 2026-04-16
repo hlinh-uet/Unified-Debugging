@@ -1,90 +1,108 @@
 import os
 import json
 import argparse
-from data_loaders.codeflaws_loader import load_all_bugs
+
+from data_loaders.base_loader import get_loader
 from core.fl_tarantula import calculate_tarantula
 from core.apr_baseline import run_apr_pipeline
+from core.apr_genprog import run_genprog_pipeline
 from core.apr_mutation import run_mutation_pipeline
 from evaluation.eval_fl import evaluate_fl
 from evaluation.eval_apr import evaluate_apr
 from configs.path import EXPERIMENTS_DIR
 
-def run_fl():
-    print("Loading bugs from Codeflaws...")
-    bugs = load_all_bugs()
-    print(f"Loaded {len(bugs)} bugs.")
+
+def run_fl(dataset: str = "codeflaws"):
+    """
+    Bước 1 – Fault Localization (Tarantula).
+    Load toàn bộ bug từ dataset được chỉ định, tính điểm Tarantula cho từng bug
+    và lưu kết quả ra experiments/tarantula_results.json.
+    """
+    print(f"[FL] Đang load bugs từ dataset '{dataset}'...")
+    loader = get_loader(dataset)
+    bugs = loader.load_all()
+    print(f"[FL] Đã load {len(bugs)} bugs.")
 
     if not bugs:
-        print("No bugs found. Make sure the CODEFLAWS_RESULTS_DIR is correct.")
+        print(f"[FL] Không tìm thấy bug nào. Kiểm tra lại đường dẫn dataset '{dataset}'.")
         return
 
     os.makedirs(EXPERIMENTS_DIR, exist_ok=True)
     results = {}
 
     for bug in bugs:
-        bug_id = bug['bug_id']
-        test_data_dict = bug['test_data']
-        test_data = test_data_dict.get('tests', [])
-        
-        # Save info about ground truth functions straight in the dict
-        ground_truth_funcs = test_data_dict.get('ground_truth_functions', [])
-        
-        print(f"Calculating Tarantula score for {bug_id}...")
-        scores = calculate_tarantula(test_data)
-        
-        results[bug_id] = {
-            'scores': scores,
-            'ground_truth': ground_truth_funcs
+        print(f"[FL] Tính điểm Tarantula cho {bug.bug_id}...")
+        scores = calculate_tarantula(bug.tests)
+        results[bug.bug_id] = {
+            "scores":       scores,
+            "ground_truth": bug.ground_truth,
         }
 
     output_file = os.path.join(EXPERIMENTS_DIR, "tarantula_results.json")
-    with open(output_file, 'w') as f:
+    with open(output_file, "w") as f:
         json.dump(results, f, indent=4)
-        
-    print(f"Tarantula scores saved to {output_file}")
+
+    print(f"[FL] Điểm Tarantula đã được lưu vào {output_file}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Unified Debugging Pipeline")
-    parser.add_argument('--fl', action='store_true', help='Chỉ chạy Fault Localization (Tarantula)')
-    parser.add_argument('--apr', action='store_true', help='Chỉ chạy Automated Program Repair (APR với LLM)')
-    parser.add_argument('--apr-mutation', action='store_true', help='Chỉ chạy APR sử dụng Local Heuristic Mutation (Không cần LLM)')
-    parser.add_argument('--eval', action='store_true', help='Chỉ chạy đánh giá kết quả từ cả FL và APR (Evaluation)')
-    parser.add_argument('--all', action='store_true', help='Chạy toàn bộ quy trình: FL -> APR -> Evaluation')
+    parser.add_argument(
+        "--dataset", default="codeflaws",
+        help="Tên dataset cần chạy: codeflaws (mặc định), defects4c, ..."
+    )
+    parser.add_argument("--fl",           action="store_true", help="Chỉ chạy Fault Localization (Tarantula)")
+    parser.add_argument("--apr",          action="store_true", help="Chỉ chạy APR với LLM")
+    parser.add_argument("--apr-mutation", action="store_true", help="Chỉ chạy APR Heuristic Mutation (không cần LLM)")
+    parser.add_argument("--apr-genprog",  action="store_true", help="Chỉ chạy APR sử dụng GenProg (cần cài genprog binary)")
+    parser.add_argument("--eval",         action="store_true", help="Chỉ chạy Evaluation")
+    parser.add_argument("--all",          action="store_true", help="Chạy toàn bộ: FL → APR → Evaluation")
+    parser.add_argument(
+        "--llm",
+        default=None,
+        choices=["gemini", "openai", "claude", "qwen"],
+        help="LLM provider cho APR: 'gemini' (mặc định) hoặc 'openai' (gpt-4o-mini). "
+             "Override biến môi trường LLM_PROVIDER.",
+    )
     args = parser.parse_args()
 
-    # Nếu chọn --all hoặc không truyền tham số nào thì chạy toàn bộ pipeline (ưu tiên LLM cho luồng chính)
-    if args.all or (not args.fl and not args.apr and not args.apr_mutation and not args.eval):
-        print("Đang chạy toàn bộ quy trình gốc (FL -> APR với LLM -> Evaluation)...")
-        run_fl()
-        run_apr_pipeline()
+    dataset      = args.dataset
+    llm_provider = args.llm   # None → đọc từ LLM_PROVIDER trong .env
+
+    # Nếu không truyền flag nào thì mặc định chạy toàn bộ
+    run_all = args.all or (not args.fl and not args.apr and not args.apr_mutation
+                          and not getattr(args, 'apr_genprog', False) and not args.eval)
+
+    if run_all:
+        print(f"[Pipeline] Chạy toàn bộ quy trình trên dataset '{dataset}' (FL → APR LLM → Evaluation)...")
+        run_fl(dataset)
+        run_apr_pipeline(dataset, llm_provider=llm_provider)
         evaluate_fl()
         evaluate_apr()
     else:
         if args.fl:
-            print("Đang chạy quy trình Fault Localization...")
-            run_fl()
+            print(f"[Pipeline] Chạy Fault Localization trên dataset '{dataset}'...")
+            run_fl(dataset)
             evaluate_fl()
+
         if args.apr:
-            print("Đang chạy quy trình Automated Program Repair (LLM)...")
-            run_apr_pipeline()
+            print(f"[Pipeline] Chạy APR (LLM: {llm_provider or 'default'}) trên dataset '{dataset}'...")
+            run_apr_pipeline(dataset, llm_provider=llm_provider)
             evaluate_apr()
+
         if args.apr_mutation:
-            print("Đang chạy quy trình APR (Mutation Local Baseline)...")
-            run_mutation_pipeline()
-            # Báo cáo sẽ được sinh ra ở json riêng, nhưng nếu muốn evaluate có thể trỏ script evaluation vào file đó!
+            print(f"[Pipeline] Chạy APR Mutation trên dataset '{dataset}'...")
+            run_mutation_pipeline(dataset)
+
+        if getattr(args, 'apr_genprog', False):
+            print(f"[Pipeline] Chạy APR GenProg trên dataset '{dataset}'...")
+            run_genprog_pipeline(dataset)
+
         if args.eval:
-            print("Đang chạy riêng quy trình thông kê Evaluation...")
+            print("[Pipeline] Chạy Evaluation...")
             evaluate_fl()
             evaluate_apr()
 
-    print("\nCác tính năng mới đã được thêm vào:")
-    print(
-        "1. Tích hợp Sandbox (Cơ chế test bằng test case có sẵn của test-genprog.sh).\n"
-        "2. Đánh giá Top-K Tarantula bằng Ground Truth file.\n"
-        "3. Đánh giá APR nâng cao (Edit Distance Levenshtein, Pass/Fail Regressions).\n"
-        "4. Cung cấp API có khả năng truy xuất model Gemini.\n"
-    )
-    print("Mọi tính năng mới đã được lưu vào INSTRUCTION.md và README.md")
 
 if __name__ == "__main__":
     main()

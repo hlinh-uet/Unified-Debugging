@@ -1,4 +1,5 @@
 google-generativeai
+openai
 python-dotenv
 pytest
 requests

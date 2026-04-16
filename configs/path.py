@@ -4,14 +4,11 @@ import os
 CONFIGS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # 2. Nhảy lên 1 cấp để ra thư mục gốc của dự án (Unified-Debugging)
-# Đây là nơi VS Code đang mở và bạn muốn thấy file hiện ra ở đây
 PROJECT_ROOT = os.path.dirname(CONFIGS_DIR)
 
-# 3. Đường dẫn tới nơi chứa 100 file JSON (Giữ nguyên vì bạn đã trỏ đúng)
+# 3. Đường dẫn tới CODEFLAWS
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CODEFLAWS_RESULTS_DIR = os.path.join(BASE_DIR, "codeflaws", "codeflaws", "all_results")
-
-# Directory source code (since results are json)
 CODEFLAWS_SOURCE_DIR = os.path.join(BASE_DIR, "codeflaws", "benchmark")
 
 # 4. Đường dẫn để lưu kết quả thực nghiệm (Lưu ngay bên trong Unified-Debugging)

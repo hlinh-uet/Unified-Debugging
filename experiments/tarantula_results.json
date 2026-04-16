@@ -1,774 +1,415 @@
 {
-    "46-D-bug-208314-208422": {
+    "10-A-bug-5914564-5914663": {
         "scores": {
-            "main": 0.5
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/10-A-bug-5914564-5914663/10-A-5914564.c::main": 0.5
         },
         "ground_truth": [
-            "main"
-        ]
-    },
-    "508-C-bug-9723064-9723081": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "546-B-bug-13932383-13932411": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "62-A-bug-7067912-7067978": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "81-B-bug-512758-512761": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/10-A-bug-5914564-5914663/10-A-5914564.c::main"
         ]
     },
     "146-B-bug-2035917-2035968": {
         "scores": {
-            "main": 0.5
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/146-B-bug-2035917-2035968/146-B-2035917.c::main": 0.5
         },
         "ground_truth": [
-            "main"
-        ]
-    },
-    "336-A-bug-6855346-6855367": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "490-C-bug-11355146-11356082": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "236-A-bug-18003976-18004085": {
-        "scores": {
-            "main": 1.0
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "447-B-bug-10225828-10225902": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "407-B-bug-14668576-14668597": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": []
-    },
-    "158-A-bug-18297232-18297267": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "10-A-bug-5914564-5914663": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": []
-    },
-    "476-A-bug-15778161-15778167": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": []
-    },
-    "456-A-bug-17586003-17586007": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "518-E-bug-10006532-10006662": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "270-B-bug-3912548-3912572": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "298-A-bug-5138379-5138386": {
-        "scores": {},
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "552-A-bug-13285238-13285270": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "630-I-bug-17126325-17126330": {
-        "scores": {
-            "main": 1.0
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "371-C-bug-5389891-5390013": {
-        "scores": {
-            "main": 0.0
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "197-A-bug-4539529-4539541": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "48-A-bug-18336507-18336566": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "4-B-bug-11482920-11482956": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "430-C-bug-10726761-10726771": {
-        "scores": {
-            "insert": 1.0,
-            "main": 1.0,
-            "dfs": 1.0
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "479-C-bug-15073953-15074519": {
-        "scores": {
-            "comp": 0.625,
-            "main": 0.5
-        },
-        "ground_truth": []
-    },
-    "490-E-bug-8866315-8866373": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "575-D-bug-12872706-12872745": {
-        "scores": {
-            "main": 1.0
-        },
-        "ground_truth": []
-    },
-    "612-C-bug-15186001-15186009": {
-        "scores": {
-            "main": 0.5,
-            "isPair": 0.0
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "139-A-bug-15693490-15693540": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "483-B-bug-9378742-9378770": {
-        "scores": {
-            "main": 0.5,
-            "possible": 0.0
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "31-A-bug-13024144-13024178": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "242-A-bug-16500031-16500336": {
-        "scores": {
-            "main": 1.0
-        },
-        "ground_truth": []
-    },
-    "11-A-bug-12698258-12698286": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "218-A-bug-2095800-2095813": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "204-A-bug-2022696-2022698": {
-        "scores": {
-            "main": 0.5,
-            "x1": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "192-C-bug-1743547-1743565": {
-        "scores": {
-            "max": 0.6470588235294118,
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "315-A-bug-6149995-6150754": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": []
-    },
-    "5-A-bug-15644200-15644332": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "258-A-bug-11354670-11354681": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "185-A-bug-1914012-1914022": {
-        "scores": {
-            "main": 0.5,
-            "mod": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "344-B-bug-14428743-14428779": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "190-A-bug-12987931-12987965": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "385-B-bug-9215199-9215223": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "260-B-bug-2848106-2848120": {
-        "scores": {},
-        "ground_truth": [
-            "FoundDate"
-        ]
-    },
-    "510-A-bug-16335384-16335403": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": []
-    },
-    "272-C-bug-8396359-8396369": {
-        "scores": {
-            "main": 1.0
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "98-C-bug-792005-792008": {
-        "scores": {
-            "f": 1.0,
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "27-A-bug-14171055-14171115": {
-        "scores": {
-            "main": 0.5,
-            "selectionSort": 0.5
-        },
-        "ground_truth": []
-    },
-    "476-A-bug-16608008-16608059": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/146-B-bug-2035917-2035968/146-B-2035917.c::main"
         ]
     },
     "149-B-bug-1170222-1170231": {
         "scores": {
-            "main": 0.0
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/149-B-bug-1170222-1170231/149-B-1170222.c::main": 0.0
         },
         "ground_truth": [
-            "main"
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/149-B-bug-1170222-1170231/149-B-1170222.c::main"
         ]
     },
-    "469-A-bug-18026769-18026789": {
+    "158-A-bug-18297232-18297267": {
         "scores": {
-            "main": 0.5
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/158-A-bug-18297232-18297267/158-A-18297232.c::main": 0.5
         },
         "ground_truth": [
-            "main"
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/158-A-bug-18297232-18297267/158-A-18297232.c::main"
+        ]
+    },
+    "190-A-bug-12987931-12987965": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/190-A-bug-12987931-12987965/190-A-12987931.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/190-A-bug-12987931-12987965/190-A-12987931.c::main"
+        ]
+    },
+    "190-A-bug-15278915-15278934": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/190-A-bug-15278915-15278934/190-A-15278915.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/190-A-bug-15278915-15278934/190-A-15278915.c::main"
+        ]
+    },
+    "192-C-bug-1743547-1743565": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/192-C-bug-1743547-1743565/192-C-1743547.c::max": 0.6470588235294118,
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/192-C-bug-1743547-1743565/192-C-1743547.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/192-C-bug-1743547-1743565/192-C-1743547.c::main"
+        ]
+    },
+    "197-A-bug-4539529-4539541": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/197-A-bug-4539529-4539541/197-A-4539529.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/197-A-bug-4539529-4539541/197-A-4539529.c::main"
+        ]
+    },
+    "204-A-bug-2022696-2022698": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/204-A-bug-2022696-2022698/204-A-2022696.c::main": 0.5,
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/204-A-bug-2022696-2022698/204-A-2022696.c::x1": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/204-A-bug-2022696-2022698/204-A-2022696.c::main"
+        ]
+    },
+    "236-A-bug-18003976-18004085": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/236-A-bug-18003976-18004085/236-A-18003976.c::main": 1.0
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/236-A-bug-18003976-18004085/236-A-18003976.c::main"
+        ]
+    },
+    "270-B-bug-3912548-3912572": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/270-B-bug-3912548-3912572/270-B-3912548.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/270-B-bug-3912548-3912572/270-B-3912548.c::main"
         ]
     },
     "276-B-bug-16707425-16707470": {
         "scores": {
-            "main": 0.5
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/276-B-bug-16707425-16707470/276-B-16707425.c::main": 0.5
         },
         "ground_truth": [
-            "main"
-        ]
-    },
-    "633-A-bug-17179947-17180046": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "492-A-bug-18201113-18201470": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": []
-    },
-    "190-A-bug-15278915-15278934": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "420-A-bug-14755133-14755144": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "68-A-bug-340593-340627": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "264-C-bug-16384531-16384572": {
-        "scores": {
-            "work": 0.5,
-            "main": 0.5,
-            "max": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "204-A-bug-10222131-10222140": {
-        "scores": {
-            "first": 0.5454545454545454,
-            "power": 0.5454545454545454,
-            "middle": 0.5454545454545454,
-            "nways": 0.5,
-            "length": 0.5,
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "6-C-bug-11148576-11150029": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "658-A-bug-17124240-17124253": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "222-E-bug-3016637-3016641": {
-        "scores": {
-            "multiply": 0.6000000000000001,
-            "main": 0.5,
-            "matexp": 0.5
-        },
-        "ground_truth": [
-            "matexp"
-        ]
-    },
-    "104-A-bug-15369048-15370159": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": []
-    },
-    "443-B-bug-6991415-6991443": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "399-A-bug-18007016-18007035": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "169-A-bug-16599196-16599272": {
-        "scores": {
-            "main": 0.5,
-            "compare": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "558-A-bug-12908146-12908196": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "136-A-bug-17335859-17335870": {
-        "scores": {
-            "main": 1.0
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "284-B-bug-4852792-4852817": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "69-B-bug-350935-350951": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "344-B-bug-17327402-17327661": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "447-A-bug-18296332-18296341": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "17-A-bug-13897450-13897498": {
-        "scores": {
-            "main": 0.5,
-            "isPrime": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "400-A-bug-11086966-11086988": {
-        "scores": {},
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "513-B2-bug-13172231-13172292": {
-        "scores": {
-            "main": 1.0,
-            "permutation": 1.0
-        },
-        "ground_truth": [
-            "permutation"
-        ]
-    },
-    "71-A-bug-18330328-18330409": {
-        "scores": {
-            "main": 1.0
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "365-B-bug-11573175-11573200": {
-        "scores": {
-            "main": 0.5,
-            "checker": 0.5
-        },
-        "ground_truth": []
-    },
-    "316-A1-bug-3992417-3992575": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "53-C-bug-10604859-10605014": {
-        "scores": {
-            "main": 1.0
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "313-B-bug-15165597-15165618": {
-        "scores": {
-            "memoize": 0.5,
-            "main": 0.5
-        },
-        "ground_truth": [
-            "memoize"
-        ]
-    },
-    "312-C-bug-3777692-3777976": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "658-A-bug-18213201-18219933": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "5-D-bug-10806904-10806939": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "337-A-bug-17720226-17720281": {
-        "scores": {
-            "main": 0.5,
-            "cmp": 0.5
-        },
-        "ground_truth": [
-            "main"
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/276-B-bug-16707425-16707470/276-B-16707425.c::main"
         ]
     },
     "288-A-bug-12735587-12735603": {
         "scores": {
-            "main": 0.5
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/288-A-bug-12735587-12735603/288-A-12735587.c::main": 0.5
         },
         "ground_truth": [
-            "main"
-        ]
-    },
-    "624-B-bug-17088402-17088417": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": []
-    },
-    "585-B-bug-15514693-15514749": {
-        "scores": {
-            "main": 0.5,
-            "f": 0.5
-        },
-        "ground_truth": [
-            "main"
-        ]
-    },
-    "448-B-bug-10617841-10617857": {
-        "scores": {
-            "main": 0.5,
-            "manuString": 0.5
-        },
-        "ground_truth": []
-    },
-    "376-A-bug-16700130-16700468": {
-        "scores": {
-            "main": 0.5
-        },
-        "ground_truth": [
-            "main"
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/288-A-bug-12735587-12735603/288-A-12735587.c::main"
         ]
     },
     "302-A-bug-9364836-9364867": {
         "scores": {
-            "main": 0.5
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/302-A-bug-9364836-9364867/302-A-9364836.c::main": 0.5
         },
         "ground_truth": [
-            "main"
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/302-A-bug-9364836-9364867/302-A-9364836.c::main"
         ]
     },
-    "355-A-bug-12485897-12485900": {
+    "312-C-bug-3777692-3777976": {
         "scores": {
-            "main": 0.5
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/312-C-bug-3777692-3777976/312-C-3777692.c::main": 0.5
         },
         "ground_truth": [
-            "main"
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/312-C-bug-3777692-3777976/312-C-3777692.c::main"
+        ]
+    },
+    "316-A1-bug-3992417-3992575": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/316-A1-bug-3992417-3992575/316-A1-3992417.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/316-A1-bug-3992417-3992575/316-A1-3992417.c::main"
+        ]
+    },
+    "336-A-bug-6855346-6855367": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/336-A-bug-6855346-6855367/336-A-6855346.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/336-A-bug-6855346-6855367/336-A-6855346.c::main"
+        ]
+    },
+    "337-A-bug-17720226-17720281": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/337-A-bug-17720226-17720281/337-A-17720226.c::main": 0.5,
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/337-A-bug-17720226-17720281/337-A-17720226.c::cmp": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/337-A-bug-17720226-17720281/337-A-17720226.c::main"
+        ]
+    },
+    "344-B-bug-14428743-14428779": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/344-B-bug-14428743-14428779/344-B-14428743.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/344-B-bug-14428743-14428779/344-B-14428743.c::main"
+        ]
+    },
+    "365-B-bug-11573175-11573200": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/365-B-bug-11573175-11573200/365-B-11573175.c::checker": 0.5,
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/365-B-bug-11573175-11573200/365-B-11573175.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/365-B-bug-11573175-11573200/365-B-11573175.c::checker"
+        ]
+    },
+    "371-C-bug-5389891-5390013": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/371-C-bug-5389891-5390013/371-C-5389891.c::main": 0.0
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/371-C-bug-5389891-5390013/371-C-5389891.c::main"
+        ]
+    },
+    "4-B-bug-11482920-11482956": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/4-B-bug-11482920-11482956/4-B-11482920.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/4-B-bug-11482920-11482956/4-B-11482920.c::main"
+        ]
+    },
+    "401-A-bug-16437058-16437078": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/401-A-bug-16437058-16437078/401-A-16437058.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/401-A-bug-16437058-16437078/401-A-16437058.c::main"
+        ]
+    },
+    "407-B-bug-14668576-14668597": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/407-B-bug-14668576-14668597/407-B-14668576.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/407-B-bug-14668576-14668597/407-B-14668576.c::main"
+        ]
+    },
+    "420-A-bug-14755133-14755144": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/420-A-bug-14755133-14755144/420-A-14755133.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/420-A-bug-14755133-14755144/420-A-14755133.c::main"
+        ]
+    },
+    "447-B-bug-10225828-10225902": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/447-B-bug-10225828-10225902/447-B-10225828.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/447-B-bug-10225828-10225902/447-B-10225828.c::main"
+        ]
+    },
+    "448-B-bug-10617841-10617857": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/448-B-bug-10617841-10617857/448-B-10617841.c::manuString": 0.5,
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/448-B-bug-10617841-10617857/448-B-10617841.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/448-B-bug-10617841-10617857/448-B-10617841.c::manuString"
         ]
     },
     "45-D-bug-191189-191239": {
         "scores": {
-            "find": 0.5,
-            "main": 0.5,
-            "match": 0.5
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/45-D-bug-191189-191239/45-D-191189.c::match": 0.5,
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/45-D-bug-191189-191239/45-D-191189.c::main": 0.5,
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/45-D-bug-191189-191239/45-D-191189.c::find": 0.5
         },
         "ground_truth": [
-            "match"
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/45-D-bug-191189-191239/45-D-191189.c::match"
         ]
     },
-    "614-A-bug-17036012-17036054": {
+    "456-A-bug-17586003-17586007": {
         "scores": {
-            "main": 0.5
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/456-A-bug-17586003-17586007/456-A-17586003.c::main": 0.5
         },
         "ground_truth": [
-            "main"
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/456-A-bug-17586003-17586007/456-A-17586003.c::main"
         ]
     },
-    "271-C-bug-13011289-13011297": {
+    "46-D-bug-208314-208422": {
         "scores": {
-            "main": 0.5
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/46-D-bug-208314-208422/46-D-208314.c::main": 0.5
         },
         "ground_truth": [
-            "main"
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/46-D-bug-208314-208422/46-D-208314.c::main"
+        ]
+    },
+    "476-A-bug-16608008-16608059": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/476-A-bug-16608008-16608059/476-A-16608008.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/476-A-bug-16608008-16608059/476-A-16608008.c::main"
+        ]
+    },
+    "479-C-bug-15073953-15074519": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/479-C-bug-15073953-15074519/479-C-15073953.c::comp": 0.625,
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/479-C-bug-15073953-15074519/479-C-15073953.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/479-C-bug-15073953-15074519/479-C-15073953.c::comp"
+        ]
+    },
+    "48-A-bug-18336507-18336566": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/48-A-bug-18336507-18336566/48-A-18336507.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/48-A-bug-18336507-18336566/48-A-18336507.c::main"
+        ]
+    },
+    "483-B-bug-9378742-9378770": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/483-B-bug-9378742-9378770/483-B-9378742.c::main": 0.5,
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/483-B-bug-9378742-9378770/483-B-9378742.c::possible": 0.0
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/483-B-bug-9378742-9378770/483-B-9378742.c::main"
+        ]
+    },
+    "490-C-bug-11355146-11356082": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/490-C-bug-11355146-11356082/490-C-11355146.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/490-C-bug-11355146-11356082/490-C-11355146.c::main"
+        ]
+    },
+    "5-A-bug-15644200-15644332": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/5-A-bug-15644200-15644332/5-A-15644200.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/5-A-bug-15644200-15644332/5-A-15644200.c::main"
+        ]
+    },
+    "510-A-bug-16335384-16335403": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/510-A-bug-16335384-16335403/510-A-16335384.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/510-A-bug-16335384-16335403/510-A-16335384.c::main"
+        ]
+    },
+    "513-B2-bug-13172231-13172292": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/513-B2-bug-13172231-13172292/513-B2-13172231.c::permutation": 1.0,
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/513-B2-bug-13172231-13172292/513-B2-13172231.c::main": 1.0
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/513-B2-bug-13172231-13172292/513-B2-13172231.c::permutation"
+        ]
+    },
+    "53-C-bug-10604859-10605014": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/53-C-bug-10604859-10605014/53-C-10604859.c::main": 1.0
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/53-C-bug-10604859-10605014/53-C-10604859.c::main"
+        ]
+    },
+    "546-B-bug-13932383-13932411": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/546-B-bug-13932383-13932411/546-B-13932383.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/546-B-bug-13932383-13932411/546-B-13932383.c::main"
+        ]
+    },
+    "558-A-bug-12908146-12908196": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/558-A-bug-12908146-12908196/558-A-12908146.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/558-A-bug-12908146-12908196/558-A-12908146.c::main"
         ]
     },
     "592-C-bug-14117787-14117792": {
         "scores": {
-            "main": 1.0,
-            "gcd": 1.0
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/592-C-bug-14117787-14117792/592-C-14117787.c::main": 1.0,
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/592-C-bug-14117787-14117792/592-C-14117787.c::gcd": 1.0
         },
         "ground_truth": [
-            "main"
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/592-C-bug-14117787-14117792/592-C-14117787.c::main"
         ]
     },
-    "404-B-bug-6177761-6177790": {
+    "6-C-bug-11148576-11150029": {
         "scores": {
-            "main": 0.5
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/6-C-bug-11148576-11150029/6-C-11148576.c::main": 0.5
         },
         "ground_truth": [
-            "main"
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/6-C-bug-11148576-11150029/6-C-11148576.c::main"
+        ]
+    },
+    "612-C-bug-15186001-15186009": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/612-C-bug-15186001-15186009/612-C-15186001.c::main": 0.5,
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/612-C-bug-15186001-15186009/612-C-15186001.c::isPair": 0.0
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/612-C-bug-15186001-15186009/612-C-15186001.c::main"
+        ]
+    },
+    "62-A-bug-7067912-7067978": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/62-A-bug-7067912-7067978/62-A-7067912.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/62-A-bug-7067912-7067978/62-A-7067912.c::main"
+        ]
+    },
+    "632-A-bug-16772686-16772703": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/632-A-bug-16772686-16772703/632-A-16772686.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/632-A-bug-16772686-16772703/632-A-16772686.c::main"
+        ]
+    },
+    "658-A-bug-17124240-17124253": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/658-A-bug-17124240-17124253/658-A-17124240.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/658-A-bug-17124240-17124253/658-A-17124240.c::main"
+        ]
+    },
+    "68-A-bug-340593-340627": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/68-A-bug-340593-340627/68-A-340593.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/68-A-bug-340593-340627/68-A-340593.c::main"
+        ]
+    },
+    "81-B-bug-512758-512761": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/81-B-bug-512758-512761/81-B-512758.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/81-B-bug-512758-512761/81-B-512758.c::main"
+        ]
+    },
+    "98-C-bug-792005-792008": {
+        "scores": {
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/98-C-bug-792005-792008/98-C-792005.c::f": 1.0,
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/98-C-bug-792005-792008/98-C-792005.c::main": 0.5
+        },
+        "ground_truth": [
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/98-C-bug-792005-792008/98-C-792005.c::main"
         ]
     }
 }
