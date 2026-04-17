@@ -147,21 +147,14 @@ def _build_failed_test_context(bug: BugRecord) -> str:
     tc = failed_tests[0]
     tc_name     = tc.get("test_id", "Unknown")
     tc_reason   = tc.get("fail_reason", "Unknown")
-    tc_expected = tc.get("expected_output", "N/A")
     tc_actual   = tc.get("actual_output", "N/A")
 
-    if len(tc_expected) > 500:
-        tc_expected = tc_expected[:500] + "\n...[truncated]"
     if len(tc_actual) > 500:
         tc_actual = tc_actual[:500] + "\n...[truncated]"
 
     return f"""
 ### Failed test information (Test Case: {tc_name})
 - **Failure reason:** {tc_reason}
-- **Expected output:**
-```
-{tc_expected.strip()}
-```
 - **Actual output:**
 ```
 {tc_actual.strip()}
