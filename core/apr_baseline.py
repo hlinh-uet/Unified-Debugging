@@ -2,6 +2,7 @@ import os
 import json
 import re
 import shutil
+import time
 import subprocess
 from typing import Optional
 import requests
@@ -129,96 +130,103 @@ def _call_openai(prompt: str, model: str = "gpt-4o-mini") -> Optional[str]:
         return None
 
 
-def _call_claude(prompt: str, model: Optional[str] = None) -> Optional[str]:
-    """Gọi API Claude qua Proxy Zunef bằng cURL, xử lý chuẩn SSE Stream."""
-    try:
-        base_url = os.getenv("ANTHROPIC_BASE_URL", "https://claude.zunef.com/v1/ai").rstrip("/")
-        api_key = os.getenv("ANTHROPIC_AUTH_TOKEN") or os.getenv("ANTHROPIC_API_KEY")
-        target_model = model or os.getenv("ANTHROPIC_MODEL", "anthropic/claude-sonnet-4.6")
-
-        log_dir = Path(f"results/claude_logs/{target_model}")
-        log_dir.mkdir(parents=True, exist_ok=True)
-        
-        if not api_key:
-            print("[LLM] LỖI: Thiếu API Key cho Claude")
-            return None
-
-        payload = {
-            "model": target_model,
-            "max_tokens": 4096 * 10, # Bây giờ 4096 token sẽ chỉ dành cho kết quả
-            "temperature": 0.2, # Lưu ý: Nếu bật Thinking, temperature mặc định bị ép về 1. Nên nếu bạn đặt 0.2, lý tưởng nhất là nó đang ở Standard mode.
-            "stream": True,
-            # XÓA HẲN DÒNG "reasoning": False
-            "system": (
-                "You are an expert C/C++ program repair system. "
-                "CRITICAL RULE: You are strictly forbidden from outputting any reasoning, thinking process, or explanations. "
-                "Do NOT use <thinking> tags. Output ONLY the raw, fixed C code enclosed EXACTLY within <fixed_code> tags. "
-                "If you output anything other than the <fixed_code> block, the system will crash."
-            ),
-            "messages": [{"role": "user", "content": prompt}]
-        }
-
-        # SỬA LỖI 1: Bỏ .encode('utf-8') vì bạn đang dùng text=True trong subprocess
-        body = json.dumps(payload, ensure_ascii=False)
-
-        # Đổi tên biến thành 'process_result' cho đỡ nhầm lẫn với requests
-        process_result = subprocess.run(
-            [
-                "curl",
-                "-sS",
-                f"{base_url}/messages",
-                "-H", "Content-Type: application/json",
-                "-H", "Accept: application/json",
-                "-H", f"x-api-key: {api_key}",
-                "--data-binary", "@-",
-            ],
-            input=body,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            check=False,
-            timeout=30000, 
-        )
-        
-        # SỬA LỖI 2: Check returncode của process thay vì status_code của HTTP
-        if process_result.returncode != 0:
-            print(f"[LLM] Error cURL: {process_result.stderr.strip()}")
-            return None
-        
-        raw_log_path = log_dir / "raw_response.txt"
-        raw_log_path.write_text(process_result.stdout, encoding="utf-8")
+def _call_claude(prompt: str, model: Optional[str] = None, max_retries: int = 3, retry_delay: int = 2) -> Optional[str]:
+    """Gọi API Claude qua Proxy Zunef bằng cURL, xử lý chuẩn SSE Stream, có tích hợp Retry."""
     
-        # SỬA LỖI 3: Duyệt qua từng dòng của stdout (không dùng iter_lines)
-        text_parts = []
-        for line in process_result.stdout.splitlines():
-            line = line.strip()
-            if line.startswith("data: "):
-                json_str = line[6:]
-                if json_str == "[DONE]":
-                    continue
-                try:
-                    data = json.loads(json_str)
-                    delta = data.get("delta", {})
-                    # Chỉ lấy text, lờ đi phần thinking nếu có
-                    if delta.get("type") == "text_delta":
-                        text_parts.append(delta.get("text", ""))
-                except json.JSONDecodeError:
-                    continue
-        
-        raw_text = "".join(text_parts)
-        
-        if not raw_text:
-            print("[LLM] LỖI: Không bóc tách được text từ Claude Stream.")
-            # In ra 200 ký tự đầu tiên để xem Zunef có chửi lỗi gì bằng JSON (ví dụ 400 Bad Request) không
-            print(f"[LLM DEBUG] Server trả về: {process_result.stdout[:200]}")
-            return None
-            
-        return _clean_code(raw_text)
-        
-    except Exception as e:
-        print(f"[LLM] Exception Claude: {e}")
+    # Chuẩn bị cấu hình ban đầu cho API call
+    base_url = os.getenv("ANTHROPIC_BASE_URL", "https://claude.zunef.com/v1/ai").rstrip("/")
+    api_key = os.getenv("ANTHROPIC_AUTH_TOKEN") or os.getenv("ANTHROPIC_API_KEY")
+    target_model = model or os.getenv("ANTHROPIC_MODEL", "anthropic/claude-sonnet-4.6")
+
+    log_dir = Path(f"results/claude_logs/{target_model}")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    
+    if not api_key:
+        print("[LLM] LỖI: Thiếu API Key cho Claude")
         return None
-    
+
+    payload = {
+        "model": target_model,
+        "max_tokens": 4096 * 10, 
+        "temperature": 0.2, 
+        "stream": True,
+        "system": (
+            "You are an expert C/C++ program repair system. "
+            "CRITICAL RULE: You are strictly forbidden from outputting any reasoning, thinking process, or explanations. "
+            "Do NOT use <thinking> tags. Output ONLY the raw, fixed C code enclosed EXACTLY within <fixed_code> tags. "
+            "If you output anything other than the <fixed_code> block, the system will crash."
+        ),
+        "messages": [{"role": "user", "content": prompt}]
+    }
+
+    body = json.dumps(payload, ensure_ascii=False)
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            if attempt > 1:
+                print(f"[LLM] Đang thử lại lần {attempt}/{max_retries} cho model {target_model}...")
+                
+            process_result = subprocess.run(
+                [
+                    "curl",
+                    "-sS",
+                    f"{base_url}/messages",
+                    "-H", "Content-Type: application/json",
+                    "-H", "Accept: application/json",
+                    "-H", f"x-api-key: {api_key}",
+                    "--data-binary", "@-",
+                ],
+                input=body,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+                timeout=30000, 
+            )
+            
+
+            if process_result.returncode != 0:
+                print(f"[LLM] Error cURL (Lần {attempt}): {process_result.stderr.strip()}")
+                time.sleep(retry_delay * attempt)
+                continue 
+            
+            raw_log_path = log_dir / f"raw_response_attempt_{attempt}.txt"
+            raw_log_path.write_text(process_result.stdout, encoding="utf-8")
+
+            text_parts = []
+            for line in process_result.stdout.splitlines():
+                line = line.strip()
+                if line.startswith("data: "):
+                    json_str = line[6:]
+                    if json_str == "[DONE]":
+                        continue
+                    try:
+                        data = json.loads(json_str)
+                        delta = data.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            text_parts.append(delta.get("text", ""))
+                    except json.JSONDecodeError:
+                        continue
+            
+            raw_text = "".join(text_parts)
+            
+            if not raw_text:
+                print(f"[LLM] LỖI (Lần {attempt}): Không bóc tách được text từ Claude Stream.")
+                print(f"[LLM DEBUG] Server trả về: {process_result.stdout[:200]}")
+                time.sleep(retry_delay * attempt)
+                continue
+            
+            return _clean_code(raw_text)
+            
+        except subprocess.TimeoutExpired:
+            print(f"[LLM] LỖI (Lần {attempt}): Request Timeout. Quá thời gian chờ.")
+            time.sleep(retry_delay * attempt)
+        except Exception as e:
+            print(f"[LLM] Exception Claude (Lần {attempt}): {e}")
+            time.sleep(retry_delay * attempt)
+            
+    print(f"[LLM] THẤT BẠI CỤC BỘ: Đã thử {max_retries} lần nhưng vẫn không nhận được kết quả hợp lệ.")
+    return None
 
 def _call_qwen(prompt: str, model: str = "qwen/qwen-2.5-coder-32b-instruct") -> Optional[str]:
     try:

@@ -66,8 +66,8 @@
     },
     "204-A-bug-2022696-2022698": {
         "scores": {
-            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/204-A-bug-2022696-2022698/204-A-2022696.c::main": 0.5,
-            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/204-A-bug-2022696-2022698/204-A-2022696.c::x1": 0.5
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/204-A-bug-2022696-2022698/204-A-2022696.c::x1": 0.5,
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/204-A-bug-2022696-2022698/204-A-2022696.c::main": 0.5
         },
         "ground_truth": [
             "/home/minh-duc/research/Forstudy/codeflaws/benchmark/204-A-bug-2022696-2022698/204-A-2022696.c::main"
@@ -156,8 +156,8 @@
     },
     "365-B-bug-11573175-11573200": {
         "scores": {
-            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/365-B-bug-11573175-11573200/365-B-11573175.c::checker": 0.5,
-            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/365-B-bug-11573175-11573200/365-B-11573175.c::main": 0.5
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/365-B-bug-11573175-11573200/365-B-11573175.c::main": 0.5,
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/365-B-bug-11573175-11573200/365-B-11573175.c::checker": 0.5
         },
         "ground_truth": [
             "/home/minh-duc/research/Forstudy/codeflaws/benchmark/365-B-bug-11573175-11573200/365-B-11573175.c::checker"
@@ -213,8 +213,8 @@
     },
     "448-B-bug-10617841-10617857": {
         "scores": {
-            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/448-B-bug-10617841-10617857/448-B-10617841.c::manuString": 0.5,
-            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/448-B-bug-10617841-10617857/448-B-10617841.c::main": 0.5
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/448-B-bug-10617841-10617857/448-B-10617841.c::main": 0.5,
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/448-B-bug-10617841-10617857/448-B-10617841.c::manuString": 0.5
         },
         "ground_truth": [
             "/home/minh-duc/research/Forstudy/codeflaws/benchmark/448-B-bug-10617841-10617857/448-B-10617841.c::manuString"
@@ -223,8 +223,8 @@
     "45-D-bug-191189-191239": {
         "scores": {
             "/home/minh-duc/research/Forstudy/codeflaws/benchmark/45-D-bug-191189-191239/45-D-191189.c::match": 0.5,
-            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/45-D-bug-191189-191239/45-D-191189.c::main": 0.5,
-            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/45-D-bug-191189-191239/45-D-191189.c::find": 0.5
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/45-D-bug-191189-191239/45-D-191189.c::find": 0.5,
+            "/home/minh-duc/research/Forstudy/codeflaws/benchmark/45-D-bug-191189-191239/45-D-191189.c::main": 0.5
         },
         "ground_truth": [
             "/home/minh-duc/research/Forstudy/codeflaws/benchmark/45-D-bug-191189-191239/45-D-191189.c::match"
