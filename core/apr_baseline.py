@@ -5,11 +5,8 @@ import shutil
 import subprocess
 from typing import Optional
 import requests
-from typing import Optional, Tuple
-
-
-
 from dotenv import load_dotenv
+from pathlib import Path
 
 from configs.path import EXPERIMENTS_DIR, PATCHES_DIR
 from data_loaders.base_loader import get_loader, BugRecord
@@ -25,6 +22,42 @@ load_dotenv()
 # Provider mặc định – đọc từ .env, có thể override qua CLI
 _DEFAULT_LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
 
+
+import re
+
+def _clean_code(raw_content: str) -> str:
+    """
+    Hàm làm sạch mã nguồn:
+    1. Ưu tiên bóc tách nội dung trong thẻ <fixed_code>
+    2. Xóa bỏ các ký tự Markdown (```c, ```)
+    """
+    # ==========================================
+    # BƯỚC 1: TÌM VÀ CẮT THẺ XML
+    # ==========================================
+    # Lệnh re.search này sẽ tìm mọi thứ nằm giữa <fixed_code> và </fixed_code>
+    # Cờ `re.DOTALL` cực kỳ quan trọng: Nó cho phép dấu chấm (.) đại diện cho cả ký tự xuống dòng (\n)
+    # Nếu không có re.DOTALL, regex sẽ dừng lại ngay ở dòng code đầu tiên.
+    xml_match = re.search(r'<fixed_code>\s*(.*?)\s*</fixed_code>', raw_content, re.DOTALL)
+    
+    if xml_match:
+        # Nếu LLM dùng thẻ XML, ta lấy đúng phần ruột bên trong
+        content = xml_match.group(1).strip()
+    else:
+        # Nếu LLM quên dùng thẻ (Fallback), ta lấy toàn bộ chuỗi ban đầu
+        content = raw_content.strip()
+    
+    # ==========================================
+    # BƯỚC 2: CẠO SẠCH MARKDOWN CHỐNG GCC BÁO LỖI
+    # ==========================================
+    # Xóa dòng mở đầu dạng ```c hoặc ```cpp hoặc ``` nằm ở ngay đầu chuỗi
+    # Dấu ^ nghĩa là bắt đầu chuỗi.
+    content = re.sub(r'^```[a-zA-Z]*\n', '', content) 
+    
+    content = re.sub(r'\n```$', '', content)           
+    
+    content = content.replace('```', '').strip()
+    
+    return content
 
 # ---------------------------------------------------------------------------
 # LLM – provider-specific helpers
@@ -96,39 +129,40 @@ def _call_openai(prompt: str, model: str = "gpt-4o-mini") -> Optional[str]:
         return None
 
 
-def _call_claude(prompt: str, model: str = "claude-3-5-sonnet-20241022") -> Tuple[Optional[str], int, int]:
-    """
-    Calls Anthropic Claude API and returns the generated text along with token usage.
-    Returns: (response_text, input_tokens, output_tokens)
-    """
-    input_tokens = 0
-    output_tokens = 0
-    
+def _call_claude(prompt: str, model: Optional[str] = None) -> Optional[str]:
+    """Gọi API Claude qua Proxy Zunef bằng cURL, xử lý chuẩn SSE Stream."""
     try:
-        base_url = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1").rstrip("/")
+        base_url = os.getenv("ANTHROPIC_BASE_URL", "https://claude.zunef.com/v1/ai").rstrip("/")
         api_key = os.getenv("ANTHROPIC_AUTH_TOKEN") or os.getenv("ANTHROPIC_API_KEY")
+        target_model = model or os.getenv("ANTHROPIC_MODEL", "anthropic/claude-sonnet-4.6")
+
+        log_dir = Path(f"results/claude_logs/{target_model}")
+        log_dir.mkdir(parents=True, exist_ok=True)
         
         if not api_key:
-            print(f"[LLM] Error Claude ({model}): Missing API Key in environment variables.")
-            return None, 0, 0
-            
+            print("[LLM] LỖI: Thiếu API Key cho Claude")
+            return None
+
         payload = {
-            "model": model,
-            "max_tokens": 2048,
-            "temperature": 0.2,
-            "system": "You are an expert C developer. Return ONLY the fixed function code.",
-            "stream": False,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
+            "model": target_model,
+            "max_tokens": 4096 * 10, # Bây giờ 4096 token sẽ chỉ dành cho kết quả
+            "temperature": 0.2, # Lưu ý: Nếu bật Thinking, temperature mặc định bị ép về 1. Nên nếu bạn đặt 0.2, lý tưởng nhất là nó đang ở Standard mode.
+            "stream": True,
+            # XÓA HẲN DÒNG "reasoning": False
+            "system": (
+                "You are an expert C/C++ program repair system. "
+                "CRITICAL RULE: You are strictly forbidden from outputting any reasoning, thinking process, or explanations. "
+                "Do NOT use <thinking> tags. Output ONLY the raw, fixed C code enclosed EXACTLY within <fixed_code> tags. "
+                "If you output anything other than the <fixed_code> block, the system will crash."
+            ),
+            "messages": [{"role": "user", "content": prompt}]
         }
 
+        # SỬA LỖI 1: Bỏ .encode('utf-8') vì bạn đang dùng text=True trong subprocess
         body = json.dumps(payload, ensure_ascii=False)
 
-        result = subprocess.run(
+        # Đổi tên biến thành 'process_result' cho đỡ nhầm lẫn với requests
+        process_result = subprocess.run(
             [
                 "curl",
                 "-sS",
@@ -136,7 +170,6 @@ def _call_claude(prompt: str, model: str = "claude-3-5-sonnet-20241022") -> Tupl
                 "-H", "Content-Type: application/json",
                 "-H", "Accept: application/json",
                 "-H", f"x-api-key: {api_key}",
-                "-H", "anthropic-version: 2023-06-01",
                 "--data-binary", "@-",
             ],
             input=body,
@@ -144,82 +177,55 @@ def _call_claude(prompt: str, model: str = "claude-3-5-sonnet-20241022") -> Tupl
             text=True,
             encoding="utf-8",
             check=False,
-            timeout=500,
+            timeout=30000, 
         )
-
-        if result.returncode != 0:
-            print(f"[LLM] Error Claude ({model}): Request failed - {result.stderr.strip()}")
-            return None, 0, 0
-
-        raw_output = result.stdout.strip()
-
-        # Xử lý trường hợp Proxy ép trả về dạng Stream (SSE)
-        if raw_output.startswith("event:") or "data:" in raw_output:
-            text_parts = []
-            for line in raw_output.splitlines():
-                line = line.strip()
-                if line.startswith("data: "):
-                    json_str = line[6:]
-                    if json_str == "[DONE]":
-                        continue
-                    try:
-                        data = json.loads(json_str)
-                        if data.get("type") == "error":
-                            print(f"[LLM] Error Claude ({model}): API Stream Error - {data.get('error')}")
-                            return None, 0, 0
-                            
-                        # Bắt thông tin token từ các event của Stream
-                        if data.get("type") == "message_start":
-                            input_tokens = data.get("message", {}).get("usage", {}).get("input_tokens", 0)
-                        elif data.get("type") == "message_delta":
-                            output_tokens = data.get("usage", {}).get("output_tokens", 0)
-                            
-                        delta = data.get("delta", {})
-                        if delta.get("type") == "text_delta":
-                            text_parts.append(delta.get("text", ""))
-                    except json.JSONDecodeError:
-                        continue
+        
+        # SỬA LỖI 2: Check returncode của process thay vì status_code của HTTP
+        if process_result.returncode != 0:
+            print(f"[LLM] Error cURL: {process_result.stderr.strip()}")
+            return None
+        
+        raw_log_path = log_dir / "raw_response.txt"
+        raw_log_path.write_text(process_result.stdout, encoding="utf-8")
+    
+        # SỬA LỖI 3: Duyệt qua từng dòng của stdout (không dùng iter_lines)
+        text_parts = []
+        for line in process_result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("data: "):
+                json_str = line[6:]
+                if json_str == "[DONE]":
+                    continue
+                try:
+                    data = json.loads(json_str)
+                    delta = data.get("delta", {})
+                    # Chỉ lấy text, lờ đi phần thinking nếu có
+                    if delta.get("type") == "text_delta":
+                        text_parts.append(delta.get("text", ""))
+                except json.JSONDecodeError:
+                    continue
+        
+        raw_text = "".join(text_parts)
+        
+        if not raw_text:
+            print("[LLM] LỖI: Không bóc tách được text từ Claude Stream.")
+            # In ra 200 ký tự đầu tiên để xem Zunef có chửi lỗi gì bằng JSON (ví dụ 400 Bad Request) không
+            print(f"[LLM DEBUG] Server trả về: {process_result.stdout[:200]}")
+            return None
             
-            response_text = "".join(text_parts).strip() if text_parts else None
-            return response_text, input_tokens, output_tokens
-
-        # Xử lý trường hợp trả về JSON tiêu chuẩn
-        else:
-            try:
-                parsed = json.loads(raw_output)
-                
-                if "error" in parsed:
-                    print(f"[LLM] Error Claude ({model}): API returned error: {parsed['error']}")
-                    return None, 0, 0
-
-                # Bắt thông tin token từ JSON object
-                usage = parsed.get("usage", {})
-                input_tokens = usage.get("input_tokens", 0)
-                output_tokens = usage.get("output_tokens", 0)
-
-                content = parsed.get("content", [])
-                text_parts = []
-                
-                if isinstance(content, list):
-                    for item in content:
-                        if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
-                            text_parts.append(item["text"])
-
-                response_text = "".join(text_parts).strip() if text_parts else None
-                return response_text, input_tokens, output_tokens
-                
-            except json.JSONDecodeError:
-                print(f"[LLM] Error Claude ({model}): Không thể parse JSON. Raw output: {raw_output[:200]}")
-                return None, 0, 0
-
+        return _clean_code(raw_text)
+        
     except Exception as e:
-        print(f"[LLM] Error Claude ({model}): {e}")
-        return None, 0, 0
+        print(f"[LLM] Exception Claude: {e}")
+        return None
+    
 
 def _call_qwen(prompt: str, model: str = "qwen/qwen-2.5-coder-32b-instruct") -> Optional[str]:
     try:
         # 1. Lấy Key và kiểm tra
         api_key = os.getenv("QWEN_API_KEY")
+        log_dir = Path(f"results/qwen_logs/{model}")
+        log_dir.mkdir(parents=True, exist_ok=True)
         if not api_key:
             print("[LLM] LỖI: Không tìm thấy API Key trong môi trường.")
             return None
@@ -253,6 +259,9 @@ def _call_qwen(prompt: str, model: str = "qwen/qwen-2.5-coder-32b-instruct") -> 
         if response.status_code != 200:
             print(f"[LLM] Error {response.status_code}: {response.text}")
             return None
+        
+        raw_log_path = log_dir / "raw_response.txt"
+        raw_log_path.write_text(response.text, encoding="utf-8")
 
         result = response.json()
         raw_content = result['choices'][0]['message']['content'].strip()
@@ -268,63 +277,48 @@ def _call_qwen(prompt: str, model: str = "qwen/qwen-2.5-coder-32b-instruct") -> 
     except Exception as e:
         print(f"[LLM] Exception khi gọi OpenRouter: {e}")
         return None
-    
-def call_llm(prompt: str, provider: Optional[str] = None) -> Tuple[Optional[str], int, int]:
+
+
+def call_llm(prompt: str, provider: Optional[str] = None) -> Optional[str]:
     """
     Gọi LLM để sinh bản vá.
 
     Args:
         prompt:   Nội dung prompt gửi đến LLM.
-        provider: 'gemini' | 'openai' | 'claude' | 'qwen'. Nếu None, dùng mặc định.
+        provider: 'gemini' | 'openai'. Nếu None, đọc từ biến môi trường
+                  LLM_PROVIDER (mặc định: 'gemini').
 
     Returns:
-        Tuple chứa 3 giá trị:
-        - response_text (Optional[str]): Chuỗi mã nguồn do LLM trả về, hoặc None nếu lỗi.
-        - input_tokens (int): Số lượng token đầu vào (nếu provider có hỗ trợ đếm).
-        - output_tokens (int): Số lượng token đầu ra (nếu provider có hỗ trợ đếm).
+        Chuỗi mã nguồn do LLM trả về, hoặc None nếu lỗi.
     """
-    # Lấy _DEFAULT_LLM_PROVIDER từ biến global của bạn, hoặc dùng 'gemini' làm fallback
-    default_provider = globals().get('_DEFAULT_LLM_PROVIDER', 'gemini')
-    chosen = (provider or default_provider).strip().lower()
+    chosen = (provider or _DEFAULT_LLM_PROVIDER).strip().lower()
+
+    if chosen == "openai":
+        openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        print(f"[LLM] Provider: OpenAI ({openai_model})")
+        return _call_openai(prompt, model=openai_model)
+
+    if chosen == "gemini":
+        print("[LLM] Provider: Gemini (gemini-2.5-flash)")
+        return _call_gemini(prompt)
     
-    result = None
+    if chosen == "claude":
+        claude_model = os.getenv("ANTHROPIC_MODEL", "anthropic/claude-sonnet-4.6")
+        print(f"[LLM] Provider: Claude ({claude_model})")
+        return _call_claude(prompt, model=claude_model)
 
-    try:
-        if chosen == "openai":
-            openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-            print(f"[LLM] Provider: OpenAI ({openai_model})")
-            result = _call_openai(prompt, model=openai_model)
+    if chosen == "qwen":
+        qwen_model = os.getenv("QWEN_MODEL", "qwen/qwen-2.5-coder-32b-instruct")
+        print(f"[LLM] Provider: Qwen ({qwen_model})")
+        return _call_qwen(prompt, model=qwen_model)
 
-        elif chosen == "gemini":
-            print("[LLM] Provider: Gemini (gemini-2.5-flash)")
-            result = _call_gemini(prompt)
-            
-        elif chosen == "claude":
-            claude_model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
-            print(f"[LLM] Provider: Claude ({claude_model})")
-            result = _call_claude(prompt, model=claude_model)
-        
-        elif chosen == "qwen":
-            qwen_model = os.getenv("QWEN_MODEL", "qwen/qwen3-coder-30b-a3b-instruct")
-            print(f"[LLM] Provider: Qwen ({qwen_model})")
-            result = _call_qwen(prompt, model=qwen_model)
+    print(f"[LLM] Warning: Provider không hỗ trợ '{chosen}'. Chọn 'gemini' hoặc 'openai'.")
+    return None
 
-        else:
-            print(f"[LLM] Warning: Provider không hỗ trợ '{chosen}'. Chọn 'gemini', 'openai', 'claude' hoặc 'qwen'.")
-            return None, 0, 0
 
-        # --- Xử lý tương thích ngược ---
-        # Nếu hàm _call_* đã trả về Tuple (text, in_tokens, out_tokens) như _call_claude mới
-        if isinstance(result, tuple) and len(result) == 3:
-            return result
-        # Nếu hàm _call_* cũ vẫn chỉ trả về chuỗi str hoặc None (ví dụ: _call_openai chưa sửa)
-        else:
-            return result, 0, 0
-
-    except Exception as e:
-        print(f"[LLM] Error in call_llm (Provider: {chosen}): {e}")
-        return None, 0, 0
-
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
 
 def validate_patch(patched_file_path: str, bug_id: str, dataset: str = "codeflaws"):
     """Sử dụng Sandbox Adapter để kiểm chứng bản vá."""
@@ -336,6 +330,11 @@ def validate_patch(patched_file_path: str, bug_id: str, dataset: str = "codeflaw
         print(f"    [Error] Không thể validate: {e}")
         return False, [], []
 
+
+# ---------------------------------------------------------------------------
+# Pipeline
+# ---------------------------------------------------------------------------
+
 def _build_failed_test_context(bug: BugRecord) -> str:
     """Trích xuất context test thất bại đầu tiên từ BugRecord (không đọc lại disk)."""
     failed_tests = [t for t in bug.tests if t.get("outcome") in ("FAIL", "FAILED")]
@@ -345,21 +344,14 @@ def _build_failed_test_context(bug: BugRecord) -> str:
     tc = failed_tests[0]
     tc_name     = tc.get("test_id", "Unknown")
     tc_reason   = tc.get("fail_reason", "Unknown")
-    tc_expected = tc.get("expected_output", "N/A")
     tc_actual   = tc.get("actual_output", "N/A")
 
-    if len(tc_expected) > 500:
-        tc_expected = tc_expected[:500] + "\n...[truncated]"
     if len(tc_actual) > 500:
         tc_actual = tc_actual[:500] + "\n...[truncated]"
 
     return f"""
 ### Failed test information (Test Case: {tc_name})
 - **Failure reason:** {tc_reason}
-- **Expected output:**
-```
-{tc_expected.strip()}
-```
 - **Actual output:**
 ```
 {tc_actual.strip()}

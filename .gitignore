@@ -17,6 +17,7 @@ ENV/
 env.bak/
 venv.bak/
 
+
 # OSX
 .DS_Store
 .AppleDouble
@@ -42,4 +43,6 @@ program
 .idea/
 
 # Local data / patches
-experiments/
+experiments/*
+results/
+test-api.py

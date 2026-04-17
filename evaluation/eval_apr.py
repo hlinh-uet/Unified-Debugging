@@ -2,7 +2,12 @@ import os
 import json
 
 from configs.path import EXPERIMENTS_DIR, PATCHES_DIR, CODEFLAWS_SOURCE_DIR
-from core.utils import extract_function_code, parse_qualified_func, get_codeflaws_accepted_cfile
+from core.utils import (
+    extract_function_code,
+    get_codeflaws_accepted_cfile,
+    normalize_code_for_edit_distance,
+    parse_qualified_func,
+)
 
 try:
     import Levenshtein
@@ -274,7 +279,13 @@ def _calc_func_edit_distance(bug_id: str, bug_res: dict, dataset: str) -> int:
     if not accepted_func:
         return -1
 
-    return Levenshtein.distance(patched_func.strip(), accepted_func.strip())
+    patched_norm = normalize_code_for_edit_distance(patched_func)
+    accepted_norm = normalize_code_for_edit_distance(accepted_func)
+
+    if not patched_norm or not accepted_norm:
+        return -1
+
+    return Levenshtein.distance(patched_norm, accepted_norm)
 
 
 def _calc_file_edit_distance(bug_id: str, bug_res: dict, dataset: str) -> int:
@@ -301,4 +312,10 @@ def _calc_file_edit_distance(bug_id: str, bug_res: dict, dataset: str) -> int:
     except Exception:
         return -1
 
-    return Levenshtein.distance(patched_file_content.strip(), accepted_content.strip())
+    patched_norm = normalize_code_for_edit_distance(patched_file_content)
+    accepted_norm = normalize_code_for_edit_distance(accepted_content)
+
+    if not patched_norm or not accepted_norm:
+        return -1
+
+    return Levenshtein.distance(patched_norm, accepted_norm)

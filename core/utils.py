@@ -8,6 +8,77 @@ Tránh duplicate code giữa các module.
 import re
 from typing import Tuple, Optional
 
+
+# ---------------------------------------------------------------------------
+# Code normalization helpers
+# ---------------------------------------------------------------------------
+
+def normalize_code_for_edit_distance(source_code: str) -> str:
+    """
+    Chuẩn hóa C/C++ source trước khi tính edit distance:
+    - Bỏ line comments (//...) và block comments (/*...*/).
+    - Bỏ whitespace bên ngoài string/char literals.
+    - Giữ nguyên nội dung string/char literals vì đó là dữ liệu có nghĩa.
+    """
+    normalized = []
+    i = 0
+    n = len(source_code)
+
+    while i < n:
+        c = source_code[i]
+
+        if c == '/' and i + 1 < n:
+            nxt = source_code[i + 1]
+            if nxt == '/':
+                i = source_code.find('\n', i + 2)
+                if i < 0:
+                    break
+                continue
+            if nxt == '*':
+                end = source_code.find('*/', i + 2)
+                if end < 0:
+                    break
+                i = end + 2
+                continue
+
+        if c.isspace():
+            i += 1
+            continue
+
+        if c in ('"', "'"):
+            i = _append_quoted_literal(source_code, i, normalized)
+            continue
+
+        normalized.append(c)
+        i += 1
+
+    return ''.join(normalized)
+
+
+def _append_quoted_literal(source: str, start: int, out: list) -> int:
+    """Append a quoted C/C++ string/char literal and return the next index."""
+    quote = source[start]
+    i = start
+    n = len(source)
+
+    out.append(source[i])
+    i += 1
+
+    while i < n:
+        c = source[i]
+        out.append(c)
+        i += 1
+
+        if c == '\\' and i < n:
+            out.append(source[i])
+            i += 1
+            continue
+
+        if c == quote:
+            break
+
+    return i
+
 # ---------------------------------------------------------------------------
 # Qualified function name helpers
 # ---------------------------------------------------------------------------
