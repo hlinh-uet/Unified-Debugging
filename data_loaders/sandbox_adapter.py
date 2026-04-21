@@ -19,6 +19,7 @@ class SandboxAdapter:
     """Class Cầu nối cơ sở để chuẩn hoá mọi dataset (Codeflaws, Defects4C, Defects4J)"""
     def __init__(self, bug_id):
         self.bug_id = bug_id
+        self.last_validation_details = {}
 
     def get_source_path(self):
         """Trả về đường dẫn tuyệt đối đến file mã nguồn đang chứa lỗi"""
@@ -229,6 +230,7 @@ class Defects4CAdapter(SandboxAdapter):
         return get_defects4c_source_path(self.bug_id)
 
     def validate(self, patched_file_path, src_basename=None):
+        self.last_validation_details = {}
         raw = get_defects4c_raw_record(self.bug_id)
         if not raw:
             return False, [], ["metadata_not_found"]
@@ -247,7 +249,12 @@ class Defects4CAdapter(SandboxAdapter):
             return False, [], ["missing_commit_before"]
 
         test_ids = self._collect_defects4c_test_ids(project, sha)
-        related_ids = self._related_test_ids_from_bug_meta(bug_meta)
+        metadata_test_ids = self._metadata_test_ids_from_bug_meta(bug_meta)
+        related_ids, related_source = self._related_test_ids_from_bug_meta(bug_meta)
+        baseline_unrelated = self._baseline_unrelated_failed_tests_from_bug_meta(bug_meta)
+        related_scope_ids = metadata_test_ids or test_ids
+        if not related_scope_ids:
+            return False, [], ["empty_related_scope"]
         try:
             with open(patched_file_path, "rb") as f:
                 content = f.read()
@@ -281,21 +288,45 @@ class Defects4CAdapter(SandboxAdapter):
         except Exception:
             self._reset_defects4c_repo(project, sha)
             return False, [], [f"patch_copy_failed:{src_basename}"]
-
-        full_ok, _, full_failed = self._run_phase_a_full_suite(project, sha)
-        self._reset_defects4c_repo(project, sha)
-        filtered_failed = [t for t in full_failed if t in related_ids]
-        dropped_unrelated = [t for t in full_failed if t not in related_ids]
         print(
-            f"    [Defects4C] full_failed_total={len(full_failed)} "
-            f"related_kept={len(filtered_failed)} "
+            f"    [Defects4C] patch_applied src={os.path.basename(patched_file_path)} "
+            f"target={target_src}"
+        )
+
+        _, _, full_failed = self._run_phase_a_full_suite(project, sha)
+        self._reset_defects4c_repo(project, sha)
+        full_failed_set = set(full_failed)
+        related_id_set = set(related_ids)
+        filtered_failed = [t for t in full_failed if t in related_id_set]
+        dropped_unrelated = [t for t in full_failed if t not in related_id_set]
+        filtered_failed_set = set(filtered_failed)
+        filtered_passed = [t for t in related_scope_ids if t not in filtered_failed_set]
+        full_passed = [t for t in test_ids if t not in full_failed_set]
+        self.last_validation_details = {
+            "validation_mode": "defects4c_phase_a_filtered",
+            "related_scope_source": related_source,
+            "related_scope_test_count": len(related_scope_ids),
+            "full_scope_test_count": len(test_ids),
+            "related_test_ids": list(related_ids),
+            "dropped_unrelated_failed_tests": list(dropped_unrelated),
+            "baseline_unrelated_failed_tests": list(baseline_unrelated),
+            "full_failed_total": len(full_failed),
+            "related_failed_total": len(filtered_failed),
+            "unrelated_dropped_total": len(dropped_unrelated),
+            "full_post_passed_tests": list(full_passed),
+            "full_post_failed_tests": list(full_failed),
+        }
+        print(
+            f"    [Defects4C] full_scope_tests={len(test_ids)} "
+            f"full_failed_total={len(full_failed)} "
+            f"related_scope_tests={len(related_scope_ids)} "
+            f"related_failed={len(filtered_failed)} "
             f"unrelated_dropped={len(dropped_unrelated)}"
         )
         if dropped_unrelated:
             print(f"    [Defects4C] dropped_unrelated={dropped_unrelated}")
-        filtered_passed = [t for t in test_ids if t not in set(filtered_failed)]
         if not filtered_failed:
-            return True, (filtered_passed or ["defects4c_full_suite"]), []
+            return True, (filtered_passed or related_scope_ids or ["defects4c_related_suite"]), []
         return False, filtered_passed, filtered_failed
 
     @staticmethod
@@ -564,16 +595,70 @@ class Defects4CAdapter(SandboxAdapter):
             return []
         return ids
 
-    def _related_test_ids_from_bug_meta(self, bug_meta: dict) -> set:
-        tests = bug_meta.get("files", {}).get("test", []) if isinstance(bug_meta, dict) else []
-        out = set()
-        for p in tests:
-            base = os.path.basename(str(p))
+    def _metadata_test_ids_from_bug_meta(self, bug_meta: dict) -> list:
+        tests = bug_meta.get("tests", []) if isinstance(bug_meta, dict) else []
+        out = []
+        for test in tests:
+            if not isinstance(test, dict):
+                continue
+            tid = str(test.get("test_id", "")).strip()
+            if tid:
+                out.append(tid)
+        return self._unique_test_ids(out)
+
+    def _baseline_unrelated_failed_tests_from_bug_meta(self, bug_meta: dict) -> list:
+        filter_info = bug_meta.get("filter_info", {}) if isinstance(bug_meta, dict) else {}
+        dropped = filter_info.get("dropped_fail_test_ids", []) if isinstance(filter_info, dict) else []
+        return self._unique_test_ids(str(x).strip() for x in dropped if str(x).strip())
+
+    def _related_test_ids_from_bug_meta(self, bug_meta: dict) -> Tuple[list, str]:
+        if not isinstance(bug_meta, dict):
+            return [], "unknown"
+
+        filter_info = bug_meta.get("filter_info", {})
+        if isinstance(filter_info, dict):
+            related = filter_info.get("related_test_ids", [])
+            normalized = self._unique_test_ids(str(x).strip() for x in related if str(x).strip())
+            if normalized:
+                return normalized, "filter_info.related_test_ids"
+
+        tests = bug_meta.get("tests", [])
+        fail_ids = []
+        for test in tests if isinstance(tests, list) else []:
+            if not isinstance(test, dict):
+                continue
+            if str(test.get("outcome", "")).upper() != "FAIL":
+                continue
+            tid = str(test.get("test_id", "")).strip()
+            if tid:
+                fail_ids.append(tid)
+        normalized = self._unique_test_ids(fail_ids)
+        if normalized:
+            return normalized, "metadata.tests.fail"
+
+        legacy_paths = bug_meta.get("files", {}).get("test", [])
+        legacy_ids = []
+        for path in legacy_paths if isinstance(legacy_paths, list) else []:
+            base = os.path.basename(str(path))
             if not base or base == "TESTLIST":
                 continue
-            out.add(base)
+            legacy_ids.append(base)
             if "." in base:
-                out.add(base.split(".", 1)[0])
+                legacy_ids.append(base.split(".", 1)[0])
+        normalized = self._unique_test_ids(legacy_ids)
+        if normalized:
+            return normalized, "legacy.files.test"
+        return [], "empty"
+
+    @staticmethod
+    def _unique_test_ids(values) -> list:
+        seen = set()
+        out = []
+        for value in values:
+            if value in seen:
+                continue
+            seen.add(value)
+            out.append(value)
         return out
 
     def _parse_failed_tests_from_fullsuite_log(self, project: str, sha: str, log_name: str) -> list:

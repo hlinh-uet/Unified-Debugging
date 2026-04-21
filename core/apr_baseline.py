@@ -334,12 +334,18 @@ def validate_patch(patched_file_path: str, bug_id: str, dataset: str = "codeflaw
     (cần thiết khi APR vá một file phụ thay vì file bug chính).
     """
     print(f"[APR] Validating patch cho {bug_id} với adapter '{dataset}'...")
+    validate_patch.last_details = {}
     try:
         adapter = get_sandbox_adapter(dataset, bug_id)
-        return adapter.validate(patched_file_path, src_basename=src_basename)
+        result = adapter.validate(patched_file_path, src_basename=src_basename)
+        validate_patch.last_details = getattr(adapter, "last_validation_details", {}) or {}
+        return result
     except Exception as e:
         print(f"    [Error] Không thể validate: {e}")
         return False, [], []
+
+
+validate_patch.last_details = {}
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +391,16 @@ def _compact_test_list(test_ids):
         return list(test_ids) if test_ids else []
     extra = len(test_ids) - APR_MAX_TEST_ID_STORE
     return list(test_ids[:APR_MAX_TEST_ID_STORE]) + [f"...(+{extra} more)"]
+
+
+def _compact_validation_details(details: dict) -> dict:
+    """Rút gọn các list test IDs trong validation details trước khi ghi JSON."""
+    if not isinstance(details, dict):
+        return {}
+    compacted = {}
+    for key, value in details.items():
+        compacted[key] = _compact_test_list(value) if isinstance(value, list) else value
+    return compacted
 
 
 def _copy_accepted_patch(dataset: str, bug_id: str, bug_source_path: str,
@@ -560,6 +576,7 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
         target_func   = None
         post_passed   = []
         post_failed   = []
+        validation_details = {}
         attempted     = False   # đã thử ít nhất 1 hàm
         llm_attempted = False   # LLM đã thực sự sinh patch ít nhất 1 lần
 
@@ -643,6 +660,7 @@ Your task is to fix an algorithmic or compilation bug in function `{func_name}` 
             is_valid, post_passed, post_failed = validate_patch(
                 tmp_path, bug_id, dataset, src_basename=cand_base,
             )
+            validation_details = getattr(validate_patch, "last_details", {}) or {}
 
             if is_valid:
                 print(f"    [SUCCESS] Bản vá hợp lệ cho {bug_id} trong hàm '{func_name}'!")
@@ -666,6 +684,17 @@ Your task is to fix an algorithmic or compilation bug in function `{func_name}` 
             # Phân biệt: LLM không bao giờ sinh được patch vs. patch sinh ra nhưng fail test
             status = "failed" if llm_attempted else "llm_failed"
 
+        full_post_passed = validation_details.get("full_post_passed_tests", post_passed)
+        full_post_failed = validation_details.get("full_post_failed_tests", post_failed)
+        validation_mode = validation_details.get("validation_mode", f"{ds_lc}_default")
+        validation_summary = {
+            "related_scope_source": validation_details.get("related_scope_source"),
+            "related_scope_test_count": validation_details.get("related_scope_test_count", len(post_passed) + len(post_failed)),
+            "full_scope_test_count": validation_details.get("full_scope_test_count", len(full_post_passed) + len(full_post_failed)),
+            "related_failed_total": validation_details.get("related_failed_total", len(post_failed)),
+            "unrelated_dropped_total": validation_details.get("unrelated_dropped_total", 0),
+        }
+
         apr_results[bug_id] = {
             "status":             status,
             "patched_function":   patched_func,
@@ -680,6 +709,16 @@ Your task is to fix an algorithmic or compilation bug in function `{func_name}` 
             "post_failed_count":  len(post_failed),
             "post_passed_tests":  _compact_test_list(post_passed),
             "post_failed_tests":  _compact_test_list(post_failed),
+            "full_post_passed_count": len(full_post_passed),
+            "full_post_failed_count": len(full_post_failed),
+            "full_post_passed_tests": _compact_test_list(full_post_passed),
+            "full_post_failed_tests": _compact_test_list(full_post_failed),
+            "validation_mode":    validation_mode,
+            "related_test_ids":   _compact_test_list(validation_details.get("related_test_ids", [])),
+            "dropped_unrelated_failed_tests": _compact_test_list(validation_details.get("dropped_unrelated_failed_tests", [])),
+            "baseline_unrelated_failed_tests": _compact_test_list(validation_details.get("baseline_unrelated_failed_tests", [])),
+            "full_failed_total":  validation_details.get("full_failed_total", len(full_post_failed)),
+            "validation_details": _compact_validation_details(validation_summary),
         }
 
         with open(apr_results_file, "w") as f:
