@@ -247,6 +247,7 @@ class Defects4CAdapter(SandboxAdapter):
             return False, [], ["missing_commit_before"]
 
         test_ids = self._collect_defects4c_test_ids(project, sha)
+        related_ids = self._related_test_ids_from_bug_meta(bug_meta)
         try:
             with open(patched_file_path, "rb") as f:
                 content = f.read()
@@ -281,11 +282,21 @@ class Defects4CAdapter(SandboxAdapter):
             self._reset_defects4c_repo(project, sha)
             return False, [], [f"patch_copy_failed:{src_basename}"]
 
-        full_ok = self._run_phase_a_full_suite(project, sha)
+        full_ok, _, full_failed = self._run_phase_a_full_suite(project, sha)
         self._reset_defects4c_repo(project, sha)
-        if full_ok:
-            return True, (test_ids or ["defects4c_full_suite"]), []
-        return False, [], (test_ids or ["defects4c_full_suite"])
+        filtered_failed = [t for t in full_failed if t in related_ids]
+        dropped_unrelated = [t for t in full_failed if t not in related_ids]
+        print(
+            f"    [Defects4C] full_failed_total={len(full_failed)} "
+            f"related_kept={len(filtered_failed)} "
+            f"unrelated_dropped={len(dropped_unrelated)}"
+        )
+        if dropped_unrelated:
+            print(f"    [Defects4C] dropped_unrelated={dropped_unrelated}")
+        filtered_passed = [t for t in test_ids if t not in set(filtered_failed)]
+        if not filtered_failed:
+            return True, (filtered_passed or ["defects4c_full_suite"]), []
+        return False, filtered_passed, filtered_failed
 
     @staticmethod
     def _defects4c_fix_shell(project: str, sha: str, container_patch: str) -> str:
@@ -419,9 +430,10 @@ class Defects4CAdapter(SandboxAdapter):
             print(f"    [Defects4C] WARN multiple candidates for {src_basename}, chọn {matches[0]}")
         return matches[0]
 
-    def _run_phase_a_full_suite(self, project: str, sha: str) -> bool:
+    def _run_phase_a_full_suite(self, project: str, sha: str) -> Tuple[bool, list, list]:
         container = os.getenv("DEFECTS4C_CONTAINER", "my_defects4c_tcpdump")
         repo_rel = f"/out/{project}/git_repo_dir_{sha}"
+        all_ids = self._collect_defects4c_test_ids(project, sha)
         cflags = "-O0 -g -fno-omit-frame-pointer -fno-common -fsanitize=address"
         ldflags = "-fsanitize=address"
         run_cmd = (
@@ -443,11 +455,13 @@ class Defects4CAdapter(SandboxAdapter):
                 stderr=subprocess.PIPE,
                 timeout=60 * 50,
             )
-            return result.returncode == 0
+            failed = self._parse_failed_tests_from_fullsuite_log(project, sha, "apr_phaseA_fullsuite.log")
+            passed = [t for t in all_ids if t not in set(failed)]
+            return result.returncode == 0 and not failed, passed, failed
 
         host_repo = os.path.join(DEFECTS4C_OUT_DIR, project, f"git_repo_dir_{sha}")
         if not os.path.isdir(os.path.join(host_repo, "tests")):
-            return False
+            return False, [], (all_ids or ["defects4c_full_suite"])
         try:
             subprocess.run(
                 ["bash", "-lc", f"CFLAGS={shlex.quote(cflags)} LDFLAGS={shlex.quote(ldflags)} ./configure --prefix={shlex.quote(host_repo)} >/dev/null 2>&1 && make -j4 >/dev/null 2>&1"],
@@ -465,11 +479,15 @@ class Defects4CAdapter(SandboxAdapter):
                     timeout=60 * 50,
                 )
             if result.returncode != 0:
-                return False
+                failed = self._parse_failed_tests_from_fullsuite_log(project, sha, "apr_phaseA_fullsuite.log")
+                passed = [t for t in all_ids if t not in set(failed)]
+                return False, passed, (failed or ["defects4c_full_suite"])
             with open(log_path, "r", errors="ignore") as f:
-                return "TEST FAILED" not in f.read()
+                failed = self._extract_failed_tests_from_log_text(f.read())
+            passed = [t for t in all_ids if t not in set(failed)]
+            return not failed, passed, failed
         except Exception:
-            return False
+            return False, [], (all_ids or ["defects4c_full_suite"])
 
     def _run_defects4c_full_suite(self, project: str, sha: str) -> Tuple[bool, list, list]:
         test_ids = self._collect_defects4c_test_ids(project, sha)
@@ -545,6 +563,38 @@ class Defects4CAdapter(SandboxAdapter):
         except Exception:
             return []
         return ids
+
+    def _related_test_ids_from_bug_meta(self, bug_meta: dict) -> set:
+        tests = bug_meta.get("files", {}).get("test", []) if isinstance(bug_meta, dict) else []
+        out = set()
+        for p in tests:
+            base = os.path.basename(str(p))
+            if not base or base == "TESTLIST":
+                continue
+            out.add(base)
+            if "." in base:
+                out.add(base.split(".", 1)[0])
+        return out
+
+    def _parse_failed_tests_from_fullsuite_log(self, project: str, sha: str, log_name: str) -> list:
+        host_repo = os.path.join(DEFECTS4C_OUT_DIR, project, f"git_repo_dir_{sha}")
+        log_path = os.path.join(host_repo, log_name)
+        if not os.path.isfile(log_path):
+            return []
+        try:
+            with open(log_path, "r", errors="ignore") as f:
+                txt = f.read()
+        except Exception:
+            return []
+        return self._extract_failed_tests_from_log_text(txt)
+
+    def _extract_failed_tests_from_log_text(self, text: str) -> list:
+        failed = set()
+        for m in re.finditer(r"^\s*([A-Za-z0-9._+\-]+)\s*:\s*TEST FAILED", text, flags=re.MULTILINE):
+            failed.add(m.group(1).strip())
+        for m in re.finditer(r"^\s*Failed test:\s*([A-Za-z0-9._+\-]+)\s*$", text, flags=re.MULTILINE):
+            failed.add(m.group(1).strip())
+        return sorted(failed)
 
     def _docker_container_running(self, container):
         result = subprocess.run(

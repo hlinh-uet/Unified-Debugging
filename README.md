@@ -125,7 +125,7 @@ python3 main.py --all --dataset codeflaws
 
 ```bash
 # Bước 1 – Fault Localization
-python3 main.py --fl --dataset codeflaws
+python3 main.py --fl --dataset defects4c
 
 # Bước 2a – APR bằng LLM (cần GEMINI_API_KEY)
 python3 main.py --apr --dataset defects4c --llm gemini      # dùng gemini-2.5-flash
