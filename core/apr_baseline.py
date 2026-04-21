@@ -301,11 +301,15 @@ def _call_kaggle_local(prompt: str, model_path: str) -> Optional[str]:
 
     try:
         if _LOCAL_MODEL_CACHE["path"] != model_path:
+            offload_dir = os.getenv("LOCAL_LLM_OFFLOAD_DIR", "/kaggle/working/model_offload")
+            os.makedirs(offload_dir, exist_ok=True)
             tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
             mdl = AutoModelForCausalLM.from_pretrained(
                 model_path,
                 torch_dtype="auto",
                 device_map="auto",
+                offload_folder=offload_dir,
+                offload_state_dict=True,
                 trust_remote_code=True,
             )
             _LOCAL_MODEL_CACHE.update({"path": model_path, "tokenizer": tok, "model": mdl})
