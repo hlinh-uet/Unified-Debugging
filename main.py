@@ -78,7 +78,7 @@ def main():
         run_fl(dataset)
         run_apr_pipeline(dataset, llm_provider=llm_provider)
         evaluate_fl()
-        evaluate_apr()
+        evaluate_apr(dataset)
     else:
         if args.fl:
             print(f"[Pipeline] Chạy Fault Localization trên dataset '{dataset}'...")
@@ -88,7 +88,7 @@ def main():
         if args.apr:
             print(f"[Pipeline] Chạy APR (LLM: {llm_provider or 'default'}) trên dataset '{dataset}'...")
             run_apr_pipeline(dataset, llm_provider=llm_provider)
-            evaluate_apr()
+            evaluate_apr(dataset)
 
         if args.apr_mutation:
             print(f"[Pipeline] Chạy APR Mutation trên dataset '{dataset}'...")
@@ -101,7 +101,7 @@ def main():
         if args.eval:
             print("[Pipeline] Chạy Evaluation...")
             evaluate_fl()
-            evaluate_apr()
+            evaluate_apr(dataset)
 
 
 if __name__ == "__main__":

@@ -5,8 +5,9 @@ Tiện ích dùng chung cho toàn bộ pipeline (FL, APR, Mutation).
 Tránh duplicate code giữa các module.
 """
 
+import os
 import re
-from typing import Tuple, Optional
+from typing import Any, Dict, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +119,62 @@ def parse_qualified_func(qualified: str) -> Tuple[str, str]:
     return qualified[:idx], qualified[idx + len(sep):]
 
 
+def parse_sbfl_qualified_name(qualified: str) -> Tuple[str, str]:
+    """
+    Tách khóa suspiciousness (FL) thành (file_hint, func_name).
+
+    - Codeflaws / chuẩn cũ: ``/path/to/file.c::symbol`` → đường dẫn file + tên hàm.
+    - Defects4C / metadata tcpdump: ``print-isakmp.c:ikev1_id_print`` (một dấu ``:``).
+
+    Nếu không nhận dạng được, trả về ("", qualified) để tương thích hành vi cũ.
+    """
+    if not qualified:
+        return "", ""
+    sep = "::"
+    if sep in qualified:
+        idx = qualified.rfind(sep)
+        return qualified[:idx], qualified[idx + len(sep) :]
+    idx = qualified.rfind(":")
+    if idx > 0:
+        left, right = qualified[:idx], qualified[idx + 1 :]
+        if re.match(r"^[A-Za-z_]\w*$", right):
+            return left, right
+    return "", qualified
+
+
+def resolve_fl_candidate_source_path(
+    dataset_name: str,
+    bug_source_path: str,
+    file_hint: str,
+    raw_meta: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Map FL key (file phần) sang đường dẫn .c thật để đọc/vá.
+
+    - Defects4C: ưu tiên ``source_dir_buggy`` trong metadata + basename(file_hint).
+    - Codeflaws: nếu file_hint là đường dẫn tuyệt đối tồn tại thì dùng luôn.
+    - Fallback: cùng thư mục với file bug chính.
+    """
+    if not file_hint or not bug_source_path:
+        return bug_source_path
+    fh = file_hint.strip()
+    if os.path.isabs(fh) and os.path.isfile(fh):
+        return fh
+    base = os.path.basename(fh)
+    ds = (dataset_name or "").lower()
+    if ds in ("defects4c", "defects4c-tcpdump", "tcpdump") and raw_meta:
+        src_dir = raw_meta.get("source_dir_buggy") or ""
+        if src_dir:
+            cand = os.path.join(src_dir, base)
+            if os.path.isfile(cand):
+                return cand
+    parent = os.path.dirname(bug_source_path)
+    cand = os.path.join(parent, base)
+    if os.path.isfile(cand):
+        return cand
+    return bug_source_path
+
+
 def extract_function_code(
     source_code: str,
     func_name: str
@@ -125,41 +182,172 @@ def extract_function_code(
     """
     Trích xuất mã nguồn của một hàm C/C++ từ chuỗi source_code.
 
-    Sử dụng Regex để tìm điểm bắt đầu và đếm ngoặc nhọn (bỏ qua braces
-    trong comment, string literal, char literal) để tìm điểm kết thúc.
+    Thuật toán:
+      1. Tìm mọi lần xuất hiện ``<func_name>(`` (word-boundary).
+      2. Tìm ngoặc tròn đóng tương ứng – có cân bằng paren lồng nhau
+         (xử lý được function-pointer parameter, e.g. ``void (*cb)(int)``).
+      3. Sau dấu ``)`` bỏ qua whitespace + attribute ``__attribute__((...))``,
+         nếu gặp ``{`` thì coi đó là định nghĩa hàm; ngược lại là khai báo/gọi
+         hàm – bỏ qua và tiếp tục tìm.
+      4. Tìm ``}`` đóng bằng counter (bỏ qua comments / strings / chars).
 
     Args:
-        source_code: Toàn bộ nội dung file mã nguồn (chuỗi).
+        source_code: Toàn bộ nội dung file mã nguồn.
         func_name:   Tên hàm cần trích xuất.
 
     Returns:
         Tuple (func_code, start_idx, end_idx):
             - func_code:  Chuỗi mã nguồn của hàm, hoặc None nếu không tìm thấy.
-            - start_idx:  Vị trí byte bắt đầu trong source_code (-1 nếu không tìm thấy).
-            - end_idx:    Vị trí byte kết thúc (exclusive) trong source_code (-1 nếu không tìm thấy).
+            - start_idx:  Vị trí byte bắt đầu (return type) trong source_code.
+            - end_idx:    Vị trí ngay sau ``}`` đóng (exclusive).
     """
-    pattern = re.compile(
-        r'\b(?:(?:int|void|char|double|float|long|unsigned|short|struct|static|inline|const)\s+)*'
-        r'\**\s*'
-        + re.escape(func_name)
-        + r'\s*\([^)]*\)\s*\{',
-        re.MULTILINE
-    )
-    match = pattern.search(source_code)
+    pattern = re.compile(r'\b' + re.escape(func_name) + r'\s*\(')
 
-    if not match:
-        if func_name == "main":
-            pattern = re.compile(r'\bmain\s*\([^)]*\)\s*\{', re.MULTILINE)
-            match = pattern.search(source_code)
-        if not match:
-            return None, -1, -1
+    for m in pattern.finditer(source_code):
+        name_start  = m.start()
+        open_paren  = m.end() - 1
+        close_paren = _find_matching_paren(source_code, open_paren)
+        if close_paren < 0:
+            continue
 
-    start_idx = match.start()
-    end_idx = _find_matching_brace(source_code, match.end() - 1)
-    if end_idx < 0:
-        return None, -1, -1
+        i = close_paren + 1
+        n = len(source_code)
+        # Bỏ qua whitespace, newline, comment, và attribute specifier
+        # trước khi gặp '{' mở hàm (GCC: __attribute__((...)), const, throw(),...).
+        while i < n:
+            c = source_code[i]
+            if c.isspace():
+                i += 1
+                continue
+            if c == '/' and i + 1 < n and source_code[i + 1] == '/':
+                nl = source_code.find('\n', i)
+                if nl < 0:
+                    i = n
+                    break
+                i = nl + 1
+                continue
+            if c == '/' and i + 1 < n and source_code[i + 1] == '*':
+                end = source_code.find('*/', i + 2)
+                if end < 0:
+                    i = n
+                    break
+                i = end + 2
+                continue
+            # __attribute__((...)) hoặc const/throw()... – nhảy qua token + paren
+            if c.isalpha() or c == '_':
+                j = i
+                while j < n and (source_code[j].isalnum() or source_code[j] == '_'):
+                    j += 1
+                # Nếu token này là 'return' hoặc keyword khác, có nghĩa không phải def
+                if source_code[i:j] in ("return", "sizeof", "if", "while", "for", "switch"):
+                    break
+                # Nhảy qua whitespace, nếu có '(' kế tiếp thì skip paren group
+                k = j
+                while k < n and source_code[k].isspace():
+                    k += 1
+                if k < n and source_code[k] == '(':
+                    end_paren = _find_matching_paren(source_code, k)
+                    if end_paren < 0:
+                        break
+                    i = end_paren + 1
+                    continue
+                i = j
+                continue
+            break
 
-    return source_code[start_idx:end_idx], start_idx, end_idx
+        if i >= n or source_code[i] != '{':
+            continue
+
+        start_idx = _find_function_def_start(source_code, name_start)
+        end_idx   = _find_matching_brace(source_code, i)
+        if end_idx < 0:
+            continue
+
+        return source_code[start_idx:end_idx], start_idx, end_idx
+
+    return None, -1, -1
+
+
+def _find_function_def_start(source: str, name_pos: int) -> int:
+    """
+    Đi lùi theo từng dòng từ vị trí ``name_pos`` để tìm dòng đầu của
+    return-type/attribute specifier. Dừng khi gặp:
+
+    - Dòng trống (chỉ whitespace).
+    - Dòng bắt đầu bằng ``#`` (preprocessor directive).
+    - Dòng kết thúc bằng ``;`` hoặc ``}`` (kết thúc construct trước đó).
+    """
+    line_start = source.rfind('\n', 0, name_pos) + 1
+    while line_start > 0:
+        prev_line_end   = line_start - 1
+        prev_line_start = source.rfind('\n', 0, prev_line_end) + 1
+        stripped = source[prev_line_start:prev_line_end].strip()
+        if not stripped:
+            break
+        if stripped.startswith('#'):
+            break
+        if stripped.endswith(';') or stripped.endswith('}'):
+            break
+        line_start = prev_line_start
+    return line_start
+
+
+def _find_matching_paren(source: str, open_pos: int) -> int:
+    """
+    Tìm '(' đóng tương ứng với '(' tại open_pos, bỏ qua parens trong
+    comments, string literals, char literals.
+
+    Returns: vị trí của ')' đóng, hoặc -1 nếu không tìm thấy.
+    """
+    depth = 0
+    i = open_pos
+    n = len(source)
+
+    while i < n:
+        c = source[i]
+
+        if c == '/' and i + 1 < n:
+            if source[i + 1] == '/':
+                i = source.find('\n', i)
+                if i < 0:
+                    return -1
+                i += 1
+                continue
+            if source[i + 1] == '*':
+                end = source.find('*/', i + 2)
+                if end < 0:
+                    return -1
+                i = end + 2
+                continue
+
+        if c == '"':
+            i += 1
+            while i < n and source[i] != '"':
+                if source[i] == '\\':
+                    i += 1
+                i += 1
+            i += 1
+            continue
+
+        if c == "'":
+            i += 1
+            while i < n and source[i] != "'":
+                if source[i] == '\\':
+                    i += 1
+                i += 1
+            i += 1
+            continue
+
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+            if depth == 0:
+                return i
+
+        i += 1
+
+    return -1
 
 
 def _find_matching_brace(source: str, open_brace_pos: int) -> int:

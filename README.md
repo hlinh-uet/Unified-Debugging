@@ -128,8 +128,8 @@ python3 main.py --all --dataset codeflaws
 python3 main.py --fl --dataset codeflaws
 
 # Bước 2a – APR bằng LLM (cần GEMINI_API_KEY)
-python3 main.py --apr --dataset codeflaws --llm gemini      # dùng gemini-2.5-flash
-python3 main.py --apr --dataset codeflaws --llm openai # dùng gpt-4o-mini
+python3 main.py --apr --dataset defects4c --llm gemini      # dùng gemini-2.5-flash
+python3 main.py --apr --dataset defects4c --llm openai # dùng gpt-4o-mini
 python main.py --apr # dùng LLM_PROVIDER trong .env
 
 
@@ -199,26 +199,6 @@ if dataset_name.lower() == "defects4c":
 | **Regressions**                   | Bản vá sửa được lỗi gốc nhưng làm hỏng test khác             |
 | **Edit Distance (function-level)**| Levenshtein: `patched_function` vs hàm tương ứng trong accepted file |
 | **Edit Distance (file-level)**    | Levenshtein: `patched_file` (toàn bộ file) vs accepted file   |
-
-> ED file-level hữu ích khi FL xác định sai function — vẫn đo được khoảng cách chỉnh sửa tổng thể.
-
-Cả 3 APR engine đều lưu `patched_function` + `patched_file` trong file JSON kết quả, kể cả khi **không thành công** (status ≠ success), để đảm bảo evaluation luôn có dữ liệu.
-
----
-
-## Nơi lưu kết quả
-
-| Thứ gì                           | Lưu ở đâu                                           |
-|----------------------------------|------------------------------------------------------|
-| FL scores (Tarantula)            | `experiments/tarantula_results.json`                 |
-| APR kết quả (LLM)                | `experiments/apr_results.json`                       |
-| APR kết quả (Mutation)           | `experiments/apr_mutation_results.json`              |
-| APR kết quả (GenProg)            | `experiments/apr_genprog_results.json`               |
-| Bản vá thành công (LLM)          | `experiments/patches/<bug_id>_patch.c`               |
-| Bản vá thành công (Mutation)     | `experiments/patches/<bug_id>_mutation_patch.c`      |
-| Bản vá thành công (GenProg)      | `experiments/patches/<bug_id>_genprog_patch.c`       |
-| Accepted patches (tham chiếu)    | `experiments/correct_patches/<bug_id>_accepted.c`    |
-| GenProg log / workdir            | `experiments/genprog-run/`                           |
 
 ---
 

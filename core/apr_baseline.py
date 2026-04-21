@@ -10,10 +10,11 @@ from pathlib import Path
 
 from configs.path import EXPERIMENTS_DIR, PATCHES_DIR
 from data_loaders.base_loader import get_loader, BugRecord
-from data_loaders.sandbox_adapter import get_sandbox_adapter
+from data_loaders.sandbox_adapter import get_sandbox_adapter, defects4c_docker_ready
 from core.utils import (
     extract_function_code,
-    parse_qualified_func,
+    parse_sbfl_qualified_name,
+    resolve_fl_candidate_source_path,
     get_codeflaws_accepted_cfile,
 )
 
@@ -21,9 +22,14 @@ load_dotenv()
 
 # Provider mặc định – đọc từ .env, có thể override qua CLI
 _DEFAULT_LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
+APR_TOP_K = int(os.getenv("APR_TOP_K", "3"))
+# Giới hạn độ dài source đưa vào prompt. Defects4C/tcpdump có file ~5k dòng,
+# vượt context window của nhiều LLM và loãng tín hiệu. Nếu vượt mức này ta
+# cắt giữa, giữ phần đầu file (includes/typedef) + neighborhood của hàm lỗi.
+APR_MAX_SOURCE_CHARS = int(os.getenv("APR_MAX_SOURCE_CHARS", "30000"))
+# Với Defects4C, một bug có hàng trăm test pass – lưu hết vào JSON gây bloat.
+APR_MAX_TEST_ID_STORE = int(os.getenv("APR_MAX_TEST_ID_STORE", "50"))
 
-
-import re
 
 def _clean_code(raw_content: str) -> str:
     """
@@ -177,7 +183,7 @@ def _call_claude(prompt: str, model: Optional[str] = None) -> Optional[str]:
             text=True,
             encoding="utf-8",
             check=False,
-            timeout=30000, 
+            timeout=300,
         )
         
         # SỬA LỖI 2: Check returncode của process thay vì status_code của HTTP
@@ -320,12 +326,17 @@ def call_llm(prompt: str, provider: Optional[str] = None) -> Optional[str]:
 # Validation
 # ---------------------------------------------------------------------------
 
-def validate_patch(patched_file_path: str, bug_id: str, dataset: str = "codeflaws"):
-    """Sử dụng Sandbox Adapter để kiểm chứng bản vá."""
+def validate_patch(patched_file_path: str, bug_id: str, dataset: str = "codeflaws",
+                   src_basename: Optional[str] = None):
+    """Sử dụng Sandbox Adapter để kiểm chứng bản vá.
+
+    ``src_basename`` cho Defects4C biết patch này nhằm thay thế file nào
+    (cần thiết khi APR vá một file phụ thay vì file bug chính).
+    """
     print(f"[APR] Validating patch cho {bug_id} với adapter '{dataset}'...")
     try:
         adapter = get_sandbox_adapter(dataset, bug_id)
-        return adapter.validate(patched_file_path)
+        return adapter.validate(patched_file_path, src_basename=src_basename)
     except Exception as e:
         print(f"    [Error] Không thể validate: {e}")
         return False, [], []
@@ -334,6 +345,85 @@ def validate_patch(patched_file_path: str, bug_id: str, dataset: str = "codeflaw
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
+
+def _trim_source_for_prompt(source_code: str, start_idx: int, end_idx: int) -> str:
+    """
+    Rút gọn source đưa vào prompt khi file quá dài (thường gặp ở Defects4C/tcpdump).
+
+    Chiến lược: giữ phần đầu file (includes, typedef, hằng số) + neighborhood
+    quanh hàm lỗi (để LLM thấy struct & macro liên quan). Đệm bằng comment
+    "... [source truncated] ..." để LLM biết có cắt bỏ.
+    """
+    if len(source_code) <= APR_MAX_SOURCE_CHARS or start_idx < 0 or end_idx < 0:
+        return source_code
+
+    head_budget = min(6000, APR_MAX_SOURCE_CHARS // 4)
+    remaining   = APR_MAX_SOURCE_CHARS - head_budget
+    neighborhood = max(2000, remaining // 2)
+
+    head = source_code[:head_budget]
+    func_lo = max(head_budget, start_idx - neighborhood)
+    func_hi = min(len(source_code), end_idx + neighborhood)
+    middle_skipped = func_lo > head_budget
+    tail_skipped   = func_hi < len(source_code)
+
+    parts = [head]
+    if middle_skipped:
+        parts.append("\n\n/* ... [source truncated – prelude shown above] ... */\n\n")
+    parts.append(source_code[func_lo:func_hi])
+    if tail_skipped:
+        parts.append("\n\n/* ... [source truncated – tail omitted] ... */\n")
+    return "".join(parts)
+
+
+def _compact_test_list(test_ids):
+    """
+    Giới hạn số test IDs lưu vào JSON để tránh phình file (Defects4C có >400 test).
+    Trả về list; nếu vượt giới hạn, giữ N đầu + marker "...(+K more)".
+    """
+    if not test_ids or APR_MAX_TEST_ID_STORE <= 0 or len(test_ids) <= APR_MAX_TEST_ID_STORE:
+        return list(test_ids) if test_ids else []
+    extra = len(test_ids) - APR_MAX_TEST_ID_STORE
+    return list(test_ids[:APR_MAX_TEST_ID_STORE]) + [f"...(+{extra} more)"]
+
+
+def _copy_accepted_patch(dataset: str, bug_id: str, bug_source_path: str,
+                        bug_record: BugRecord) -> None:
+    """
+    Sao lưu accepted/ground-truth patch để evaluation so sánh về sau.
+
+    - Codeflaws: đường dẫn được tính từ ``bug_id`` (``<prefix>-<accepted>.c``).
+    - Defects4C: dùng ``bug_record.raw['accepted_file']`` (metadata chuẩn),
+      fallback sang ``source_dir_fixed`` + basename source.
+    """
+    out_dir = os.path.join(EXPERIMENTS_DIR, "correct_patches")
+    ds = (dataset or "").lower()
+    accepted_src = None
+
+    if ds == "codeflaws":
+        accepted_cfile = get_codeflaws_accepted_cfile(bug_id)
+        if accepted_cfile:
+            accepted_src = os.path.join(os.path.dirname(bug_source_path), accepted_cfile)
+
+    elif ds in ("defects4c", "defects4c-tcpdump", "tcpdump"):
+        raw = bug_record.raw if bug_record else None
+        if raw:
+            cand = raw.get("accepted_file")
+            if cand and os.path.exists(cand):
+                accepted_src = cand
+            else:
+                fixed_dir = raw.get("source_dir_fixed") or ""
+                if fixed_dir:
+                    cand = os.path.join(fixed_dir, os.path.basename(bug_source_path))
+                    if os.path.exists(cand):
+                        accepted_src = cand
+
+    if not accepted_src or not os.path.exists(accepted_src):
+        return
+    os.makedirs(out_dir, exist_ok=True)
+    safe_id = bug_id.replace("@", "__").replace("/", "__")
+    shutil.copy2(accepted_src, os.path.join(out_dir, f"{safe_id}_accepted.c"))
+
 
 def _build_failed_test_context(bug: BugRecord) -> str:
     """Trích xuất context test thất bại đầu tiên từ BugRecord (không đọc lại disk)."""
@@ -399,6 +489,16 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
     with open(tarantula_results_file, "r") as f:
         fl_results = json.load(f)
 
+    ds_lc = (dataset or "").lower()
+    if ds_lc in ("defects4c", "defects4c-tcpdump", "tcpdump"):
+        ok_d, info_d = defects4c_docker_ready()
+        if not ok_d:
+            print(f"[APR] {info_d}")
+            print("[APR] Dừng sớm — không gọi LLM khi chưa validate được trên Docker.")
+            return
+        os.environ["DEFECTS4C_CONTAINER"] = info_d
+        print(f"[APR] Defects4C: dùng container '{info_d}' để validate patch.")
+
     # Load toàn bộ bug records một lần duy nhất → dùng chung cho FL context
     print(f"[APR] Đang load bug records từ dataset '{dataset}'...")
     loader  = get_loader(dataset)
@@ -424,7 +524,8 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
             continue
 
         sorted_funcs = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        print(f"[APR] Xử lý bug {bug_id}...")
+        top_funcs = sorted_funcs[:APR_TOP_K] if APR_TOP_K > 0 else sorted_funcs
+        print(f"[APR] Xử lý bug {bug_id}... (top-{APR_TOP_K if APR_TOP_K > 0 else 'all'})")
 
         # Lấy source path qua Sandbox Adapter (nhất quán với validation)
         try:
@@ -438,39 +539,57 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
             print(f"    [Skip] File nguồn không tồn tại: {bug_source_path}")
             continue
 
-        with open(bug_source_path, "r") as f:
-            source_code = f.read()
+        defects4c_like = ds_lc in ("defects4c", "defects4c-tcpdump", "tcpdump")
+        primary_base = os.path.basename(bug_source_path)
+        _br = bug_map.get(bug_id)
+        raw_meta = _br.raw if _br else None
+        source_cache: dict = {}
 
         # Context test từ BugRecord đã load sẵn (không đọc thêm file)
         bug_record = bug_map.get(bug_id)
         failed_tests_context = _build_failed_test_context(bug_record) if bug_record else ""
-        init_passed = [t.get("test_id") for t in (bug_record.tests if bug_record else []) if t.get("outcome") in ("PASS", "PASSED")]
-        init_failed = [t.get("test_id") for t in (bug_record.tests if bug_record else []) if t.get("outcome") in ("FAIL", "FAILED")]
+        init_passed_all = [t.get("test_id") for t in (bug_record.tests if bug_record else []) if t.get("outcome") in ("PASS", "PASSED")]
+        init_failed_all = [t.get("test_id") for t in (bug_record.tests if bug_record else []) if t.get("outcome") in ("FAIL", "FAILED")]
+        init_passed = _compact_test_list(init_passed_all)
+        init_failed = _compact_test_list(init_failed_all)
 
         status        = "skipped"
         patched_func  = None
         patched_source = None   # toàn bộ nội dung file sau khi vá
+        repair_target_file = None  # file .c đã vá (để đối chiếu ED)
         target_func   = None
         post_passed   = []
         post_failed   = []
         attempted     = False   # đã thử ít nhất 1 hàm
         llm_attempted = False   # LLM đã thực sự sinh patch ít nhất 1 lần
 
-        # Sao lưu accepted patch một lần (cho evaluation sau này)
-        bug_dir = os.path.dirname(bug_source_path)
-        accepted_cfile = get_codeflaws_accepted_cfile(bug_id)
-        if accepted_cfile:
-            accepted_src = os.path.join(bug_dir, accepted_cfile)
-            os.makedirs(os.path.join(EXPERIMENTS_DIR, "correct_patches"), exist_ok=True)
-            if os.path.exists(accepted_src):
-                shutil.copy2(accepted_src, os.path.join(EXPERIMENTS_DIR, "correct_patches", f"{bug_id}_accepted.c"))
+        # Sao lưu accepted patch một lần (cho evaluation sau này).
+        # Logic tách theo dataset — tránh áp sai hàm codeflaws cho defects4c.
+        _copy_accepted_patch(dataset, bug_id, bug_source_path, bug_record)
 
-        for qualified_name, score in sorted_funcs:
+        for qualified_name, score in top_funcs:
             if score == 0.0:
                 continue
 
-            _, func_name = parse_qualified_func(qualified_name)
-            print(f"  - Kiểm tra hàm '{func_name}' (Score: {score:.4f})")
+            file_hint, func_name = parse_sbfl_qualified_name(qualified_name)
+            if not func_name:
+                continue
+
+            candidate_path = resolve_fl_candidate_source_path(
+                dataset, bug_source_path, file_hint or "", raw_meta
+            )
+            if not os.path.isfile(candidate_path):
+                print(
+                    f"  - [Skip] Không tìm thấy file nguồn cho '{qualified_name}': {candidate_path}"
+                )
+                continue
+            if candidate_path not in source_cache:
+                with open(candidate_path, "r") as f:
+                    source_cache[candidate_path] = f.read()
+            source_code = source_cache[candidate_path]
+            cand_base = os.path.basename(candidate_path)
+
+            print(f"  - Kiểm tra hàm '{func_name}' trong {cand_base} (Score: {score:.4f})")
             func_code, start_idx, end_idx = extract_function_code(source_code, func_name)
             if not func_code:
                 print(f"    WARNING: Không thể trích xuất hàm {func_name}")
@@ -479,14 +598,20 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
             target_func = qualified_name
             attempted = True
 
+            prompt_source = _trim_source_for_prompt(source_code, start_idx, end_idx)
             prompt = f"""You are an expert in fixing C/C++ bugs.
 Your task is to fix an algorithmic or compilation bug in function `{func_name}` from the code below (Bug ID: {bug_id}).
 
 {failed_tests_context}
 
-### Full current source file (for scope, libraries, and struct context):
+### Current source file (for scope, libraries, and struct context):
 ```c
-{source_code}
+{prompt_source}
+```
+
+### The buggy function to repair (`{func_name}` in `{cand_base}`):
+```c
+{func_code}
 ```
 
 ### Requirements:
@@ -506,16 +631,23 @@ Your task is to fix an algorithmic or compilation bug in function `{func_name}` 
             llm_attempted = True
             patched_func   = _clean_llm_patch(raw_patch)
             patched_source = source_code[:start_idx] + patched_func + source_code[end_idx:]
+            repair_target_file = candidate_path
 
-            tmp_path = os.path.join(EXPERIMENTS_DIR, f"tmp_{bug_id}.c")
+            safe_cand = cand_base.replace("/", "_").replace(" ", "_")
+            tmp_path = os.path.join(EXPERIMENTS_DIR, f"tmp_{bug_id.replace('@', '__')}__{safe_cand}")
             with open(tmp_path, "w") as f:
                 f.write(patched_source)
 
-            is_valid, post_passed, post_failed = validate_patch(tmp_path, bug_id, dataset)
+            # Truyền src_basename để Defects4CAdapter biết patch này nhằm file nào
+            # (khi FL chỉ ra lỗi ở file phụ khác với file bug chính).
+            is_valid, post_passed, post_failed = validate_patch(
+                tmp_path, bug_id, dataset, src_basename=cand_base,
+            )
 
             if is_valid:
                 print(f"    [SUCCESS] Bản vá hợp lệ cho {bug_id} trong hàm '{func_name}'!")
-                patch_path = os.path.join(PATCHES_DIR, f"{bug_id}_patch.c")
+                patch_name = f"{bug_id}_patch.c" if cand_base == primary_base else f"{bug_id}_patch__{safe_cand}"
+                patch_path = os.path.join(PATCHES_DIR, patch_name)
                 os.makedirs(PATCHES_DIR, exist_ok=True)
                 try:
                     shutil.move(tmp_path, patch_path)  # dùng move thay rename để an toàn cross-device
@@ -535,14 +667,19 @@ Your task is to fix an algorithmic or compilation bug in function `{func_name}` 
             status = "failed" if llm_attempted else "llm_failed"
 
         apr_results[bug_id] = {
-            "status":            status,
-            "patched_function":  patched_func,
-            "patched_file":      patched_source,   # toàn bộ file sau khi vá (để tính ED file-level)
-            "selected_function": target_func,
-            "init_passed_tests": init_passed,
-            "init_failed_tests": init_failed,
-            "post_passed_tests": post_passed,
-            "post_failed_tests": post_failed,
+            "status":             status,
+            "patched_function":   patched_func,
+            "patched_file":       patched_source,  # toàn bộ nội dung file đã vá (có thể khác file bug chính)
+            "repair_target_file": repair_target_file,
+            "selected_function":  target_func,
+            "init_passed_count":  len(init_passed_all),
+            "init_failed_count":  len(init_failed_all),
+            "init_passed_tests":  init_passed,
+            "init_failed_tests":  init_failed,
+            "post_passed_count":  len(post_passed),
+            "post_failed_count":  len(post_failed),
+            "post_passed_tests":  _compact_test_list(post_passed),
+            "post_failed_tests":  _compact_test_list(post_failed),
         }
 
         with open(apr_results_file, "w") as f:

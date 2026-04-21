@@ -101,10 +101,9 @@ def get_loader(dataset_name: str) -> BugLoader:
         from data_loaders.codeflaws_loader import CodeflawsLoader
         return CodeflawsLoader()
 
-    # Thêm dataset mới tại đây:
-    # if name == "defects4c":
-    #     from data_loaders.defects4c_loader import Defects4CLoader
-    #     return Defects4CLoader()
+    if name in ("defects4c", "defects4c-tcpdump", "tcpdump"):
+        from data_loaders.defects4c_loader import Defects4CLoader
+        return Defects4CLoader(project="tcpdump")
 
     raise ValueError(
         f"Dataset '{dataset_name}' chưa có Loader tương ứng. "

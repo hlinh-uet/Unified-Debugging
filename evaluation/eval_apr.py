@@ -7,7 +7,10 @@ from core.utils import (
     get_codeflaws_accepted_cfile,
     normalize_code_for_edit_distance,
     parse_qualified_func,
+    parse_sbfl_qualified_name,
 )
+from data_loaders.defects4c_loader import get_defects4c_accepted_path
+from data_loaders.base_loader import get_loader
 
 try:
     import Levenshtein
@@ -241,8 +244,11 @@ def _print_edit_distance_stats(edit_distances: list, attempted: int, level: str 
     print(f"  Max            : {max_dist}")
 
 
-def _get_accepted_path(bug_id: str) -> str:
+def _get_accepted_path(bug_id: str, dataset: str = "codeflaws") -> str:
     """Return the path to the benchmark accepted file for a given bug_id."""
+    if dataset.lower() in ("defects4c", "defects4c-tcpdump", "tcpdump"):
+        return get_defects4c_accepted_path(bug_id)
+
     cfilename = get_codeflaws_accepted_cfile(bug_id)
     if not cfilename:
         return ""
@@ -251,21 +257,21 @@ def _get_accepted_path(bug_id: str) -> str:
 
 def _calc_func_edit_distance(bug_id: str, bug_res: dict, dataset: str) -> int:
     """
-    Compute Levenshtein distance between the patched function and the
-    corresponding function extracted from the benchmark accepted file.
-    Returns -1 if the distance cannot be computed.
+    Compute Levenshtein distance for function-level APR output.
+
+    Rule:
+    - Always compare patched_function against accepted ground-truth function.
+    - Ground-truth function name is resolved from bug record ground_truth.
+    - No fallback when extraction fails.
     """
     if not HAS_LEVENSHTEIN:
         return -1
 
-    patched_func  = bug_res.get("patched_function")
-    selected_func = bug_res.get("selected_function", "")
-    if not patched_func or not patched_func.strip() or not selected_func:
+    patched_func = bug_res.get("patched_function")
+    if not patched_func or not patched_func.strip():
         return -1
 
-    _, func_name = parse_qualified_func(selected_func)
-
-    accepted_path = _get_accepted_path(bug_id)
+    accepted_path = _get_accepted_path(bug_id, dataset)
     if not accepted_path or not os.path.exists(accepted_path):
         return -1
 
@@ -275,8 +281,11 @@ def _calc_func_edit_distance(bug_id: str, bug_res: dict, dataset: str) -> int:
     except Exception:
         return -1
 
-    accepted_func, _, _ = extract_function_code(accepted_code, func_name)
-    if not accepted_func:
+    gt_func_name = _get_ground_truth_func_name(bug_id, dataset)
+    if not gt_func_name:
+        return -1
+    accepted_func, _, _ = extract_function_code(accepted_code, gt_func_name)
+    if not accepted_func or not accepted_func.strip():
         return -1
 
     patched_norm = normalize_code_for_edit_distance(patched_func)
@@ -286,6 +295,25 @@ def _calc_func_edit_distance(bug_id: str, bug_res: dict, dataset: str) -> int:
         return -1
 
     return Levenshtein.distance(patched_norm, accepted_norm)
+
+
+def _get_ground_truth_func_name(bug_id: str, dataset: str) -> str:
+    try:
+        loader = get_loader(dataset)
+        record = loader.load_one(bug_id) if loader else None
+    except Exception:
+        return ""
+    if not record:
+        return ""
+    gt_list = getattr(record, "ground_truth", None) or []
+    for gt in gt_list:
+        _, name = parse_sbfl_qualified_name(gt)
+        if name:
+            return name
+        _, name = parse_qualified_func(gt)
+        if name:
+            return name
+    return ""
 
 
 def _calc_file_edit_distance(bug_id: str, bug_res: dict, dataset: str) -> int:
@@ -302,7 +330,7 @@ def _calc_file_edit_distance(bug_id: str, bug_res: dict, dataset: str) -> int:
     if not patched_file_content or not patched_file_content.strip():
         return -1
 
-    accepted_path = _get_accepted_path(bug_id)
+    accepted_path = _get_accepted_path(bug_id, dataset)
     if not accepted_path or not os.path.exists(accepted_path):
         return -1
 

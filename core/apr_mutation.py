@@ -13,9 +13,14 @@ from configs.path import EXPERIMENTS_DIR, PATCHES_DIR
 # Nếu quá thời gian này, dừng sớm và lấy best-effort patch đã có.
 # Set về 0 để tắt timeout.
 MUTATION_BUG_TIMEOUT = int(os.getenv("MUTATION_BUG_TIMEOUT", "120"))
+APR_MUTATION_TOP_K = int(os.getenv("APR_MUTATION_TOP_K", "5"))
 from data_loaders.base_loader import get_loader, BugRecord
-from data_loaders.sandbox_adapter import get_sandbox_adapter
-from core.utils import extract_function_code, parse_qualified_func
+from data_loaders.sandbox_adapter import get_sandbox_adapter, defects4c_docker_ready
+from core.utils import (
+    extract_function_code,
+    parse_sbfl_qualified_name,
+    resolve_fl_candidate_source_path,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +99,16 @@ def run_mutation_pipeline(dataset: str = "codeflaws"):
     with open(tarantula_results_file, "r") as f:
         fl_results = json.load(f)
 
+    ds_lc = (dataset or "").lower()
+    if ds_lc in ("defects4c", "defects4c-tcpdump", "tcpdump"):
+        ok_d, info_d = defects4c_docker_ready()
+        if not ok_d:
+            print(f"[Mutation] {info_d}")
+            print("[Mutation] Dừng sớm — cần Docker Defects4C để validate.")
+            return
+        os.environ["DEFECTS4C_CONTAINER"] = info_d
+        print(f"[Mutation] Defects4C: container '{info_d}'.")
+
     # Load toàn bộ bug records một lần duy nhất
     print(f"[Mutation] Đang load bug records từ dataset '{dataset}'...")
     loader  = get_loader(dataset)
@@ -119,7 +134,8 @@ def run_mutation_pipeline(dataset: str = "codeflaws"):
             continue
 
         sorted_funcs = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        print(f"\n[Mutation] Xử lý bug {bug_id}...")
+        top_funcs = sorted_funcs[:APR_MUTATION_TOP_K] if APR_MUTATION_TOP_K > 0 else sorted_funcs
+        print(f"\n[Mutation] Xử lý bug {bug_id}... (top-{APR_MUTATION_TOP_K if APR_MUTATION_TOP_K > 0 else 'all'})")
 
         try:
             adapter         = get_sandbox_adapter(dataset, bug_id)
@@ -132,8 +148,11 @@ def run_mutation_pipeline(dataset: str = "codeflaws"):
             print(f"    [Skip] File nguồn không tồn tại: {bug_source_path}")
             continue
 
-        with open(bug_source_path, "r") as f:
-            source_code = f.read()
+        defects4c_like = ds_lc in ("defects4c", "defects4c-tcpdump", "tcpdump")
+        primary_base = os.path.basename(bug_source_path)
+        _br = bug_map.get(bug_id)
+        raw_meta = _br.raw if _br else None
+        source_cache: dict = {}
 
         # Lấy test context từ BugRecord đã load sẵn
         bug_record   = bug_map.get(bug_id)
@@ -153,7 +172,7 @@ def run_mutation_pipeline(dataset: str = "codeflaws"):
 
         bug_start = time.time()
 
-        for qualified_name, score in sorted_funcs:
+        for qualified_name, score in top_funcs:
             if score == 0.0:
                 continue
 
@@ -165,8 +184,22 @@ def run_mutation_pipeline(dataset: str = "codeflaws"):
                     timed_out = True
                     break
 
-            _, func_name = parse_qualified_func(qualified_name)
-            print(f"  - Đang đột biến hàm '{func_name}' (Score: {score:.4f})")
+            file_hint, func_name = parse_sbfl_qualified_name(qualified_name)
+            if not func_name:
+                continue
+
+            candidate_path = resolve_fl_candidate_source_path(
+                dataset, bug_source_path, file_hint or "", raw_meta
+            )
+            if not os.path.isfile(candidate_path):
+                continue
+            if candidate_path not in source_cache:
+                with open(candidate_path, "r") as f:
+                    source_cache[candidate_path] = f.read()
+            source_code = source_cache[candidate_path]
+            cand_base = os.path.basename(candidate_path)
+
+            print(f"  - Đang đột biến hàm '{func_name}' trong {cand_base} (Score: {score:.4f})")
             func_code, start_idx, end_idx = extract_function_code(source_code, func_name)
             if not func_code:
                 continue
@@ -189,7 +222,10 @@ def run_mutation_pipeline(dataset: str = "codeflaws"):
                     break
 
                 patched_source = source_code[:start_idx] + m_code + source_code[end_idx:]
-                tmp_path = os.path.join(EXPERIMENTS_DIR, f"tmp_{bug_id}.c")
+                safe_cand = cand_base.replace("/", "_").replace(" ", "_")
+                tmp_path = os.path.join(
+                    EXPERIMENTS_DIR, f"tmp_{bug_id.replace('@', '__')}__{safe_cand}"
+                )
 
                 with open(tmp_path, "w") as f:
                     f.write(patched_source)
