@@ -1,0 +1,1675 @@
+{
+    "10-A-bug-5914564-5914663": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\n    int n,p1,p2,p3,t1,t2,a,b,i,lr=0,power=0;\n    scanf(\"%d %d %d %d %d %d\",&n,&p1,&p2,&p3,&t1,&t2);\n    scanf(\"%d %d\",&a,&b);\n    power+=(b-a)*p1;\n    lr=b;\n    for(i=1;i <= n;i++)\n    {\n        scanf(\"%d %d\",&a,&b);\n        power+=(b-a)*p1;\n        if(lr+t1<=a)\n        {\n            power+=(t1*p1);\n            if(lr+t1+t2<=a)\n                power+=(t2*p2)+(a-lr-t1-t2)*p3;\n        }\n        else\n            power+=(a-lr)*p1;\n        lr=b;\n    }\n    printf(\"%d\",power);\n\n    return 0;\n}",
+        "patched_file": "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\nint main(int argc, char *argv[])\n{\n    int n,p1,p2,p3,t1,t2,a,b,i,lr=0,power=0;\n    scanf(\"%d %d %d %d %d %d\",&n,&p1,&p2,&p3,&t1,&t2);\n    scanf(\"%d %d\",&a,&b);\n    power+=(b-a)*p1;\n    lr=b;\n    for(i=1;i <= n;i++)\n    {\n        scanf(\"%d %d\",&a,&b);\n        power+=(b-a)*p1;\n        if(lr+t1<=a)\n        {\n            power+=(t1*p1);\n            if(lr+t1+t2<=a)\n                power+=(t2*p2)+(a-lr-t1-t2)*p3;\n        }\n        else\n            power+=(a-lr)*p1;\n        lr=b;\n    }\n    printf(\"%d\",power);\n\n    return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/10-A-bug-5914564-5914663/10-A-5914564.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/10-A-bug-5914564-5914663_mutation_best_effort.c",
+        "elapsed_seconds": 16.5,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5"
+        ],
+        "post_failed_tests": [
+            "neg1"
+        ]
+    },
+    "146-B-bug-2035917-2035968": {
+        "status": "timeout",
+        "patched_function": "int main(int argc, char *argv[])\n{\n    int a,b,x1,y,z,x;\n    scanf(\"%d%d\",&a,&b);\n    if(b>a)\n        printf(\"%d\",b);\n    else\n    {   x1=a+1;\n        while(1)\n        { x=x1;\n          y=b;\n          while(x != 0)\n          {\n              z=x%10;\n              if(z==4||z==7)\n              {\n                  if(z==y%10)\n                  y=y/10;\n                  else\n                  break;\n              }\n              x=x/10;\n          }\n          if(y==0)\n          {\n              printf(\"%d\",x1);\n              break;\n          }\n          x1++;\n        }}\n        return(0);\n        }",
+        "patched_file": "#include<stdio.h>\nint main(int argc, char *argv[])\n{\n    int a,b,x1,y,z,x;\n    scanf(\"%d%d\",&a,&b);\n    if(b>a)\n        printf(\"%d\",b);\n    else\n    {   x1=a+1;\n        while(1)\n        { x=x1;\n          y=b;\n          while(x != 0)\n          {\n              z=x%10;\n              if(z==4||z==7)\n              {\n                  if(z==y%10)\n                  y=y/10;\n                  else\n                  break;\n              }\n              x=x/10;\n          }\n          if(y==0)\n          {\n              printf(\"%d\",x1);\n              break;\n          }\n          x1++;\n        }}\n        return(0);\n        }\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/146-B-bug-2035917-2035968/146-B-2035917.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '>' \u2192 '!='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/146-B-bug-2035917-2035968_mutation_timeout.c",
+        "elapsed_seconds": 325.9,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7"
+        ],
+        "post_failed_tests": [
+            "neg1"
+        ]
+    },
+    "149-B-bug-1170222-1170231": {
+        "status": "skipped",
+        "patched_function": null,
+        "patched_file": null,
+        "selected_function": null,
+        "mutation_strategy": "",
+        "patch_file": null,
+        "elapsed_seconds": 0.0,
+        "init_passed_tests": [
+            "pos1",
+            "pos2"
+        ],
+        "init_failed_tests": [
+            "neg1",
+            "pos3"
+        ],
+        "post_passed_tests": [],
+        "post_failed_tests": []
+    },
+    "158-A-bug-18297232-18297267": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[]){\n  int n,k,i,c=0;;\n  scanf(\"%d %d\",&n,&k);\n  int score[n];\n  for(i=0;i <= n;i++){\n    scanf(\"%d\",&score[i]);\n  }\n  for(i=0;i<n;i++){\n      if(score[i]>=score[k-1]&&score[k-1]>0)c++;\n  }\n  printf(\"%d\",c);\n  return 0;\n}",
+        "patched_file": "#include<stdio.h>\nint main(int argc, char *argv[]){\n  int n,k,i,c=0;;\n  scanf(\"%d %d\",&n,&k);\n  int score[n];\n  for(i=0;i <= n;i++){\n    scanf(\"%d\",&score[i]);\n  }\n  for(i=0;i<n;i++){\n      if(score[i]>=score[k-1]&&score[k-1]>0)c++;\n  }\n  printf(\"%d\",c);\n  return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/158-A-bug-18297232-18297267/158-A-18297232.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/158-A-bug-18297232-18297267_mutation_best_effort.c",
+        "elapsed_seconds": 5.8,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6"
+        ],
+        "post_failed_tests": [
+            "neg1"
+        ]
+    },
+    "190-A-bug-12987931-12987965": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\n\tint a,b,c,d;\n\tscanf(\"%d %d %d\",&a,&b,&c);\n\tif (a==0 && b==0){\n\t\tprintf(\"%d %d\",a,b);\n\t}\n\telse if (a==0){\n\t\tprintf(\"Impossible\");\n\t}\n\telse if(b==0){\n\t\tprintf(\"%d %d\",a,a);\n\t}\n\telse if (b==1){\n\t\tprintf(\"%d %d\",a,a);\n\t}\n\telse if (a==b){\n\t\tc=b;\n\t\td=2*a-1;\n\t\tprintf(\"%d %d\",c,d);\n\t}\n\telse if(a <= b){\n\t\tc=b;\n\t\td=a+b-1;\n\t\tprintf(\"%d %d\",c,d);\n\t}\n\telse if(a>b){\n\t\tc=a-b;\n\t\td=a+b-1;\n\t\tprintf(\"%d %d\",c,d);\n\t}\n\treturn 0;\n}",
+        "patched_file": "#include <stdio.h>\n\nint main(int argc, char *argv[])\n{\n\tint a,b,c,d;\n\tscanf(\"%d %d %d\",&a,&b,&c);\n\tif (a==0 && b==0){\n\t\tprintf(\"%d %d\",a,b);\n\t}\n\telse if (a==0){\n\t\tprintf(\"Impossible\");\n\t}\n\telse if(b==0){\n\t\tprintf(\"%d %d\",a,a);\n\t}\n\telse if (b==1){\n\t\tprintf(\"%d %d\",a,a);\n\t}\n\telse if (a==b){\n\t\tc=b;\n\t\td=2*a-1;\n\t\tprintf(\"%d %d\",c,d);\n\t}\n\telse if(a <= b){\n\t\tc=b;\n\t\td=a+b-1;\n\t\tprintf(\"%d %d\",c,d);\n\t}\n\telse if(a>b){\n\t\tc=a-b;\n\t\td=a+b-1;\n\t\tprintf(\"%d %d\",c,d);\n\t}\n\treturn 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/190-A-bug-12987931-12987965/190-A-12987931.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/190-A-bug-12987931-12987965_mutation_best_effort.c",
+        "elapsed_seconds": 14.1,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7",
+            "pos8"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7",
+            "pos8"
+        ],
+        "post_failed_tests": [
+            "neg1"
+        ]
+    },
+    "190-A-bug-15278915-15278934": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{int m,n,i,j,l;\nscanf(\"%d %d\",&n,&m);\nif(n==0)\nprintf(\"Impossible\");\nelse\n{\nif(m != 0)\ni=n+m-1;\nelse\n    i=n+m;\nl=m-n;\nif(l>0)\nj=n+l;\nelse\nj=n;\n\nprintf(\"%d %d\",j,i);\n\n}\n\nreturn 0;\n\n}",
+        "patched_file": "#include<stdio.h>\nint main(int argc, char *argv[])\n{int m,n,i,j,l;\nscanf(\"%d %d\",&n,&m);\nif(n==0)\nprintf(\"Impossible\");\nelse\n{\nif(m != 0)\ni=n+m-1;\nelse\n    i=n+m;\nl=m-n;\nif(l>0)\nj=n+l;\nelse\nj=n;\n\nprintf(\"%d %d\",j,i);\n\n}\n\nreturn 0;\n\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/190-A-bug-15278915-15278934/190-A-15278915.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '>' \u2192 '!='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/190-A-bug-15278915-15278934_mutation_best_effort.c",
+        "elapsed_seconds": 7.3,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7"
+        ],
+        "post_failed_tests": [
+            "neg1"
+        ]
+    },
+    "192-C-bug-1743547-1743565": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[]) {\n\tint i, j, k, n, ini, fim, length, maximum;\n\t\n\tscanf (\"%d\", &n);\n\tfor (i = 0; i <= n; i++)\n\t\tscanf (\"%s\", dynasty[i]);\n\t\n\tfor (i = 0; i < 30; i++)\n\t\tfor (j = 0; j < 30; j++)\n\t\t\tM[i][j] = 0;\n\t\n\tfor (k = 0; k < n; k++) {\n\t\tini = dynasty[k][0] - 'a';\n\t\tlength = strlen(dynasty[k]);\n\t\tfim = dynasty[k][length-1] - 'a';\n\t\tfor (i = 0; i < 30; i++)\n\t\t\tif (M[i][ini] > 0)\n\t\t\t\tM[i][fim] = max(M[i][ini]+length, M[i][fim]);\n\t\tif (M[ini][fim] == 0)\n\t\t\tM[ini][fim] = length;\n\t}\n\t\n\tmaximum = 0;\n\tfor (i = 0; i < 30; i++)\n\t\tif (maximum < M[i][i])\n\t\t\tmaximum = M[i][i];\n\t\n\tprintf (\"%d\\n\", maximum);\n\n\treturn 0;\n}",
+        "patched_file": "#include <stdio.h>\n#include <string.h>\n#define MAXKINGS 500010\n\nint max (int a, int b);\n\nchar dynasty[MAXKINGS][12];\nint M[30][30];\nint main(int argc, char *argv[]) {\n\tint i, j, k, n, ini, fim, length, maximum;\n\t\n\tscanf (\"%d\", &n);\n\tfor (i = 0; i <= n; i++)\n\t\tscanf (\"%s\", dynasty[i]);\n\t\n\tfor (i = 0; i < 30; i++)\n\t\tfor (j = 0; j < 30; j++)\n\t\t\tM[i][j] = 0;\n\t\n\tfor (k = 0; k < n; k++) {\n\t\tini = dynasty[k][0] - 'a';\n\t\tlength = strlen(dynasty[k]);\n\t\tfim = dynasty[k][length-1] - 'a';\n\t\tfor (i = 0; i < 30; i++)\n\t\t\tif (M[i][ini] > 0)\n\t\t\t\tM[i][fim] = max(M[i][ini]+length, M[i][fim]);\n\t\tif (M[ini][fim] == 0)\n\t\t\tM[ini][fim] = length;\n\t}\n\t\n\tmaximum = 0;\n\tfor (i = 0; i < 30; i++)\n\t\tif (maximum < M[i][i])\n\t\t\tmaximum = M[i][i];\n\t\n\tprintf (\"%d\\n\", maximum);\n\n\treturn 0;\n}\n\nint max (int a, int b) {\n\tif (a > b)\n\t\treturn a;\n\treturn b;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/192-C-bug-1743547-1743565/192-C-1743547.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/192-C-bug-1743547-1743565_mutation_best_effort.c",
+        "elapsed_seconds": 116.4,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos14",
+            "pos25",
+            "pos26",
+            "pos42",
+            "pos48"
+        ],
+        "init_failed_tests": [
+            "neg1",
+            "pos7",
+            "pos8",
+            "pos9",
+            "pos10",
+            "pos11",
+            "pos12",
+            "pos13",
+            "pos15",
+            "pos16",
+            "pos17",
+            "pos18",
+            "pos19",
+            "pos20",
+            "pos21",
+            "pos22",
+            "pos23",
+            "pos24",
+            "pos27",
+            "pos28",
+            "pos29",
+            "pos30",
+            "pos31",
+            "pos32",
+            "pos33",
+            "pos34",
+            "pos35",
+            "pos36",
+            "pos37",
+            "pos38",
+            "pos39",
+            "pos40",
+            "pos41",
+            "pos43",
+            "pos44",
+            "pos45",
+            "pos46",
+            "pos47"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos14",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos48",
+            "pos5",
+            "pos6"
+        ],
+        "post_failed_tests": [
+            "pos10",
+            "pos11",
+            "pos12",
+            "pos13",
+            "pos15",
+            "pos16",
+            "pos17",
+            "pos18",
+            "pos19",
+            "pos20",
+            "pos21",
+            "pos22",
+            "pos23",
+            "pos24",
+            "pos25",
+            "pos26",
+            "pos27",
+            "pos28",
+            "pos29",
+            "pos30",
+            "pos31",
+            "pos32",
+            "pos33",
+            "pos34",
+            "pos35",
+            "pos36",
+            "pos37",
+            "pos38",
+            "pos39",
+            "pos40",
+            "pos41",
+            "pos42",
+            "pos43",
+            "pos44",
+            "pos45",
+            "pos46",
+            "pos47",
+            "pos7",
+            "pos8",
+            "pos9",
+            "neg1"
+        ]
+    },
+    "197-A-bug-4539529-4539541": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\n\tint n,m,r;\n\tscanf(\"%d %d %d\",&n,&m,\n\t\t\t&r\n\t     );\n\tint d=2*r;\n\tint row=n/d;\n\tint col=m/d;\n\tint y=row*col;\n\tif(y%2 <= 0)\n\t\tprintf(\"Second\\n\");\n\telse\n\t\tprintf(\"First\\n\");\n\treturn 0;\n}",
+        "patched_file": "#include<stdio.h>\nint main(int argc, char *argv[])\n{\n\tint n,m,r;\n\tscanf(\"%d %d %d\",&n,&m,\n\t\t\t&r\n\t     );\n\tint d=2*r;\n\tint row=n/d;\n\tint col=m/d;\n\tint y=row*col;\n\tif(y%2 <= 0)\n\t\tprintf(\"Second\\n\");\n\telse\n\t\tprintf(\"First\\n\");\n\treturn 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/197-A-bug-4539529-4539541/197-A-4539529.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '==' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/197-A-bug-4539529-4539541_mutation_best_effort.c",
+        "elapsed_seconds": 1.7,
+        "init_passed_tests": [
+            "pos1",
+            "pos2"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2"
+        ],
+        "post_failed_tests": [
+            "neg1"
+        ]
+    },
+    "204-A-bug-2022696-2022698": {
+        "status": "success",
+        "patched_function": "int main(int argc, char *argv[])\n{long long int a,b,k=0,q,q1;\nscanf(\"%lld %lld\",&a,&b);\nif(b>1000)\n{q=b/1000;\n    if(a != 1000)\n    k=q*100+8-x1(1,a-1)+x1(q*1000,b);\n   else\n   {\n       q1=a/1000;\n       k=q*100+8-q1*100-8-x1(q1*1000,a)+x1(q*1000,b);  }\n\n\n}\nif(b<=1000)\n{\n    k=x1(a,b);\n}\n\n\n\nprintf(\"%lld\\n\",k);\nreturn 0;\n}",
+        "patched_file": "#include<stdio.h>\nlong long int x1(long long int ,long long int );\nint main(int argc, char *argv[])\n{long long int a,b,k=0,q,q1;\nscanf(\"%lld %lld\",&a,&b);\nif(b>1000)\n{q=b/1000;\n    if(a != 1000)\n    k=q*100+8-x1(1,a-1)+x1(q*1000,b);\n   else\n   {\n       q1=a/1000;\n       k=q*100+8-q1*100-8-x1(q1*1000,a)+x1(q*1000,b);  }\n\n\n}\nif(b<=1000)\n{\n    k=x1(a,b);\n}\n\n\n\nprintf(\"%lld\\n\",k);\nreturn 0;\n}\nlong long int x1(long long int a1,long long int b1)\n{long long int i,l,j,k1=0,t,y=0,m=1,p=0,u=-1,x;\n    j=a1;\nwhile(j/10!=0)\n{j=j/10;y++;}\n\nfor(i=a1;i<=b1;i++)\n{if(y>u)\n    {m=1;\n    for(l=1;l<=y+1;l++)\n    m=m*10;}\n    u=y;\nif((i-(i%10))==0)\n{k1++;}\nelse\n{\nt=i%10;\n\nif(i<m)\n{x=m/10;\n    p=i/x;\nif(t==p)\nk1++;\n}\nelse\ny++;}}\nreturn(k1);\n\n\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/204-A-bug-2022696-2022698/204-A-2022696.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '!='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/204-A-bug-2022696-2022698_mutation_patch.c",
+        "elapsed_seconds": 2.0,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7",
+            "pos8",
+            "pos9"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7",
+            "pos8",
+            "pos9",
+            "neg1"
+        ],
+        "post_failed_tests": []
+    },
+    "236-A-bug-18003976-18004085": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\n    char a[100];\n    printf(\"enter the name\");\n    scanf(\"%s\",a);\n    int b=(strlen(a)-1);int i,j,c=0;\n    for(i=0;i<=b;i++)\n    {\n        int k=0;\n\n        for(j=0;j <= i;j++)\n        {\n            if(a[i]==a[j])\n                k=1;\n        }\n        if(k==0)\n            c++;\n\n    }\n\n    if(c%2==0)\n        printf(\"CHAT WITH HER!\");\n    else\n        printf(\"IGNORE HIM!\");\n        return 0;\n}",
+        "patched_file": "#include<stdio.h>\n#include<string.h>\nint main(int argc, char *argv[])\n{\n    char a[100];\n    printf(\"enter the name\");\n    scanf(\"%s\",a);\n    int b=(strlen(a)-1);int i,j,c=0;\n    for(i=0;i<=b;i++)\n    {\n        int k=0;\n\n        for(j=0;j <= i;j++)\n        {\n            if(a[i]==a[j])\n                k=1;\n        }\n        if(k==0)\n            c++;\n\n    }\n\n    if(c%2==0)\n        printf(\"CHAT WITH HER!\");\n    else\n        printf(\"IGNORE HIM!\");\n        return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/236-A-bug-18003976-18004085/236-A-18003976.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/236-A-bug-18003976-18004085_mutation_best_effort.c",
+        "elapsed_seconds": 6.1,
+        "init_passed_tests": [],
+        "init_failed_tests": [
+            "neg1",
+            "pos1",
+            "pos2",
+            "pos3"
+        ],
+        "post_passed_tests": [],
+        "post_failed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "neg1"
+        ]
+    },
+    "270-B-bug-3912548-3912572": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\n    int n,a[100000],i,sum=0;\n    scanf(\"%d\",&n);\n    for(i=0;i <= n;i++)\n        scanf(\"%d\",&a[i]);\n    for(i=0;i<n-1;i++)\n    {\n        if(a[i]>a[i+1])\n            sum++;\n    }\n    printf(\"%d\",sum);\n    return(0);\n}",
+        "patched_file": "#include<stdio.h>\nint main(int argc, char *argv[])\n{\n    int n,a[100000],i,sum=0;\n    scanf(\"%d\",&n);\n    for(i=0;i <= n;i++)\n        scanf(\"%d\",&a[i]);\n    for(i=0;i<n-1;i++)\n    {\n        if(a[i]>a[i+1])\n            sum++;\n    }\n    printf(\"%d\",sum);\n    return(0);\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/270-B-bug-3912548-3912572/270-B-3912548.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/270-B-bug-3912548-3912572_mutation_best_effort.c",
+        "elapsed_seconds": 5.5,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3"
+        ],
+        "post_failed_tests": [
+            "neg1"
+        ]
+    },
+    "276-B-bug-16707425-16707470": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\n    int i, count = 0;\n    scanf(\"%s\", s);\n\n    for(i = 0; i != strlen(s); i++) c[s[i]-97]++;\n\n    for(i = 0; i < 26; i++) if(c[i] % 2 == 1) count++;\n\n    if(count <= 1) printf(\"First\\n\");\n    else printf(\"Second\\n\");\n\n    return 0;\n}",
+        "patched_file": "#include<stdio.h>\n#include<string.h>\n\nchar s[1001];\nint c[27];\n\nint main(int argc, char *argv[])\n{\n    int i, count = 0;\n    scanf(\"%s\", s);\n\n    for(i = 0; i != strlen(s); i++) c[s[i]-97]++;\n\n    for(i = 0; i < 26; i++) if(c[i] % 2 == 1) count++;\n\n    if(count <= 1) printf(\"First\\n\");\n    else printf(\"Second\\n\");\n\n    return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/276-B-bug-16707425-16707470/276-B-16707425.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '!='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/276-B-bug-16707425-16707470_mutation_best_effort.c",
+        "elapsed_seconds": 5.7,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4"
+        ],
+        "post_failed_tests": [
+            "neg1"
+        ]
+    },
+    "288-A-bug-12735587-12735603": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\n    char previous = 10;\n    char current;\n    int n, k;\n\n    char ultimo_passou = 10;\n    char ultimo_deve_passar;\n\n    scanf(\"%d %d\", &n, &k);\n\n    if(k > n || k == 1){\n        printf(\"-1\\n\");\n        return 0;\n    }\n\n    ultimo_deve_passar = 'a' + (k-1);\n\n    //printf(\">%c<\", ultimo_deve_passar);\n\n    int i;\n    for(i = 0; i != n; i++)\n    {\n        //printf(\">%c\\n\", ultimo_passou + (n-i));\n        if(ultimo_passou + (n-i) == ultimo_deve_passar)\n        {\n            //printf(\"k\\n\");\n            current = ultimo_passou+1;\n            \n        }\n        else if(previous != 'a')\n            current = 'a';\n        else\n            current = 'b';\n        \n        if(current > ultimo_passou)\n            ultimo_passou = current;\n//        printf(\"|%c|\", ultimo_passou);\n        \n        printf(\"%c\", current);\n        previous = current; \n    }\n    printf(\"\\n\");\n\n    return 0;\n}",
+        "patched_file": "#include <stdio.h>\n\nint main(int argc, char *argv[])\n{\n    char previous = 10;\n    char current;\n    int n, k;\n\n    char ultimo_passou = 10;\n    char ultimo_deve_passar;\n\n    scanf(\"%d %d\", &n, &k);\n\n    if(k > n || k == 1){\n        printf(\"-1\\n\");\n        return 0;\n    }\n\n    ultimo_deve_passar = 'a' + (k-1);\n\n    //printf(\">%c<\", ultimo_deve_passar);\n\n    int i;\n    for(i = 0; i != n; i++)\n    {\n        //printf(\">%c\\n\", ultimo_passou + (n-i));\n        if(ultimo_passou + (n-i) == ultimo_deve_passar)\n        {\n            //printf(\"k\\n\");\n            current = ultimo_passou+1;\n            \n        }\n        else if(previous != 'a')\n            current = 'a';\n        else\n            current = 'b';\n        \n        if(current > ultimo_passou)\n            ultimo_passou = current;\n//        printf(\"|%c|\", ultimo_passou);\n        \n        printf(\"%c\", current);\n        previous = current; \n    }\n    printf(\"\\n\");\n\n    return 0;\n}",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/288-A-bug-12735587-12735603/288-A-12735587.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '!='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/288-A-bug-12735587-12735603_mutation_best_effort.c",
+        "elapsed_seconds": 17.0,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7",
+            "pos8",
+            "pos9",
+            "pos11",
+            "pos16",
+            "pos24",
+            "pos25"
+        ],
+        "init_failed_tests": [
+            "neg1",
+            "pos10",
+            "pos12",
+            "pos13",
+            "pos14",
+            "pos15",
+            "pos17",
+            "pos18",
+            "pos19",
+            "pos20",
+            "pos21",
+            "pos22",
+            "pos23"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos11",
+            "pos16",
+            "pos2",
+            "pos24",
+            "pos25",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7",
+            "pos8",
+            "pos9"
+        ],
+        "post_failed_tests": [
+            "pos10",
+            "pos12",
+            "pos13",
+            "pos14",
+            "pos15",
+            "pos17",
+            "pos18",
+            "pos19",
+            "pos20",
+            "pos21",
+            "pos22",
+            "pos23",
+            "neg1"
+        ]
+    },
+    "302-A-bug-9364836-9364867": {
+        "status": "success",
+        "patched_function": "int main(int argc, char *argv[]){\n    int n,m,i,s=0,t=0,a,b,result;\n    int *x;\n    scanf(\"%d%d\",&n,&m);\n    x=malloc(sizeof(int)*n);\n    for(i=0;i<n;i++){\n        scanf(\"%d\",&x[i]);\n        if(x[i]==1){\n            s++;\n        }\n        else{\n            t++;\n        }\n    }\n    for(i=0;i<m;i++){\n        scanf(\"%d%d\",&a,&b);\n        if((a-b)%2 && (b-a<=s||b-a == t)){\n            result=1;\n        }\n        else{\n            result=0;\n        }\n        printf(\"%d\\n\",result);\n    }\n   return 0;\n}",
+        "patched_file": "#include <stdio.h>\n#include <stdlib.h>\n#include <math.h>\nint main(int argc, char *argv[]){\n    int n,m,i,s=0,t=0,a,b,result;\n    int *x;\n    scanf(\"%d%d\",&n,&m);\n    x=malloc(sizeof(int)*n);\n    for(i=0;i<n;i++){\n        scanf(\"%d\",&x[i]);\n        if(x[i]==1){\n            s++;\n        }\n        else{\n            t++;\n        }\n    }\n    for(i=0;i<m;i++){\n        scanf(\"%d%d\",&a,&b);\n        if((a-b)%2 && (b-a<=s||b-a == t)){\n            result=1;\n        }\n        else{\n            result=0;\n        }\n        printf(\"%d\\n\",result);\n    }\n   return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/302-A-bug-9364836-9364867/302-A-9364836.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<=' \u2192 '=='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/302-A-bug-9364836-9364867_mutation_patch.c",
+        "elapsed_seconds": 5.3,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "neg1"
+        ],
+        "post_failed_tests": []
+    },
+    "312-C-bug-3777692-3777976": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\n    int n, k;\n    scanf(\"%d %d\", &n, &k);\n    int i = 0, j;\n    if (n*n <= k)\n        printf(\"no solution\\n\");\n\n    else\n    {\n        for(j = 0; j < n; j++)\n        {\n            printf(\"%d %d\\n\", i, j);\n        }\n\n    }\n    return 0;\n}",
+        "patched_file": "#include<stdio.h>\n#include<stdlib.h>\n#include<string.h>\n#include<math.h>\nint main(int argc, char *argv[])\n{\n    int n, k;\n    scanf(\"%d %d\", &n, &k);\n    int i = 0, j;\n    if (n*n <= k)\n        printf(\"no solution\\n\");\n\n    else\n    {\n        for(j = 0; j < n; j++)\n        {\n            printf(\"%d %d\\n\", i, j);\n        }\n\n    }\n    return 0;\n}\n\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/312-C-bug-3777692-3777976/312-C-3777692.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/312-C-bug-3777692-3777976_mutation_best_effort.c",
+        "elapsed_seconds": 3.6,
+        "init_passed_tests": [
+            "pos2",
+            "pos3",
+            "pos4"
+        ],
+        "init_failed_tests": [
+            "neg1",
+            "pos1"
+        ],
+        "post_passed_tests": [
+            "pos2",
+            "pos3",
+            "pos4"
+        ],
+        "post_failed_tests": [
+            "pos1",
+            "neg1"
+        ]
+    },
+    "316-A1-bug-3992417-3992575": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\nchar s[1000001];\nlong long int a[10]={0},q=0,ans,num=10,i;\nchar c;\ns[0]=getchar();\n\nwhile((c=getchar())!='\\n')\n{\nif(c>='A' && c<='J')a[c-'A']=1;\nelse if(c=='?')q++;\n}\n\nif(s[0]>='1' && s[0]<='9'){ans=1;}\nelse if(s[0]>='A' && s[0]<='Z'){ans=9;num=9;a[s[0]-'A']=0;}\nelse ans=9;\n\nif(q>0)ans=ans*q*10;\n\nfor(i=0;i <= 10;i++)\n{if(a[i]==1)ans*=num--;}\n\nprintf(\"%lld\",ans);\nreturn 0;\n}",
+        "patched_file": "#include <stdio.h>\nint main(int argc, char *argv[])\n{\nchar s[1000001];\nlong long int a[10]={0},q=0,ans,num=10,i;\nchar c;\ns[0]=getchar();\n\nwhile((c=getchar())!='\\n')\n{\nif(c>='A' && c<='J')a[c-'A']=1;\nelse if(c=='?')q++;\n}\n\nif(s[0]>='1' && s[0]<='9'){ans=1;}\nelse if(s[0]>='A' && s[0]<='Z'){ans=9;num=9;a[s[0]-'A']=0;}\nelse ans=9;\n\nif(q>0)ans=ans*q*10;\n\nfor(i=0;i <= 10;i++)\n{if(a[i]==1)ans*=num--;}\n\nprintf(\"%lld\",ans);\nreturn 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/316-A1-bug-3992417-3992575/316-A1-3992417.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/316-A1-bug-3992417-3992575_mutation_best_effort.c",
+        "elapsed_seconds": 3.5,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6"
+        ],
+        "post_failed_tests": [
+            "neg1"
+        ]
+    },
+    "336-A-bug-6855346-6855367": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\n\tlong int x,y,x1,x2,y1,y2,i,j;\n\tscanf(\"%ld%ld\",&x,&y);\n\tif(x>0&&y>0)\n\t{\n\t\tprintf(\"%ld %ld %ld %ld\\n\",0,x+y,x+y,0);\n\t}\n\telse if(x <= 0&&y<0)\n\t{\n\t\tprintf(\"%ld %ld %ld %ld\\n\",x+y,0,0,x+y);\n\t}\n\telse if(x>0&&y<0)\n\t{\n\t\tprintf(\"%ld %ld %ld %ld\\n\",0,x-y,y-x,0);\n\t}\n\telse\n\t{\n\t\tprintf(\"%ld %ld %ld %ld\\n\",x-y,0,0,y-x);\n\t}\n\treturn 0;\n}",
+        "patched_file": "#include<stdio.h>\nint main(int argc, char *argv[])\n{\n\tlong int x,y,x1,x2,y1,y2,i,j;\n\tscanf(\"%ld%ld\",&x,&y);\n\tif(x>0&&y>0)\n\t{\n\t\tprintf(\"%ld %ld %ld %ld\\n\",0,x+y,x+y,0);\n\t}\n\telse if(x <= 0&&y<0)\n\t{\n\t\tprintf(\"%ld %ld %ld %ld\\n\",x+y,0,0,x+y);\n\t}\n\telse if(x>0&&y<0)\n\t{\n\t\tprintf(\"%ld %ld %ld %ld\\n\",0,x-y,y-x,0);\n\t}\n\telse\n\t{\n\t\tprintf(\"%ld %ld %ld %ld\\n\",x-y,0,0,y-x);\n\t}\n\treturn 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/336-A-bug-6855346-6855367/336-A-6855346.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/336-A-bug-6855346-6855367_mutation_best_effort.c",
+        "elapsed_seconds": 14.4,
+        "init_passed_tests": [
+            "pos1",
+            "pos2"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2"
+        ],
+        "post_failed_tests": [
+            "neg1"
+        ]
+    },
+    "337-A-bug-17720226-17720281": {
+        "status": "success",
+        "patched_function": "int main(int argc, char *argv[]) {\n    int n, m;\n    int values[NMAX];\n    int i;\n\n    scanf(\"%d %d\", &n, &m);\n\n    for(i = 0;i < m;i++) {\n        scanf(\"%d\", &values[i]);\n    }\n\n    qsort(values, m, sizeof(int), cmp);\n\n    int min_diff = INT_MAX;\n    for(i = 0;i <= m - n;i++)\n        if(values[i + (n - 1)] - values[i] < min_diff)\n            min_diff = values[i + (n - 1)] - values[i];\n    printf(\"%d\", min_diff);\n    return 0;\n}",
+        "patched_file": "#include <stdio.h>\n#include <stdlib.h>\n#include <limits.h>\n\n#define NMAX 51\n\nint cmp(const void *a, const void *b) {\n    return ((*(int *)a) - (*(int *)b));\n}\n\nint main(int argc, char *argv[]) {\n    int n, m;\n    int values[NMAX];\n    int i;\n\n    scanf(\"%d %d\", &n, &m);\n\n    for(i = 0;i < m;i++) {\n        scanf(\"%d\", &values[i]);\n    }\n\n    qsort(values, m, sizeof(int), cmp);\n\n    int min_diff = INT_MAX;\n    for(i = 0;i <= m - n;i++)\n        if(values[i + (n - 1)] - values[i] < min_diff)\n            min_diff = values[i + (n - 1)] - values[i];\n    printf(\"%d\", min_diff);\n    return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/337-A-bug-17720226-17720281/337-A-17720226.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/337-A-bug-17720226-17720281_mutation_patch.c",
+        "elapsed_seconds": 2.1,
+        "init_passed_tests": [
+            "pos1"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "neg1"
+        ],
+        "post_failed_tests": []
+    },
+    "344-B-bug-14428743-14428779": {
+        "status": "success",
+        "patched_function": "int main(int argc, char *argv[])\n{\n    int a, b, c, i, j, k=0, aray[3], mx, mn, md;\n    scanf(\"%d %d %d\", &a, &b, &c);\n    if(a != b && b==c){\n        printf(\"Impossible\");\n        return 0;\n    }\n    else if(a+b==c){\n        printf(\"%d %d %d\", 0, b, a);\n    }\n    else if(b+c==a){\n        printf(\"%d %d %d\", b, 0, c);\n    }\n    else if(c+a==b){\n        printf(\"%d %d %d\", a, c, 0);\n    }\n    else{\n        aray[0]=a;\n        aray[1]=b;\n        aray[2]=c;\n        for(i=1;i<3;i++){\n            j=i;\n            while(j>0 && aray[j]<aray[j-1]){\n                aray[j]^=aray[j-1];\n                aray[j-1]^=aray[j];\n                aray[j]^=aray[j-1];\n                j--;\n            }\n        }\n        mx=aray[2];\n        mn=aray[0];\n        md=aray[1];\n        if(mn+md<mx){\n            printf(\"Impossible\");\n            return 0;\n        }\n        else{\n            if(a+b>c){\n                while(a+b!=c){\n                    k++;\n                    a--;\n                    b--;\n                    if(a+b<c){\n                        break;\n                    }\n                }\n                if(a+b==c){\n                    printf(\"%d %d %d\", k, b, a);\n                }\n                else{\n                    printf(\"Impossible\");\n                }\n            }\n            else if(b+c>a){\n                while(c+b!=a){\n                    k++;\n                    c--;\n                    b--;\n                    if(c+b<a){\n                        break;\n                    }\n                }\n                if(c+b==a){\n                    printf(\"%d %d %d\",b, k, c);\n                }\n                else{\n                    printf(\"Impossible\");\n                }\n            }\n            else if(c+a>b){\n                while(a+c!=b){\n                    k++;\n                    a--;\n                    c--;\n                    if(a+c<b){\n                        break;\n                    }\n                }\n                if(a+c==b){\n                    printf(\"%d %d %d\", a, c, k);\n                }\n                else{\n                    printf(\"Impossible\");\n                }\n            }\n        }\n\n\n    }\n\n    return 0;\n}",
+        "patched_file": "#include<stdio.h>\n#include<stdlib.h>\n\nint main(int argc, char *argv[])\n{\n    int a, b, c, i, j, k=0, aray[3], mx, mn, md;\n    scanf(\"%d %d %d\", &a, &b, &c);\n    if(a != b && b==c){\n        printf(\"Impossible\");\n        return 0;\n    }\n    else if(a+b==c){\n        printf(\"%d %d %d\", 0, b, a);\n    }\n    else if(b+c==a){\n        printf(\"%d %d %d\", b, 0, c);\n    }\n    else if(c+a==b){\n        printf(\"%d %d %d\", a, c, 0);\n    }\n    else{\n        aray[0]=a;\n        aray[1]=b;\n        aray[2]=c;\n        for(i=1;i<3;i++){\n            j=i;\n            while(j>0 && aray[j]<aray[j-1]){\n                aray[j]^=aray[j-1];\n                aray[j-1]^=aray[j];\n                aray[j]^=aray[j-1];\n                j--;\n            }\n        }\n        mx=aray[2];\n        mn=aray[0];\n        md=aray[1];\n        if(mn+md<mx){\n            printf(\"Impossible\");\n            return 0;\n        }\n        else{\n            if(a+b>c){\n                while(a+b!=c){\n                    k++;\n                    a--;\n                    b--;\n                    if(a+b<c){\n                        break;\n                    }\n                }\n                if(a+b==c){\n                    printf(\"%d %d %d\", k, b, a);\n                }\n                else{\n                    printf(\"Impossible\");\n                }\n            }\n            else if(b+c>a){\n                while(c+b!=a){\n                    k++;\n                    c--;\n                    b--;\n                    if(c+b<a){\n                        break;\n                    }\n                }\n                if(c+b==a){\n                    printf(\"%d %d %d\",b, k, c);\n                }\n                else{\n                    printf(\"Impossible\");\n                }\n            }\n            else if(c+a>b){\n                while(a+c!=b){\n                    k++;\n                    a--;\n                    c--;\n                    if(a+c<b){\n                        break;\n                    }\n                }\n                if(a+c==b){\n                    printf(\"%d %d %d\", a, c, k);\n                }\n                else{\n                    printf(\"Impossible\");\n                }\n            }\n        }\n\n\n    }\n\n    return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/344-B-bug-14428743-14428779/344-B-14428743.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '==' \u2192 '!='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/344-B-bug-14428743-14428779_mutation_patch.c",
+        "elapsed_seconds": 16.8,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "neg1"
+        ],
+        "post_failed_tests": []
+    },
+    "365-B-bug-11573175-11573200": {
+        "status": "success",
+        "patched_function": "int main(int argc, char *argv[])\n{\n    int N,i;\n    scanf(\"%d\",&N);\n\n    if(N==1 || N==2){\n        printf(\"%d\",N);\n        return 0;\n    }\n\n    for(i=0;i<N;i++)\n        scanf(\"%d\",&array[i]);\n\n    for(i=2;i <= N;i++){\n        checker(array,i);\n    }\n\n    printf(\"%d\",max);\n\n    return 0;\n}",
+        "patched_file": "#include <stdio.h>\n\nint array[100005];\nint cnt=2, max=2;\n\nvoid checker(int array[],int i)\n{\n    if(array[i]==array[i-1]+array[i-2]){\n        cnt++;\n    }\n    else{\n    if(cnt>max)\n        max=cnt;\n        cnt=2;\n    }\n    return;\n}\n\nint main(int argc, char *argv[])\n{\n    int N,i;\n    scanf(\"%d\",&N);\n\n    if(N==1 || N==2){\n        printf(\"%d\",N);\n        return 0;\n    }\n\n    for(i=0;i<N;i++)\n        scanf(\"%d\",&array[i]);\n\n    for(i=2;i <= N;i++){\n        checker(array,i);\n    }\n\n    printf(\"%d\",max);\n\n    return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/365-B-bug-11573175-11573200/365-B-11573175.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/365-B-bug-11573175-11573200_mutation_patch.c",
+        "elapsed_seconds": 2.2,
+        "init_passed_tests": [
+            "pos2"
+        ],
+        "init_failed_tests": [
+            "neg1",
+            "pos1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "neg1"
+        ],
+        "post_failed_tests": []
+    },
+    "371-C-bug-5389891-5390013": {
+        "status": "skipped",
+        "patched_function": null,
+        "patched_file": null,
+        "selected_function": null,
+        "mutation_strategy": "",
+        "patch_file": null,
+        "elapsed_seconds": 0.0,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7",
+            "pos8",
+            "pos9",
+            "pos10",
+            "pos11",
+            "pos12",
+            "pos13",
+            "pos14",
+            "pos15",
+            "pos16",
+            "pos17",
+            "pos18",
+            "pos19",
+            "pos20",
+            "pos21"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [],
+        "post_failed_tests": []
+    },
+    "4-B-bug-11482920-11482956": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\n\tint i,ma=0,mi=0,de,p;\n\tscanf(\"%d %d\",&d,&sum);\n\tfor(i=0;i <= d;i++)\n\t{\n\t\tscanf(\"%d %d\",&min[i],&max[i]);\n\t\tma+=max[i];\n\t\tmi+=min[i];\n\t}\n\tif(sum>=mi && ma>=sum)\n\t{\n\t\tprintf(\"YES\\n\");\n\t\tde=sum-mi;\n\t\tp=0;\n\t\twhile(de>0)\n\t\t{\n\t\t\tif(de>=max[p])\n\t\t\t{\n\t\t\t\tde+=min[p];\n\t\t\t\tmin[p]=max[p];\n\t\t\t\tde-=max[p];\n\t\t\t}\n\t\t\telse\n\t\t\t{\n\t\t\t\tmin[p]+=de;\n\t\t\t\tde=0;\n\t\t\t}\n\t\t\tp++;\n\t\t//\tprintf(\"%d\\n\",de);\n\t\t}\n\t\tfor(i=0;i<d;i++)\n\t\t\tprintf(\"%d \",min[i]);\n\t\tprintf(\"\\n\");\n\t}\n\telse\n\t\tprintf(\"NO\\n\");\n\treturn 0;\n}",
+        "patched_file": "#include<stdio.h>\nint d,sum,max[30],min[30];\nint main(int argc, char *argv[])\n{\n\tint i,ma=0,mi=0,de,p;\n\tscanf(\"%d %d\",&d,&sum);\n\tfor(i=0;i <= d;i++)\n\t{\n\t\tscanf(\"%d %d\",&min[i],&max[i]);\n\t\tma+=max[i];\n\t\tmi+=min[i];\n\t}\n\tif(sum>=mi && ma>=sum)\n\t{\n\t\tprintf(\"YES\\n\");\n\t\tde=sum-mi;\n\t\tp=0;\n\t\twhile(de>0)\n\t\t{\n\t\t\tif(de>=max[p])\n\t\t\t{\n\t\t\t\tde+=min[p];\n\t\t\t\tmin[p]=max[p];\n\t\t\t\tde-=max[p];\n\t\t\t}\n\t\t\telse\n\t\t\t{\n\t\t\t\tmin[p]+=de;\n\t\t\t\tde=0;\n\t\t\t}\n\t\t\tp++;\n\t\t//\tprintf(\"%d\\n\",de);\n\t\t}\n\t\tfor(i=0;i<d;i++)\n\t\t\tprintf(\"%d \",min[i]);\n\t\tprintf(\"\\n\");\n\t}\n\telse\n\t\tprintf(\"NO\\n\");\n\treturn 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/4-B-bug-11482920-11482956/4-B-11482920.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/4-B-bug-11482920-11482956_mutation_best_effort.c",
+        "elapsed_seconds": 8.8,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6"
+        ],
+        "post_failed_tests": [
+            "neg1"
+        ]
+    },
+    "401-A-bug-16437058-16437078": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\n\tint a,b;\n\tint i;\n\tint sum;\n\tint n;\n\tint sum1;\n\twhile(scanf(\"%d %d\",&a,&b)!=EOF)\n\t{\n\t\tsum = 0;\n\t\tsum1 = 1;\n\t\tfor(i=1;i<=a;i++)\n\t\t{\n\t\t\tscanf(\"%d\",&n);\n\t\t\tsum += n;\n\t\t}\t\n\t\tsum = abs(sum);\n\t\tif(sum==0)\n\t\t{\n\t\t\tprintf(\"0\\n\");\n\t\t\tcontinue;\n\t\t}\n\t\tif(sum == b)\n\t\t{\n\t\t\tprintf(\"1\\n\");\n\t\t\tcontinue;\n\t\t}\n\t\twhile(1)\n\t\t{\n\t\t\tif(sum<=0)\n\t\t\t\tbreak;\n\t\t\tsum -= b;\n\t\t\tsum1 ++;\t\n\t\t}\n\t\tprintf(\"%d\\n\",sum1);\n\t}\n\treturn 0;\n}",
+        "patched_file": "#include <stdio.h>\n#include <math.h>\nint main(int argc, char *argv[])\n{\n\tint a,b;\n\tint i;\n\tint sum;\n\tint n;\n\tint sum1;\n\twhile(scanf(\"%d %d\",&a,&b)!=EOF)\n\t{\n\t\tsum = 0;\n\t\tsum1 = 1;\n\t\tfor(i=1;i<=a;i++)\n\t\t{\n\t\t\tscanf(\"%d\",&n);\n\t\t\tsum += n;\n\t\t}\t\n\t\tsum = abs(sum);\n\t\tif(sum==0)\n\t\t{\n\t\t\tprintf(\"0\\n\");\n\t\t\tcontinue;\n\t\t}\n\t\tif(sum == b)\n\t\t{\n\t\t\tprintf(\"1\\n\");\n\t\t\tcontinue;\n\t\t}\n\t\twhile(1)\n\t\t{\n\t\t\tif(sum<=0)\n\t\t\t\tbreak;\n\t\t\tsum -= b;\n\t\t\tsum1 ++;\t\n\t\t}\n\t\tprintf(\"%d\\n\",sum1);\n\t}\n\treturn 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/401-A-bug-16437058-16437078/401-A-16437058.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<=' \u2192 '=='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/401-A-bug-16437058-16437078_mutation_best_effort.c",
+        "elapsed_seconds": 7.7,
+        "init_passed_tests": [
+            "pos1"
+        ],
+        "init_failed_tests": [
+            "neg1",
+            "pos2"
+        ],
+        "post_passed_tests": [
+            "pos1"
+        ],
+        "post_failed_tests": [
+            "pos2",
+            "neg1"
+        ]
+    },
+    "407-B-bug-14668576-14668597": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\n    int n,i,x;\n    scanf(\"%d%d\",&n,&x);\n    a[1]=d[1]=2;\n    for(i=2;i == n;++i)\n    {\n        scanf(\"%d\",&x);\n        a[i]=(2+(d[i-1]-d[x-1]))%MOD;\n        d[i]=(a[i]+d[i-1])%MOD;\n    }\n    printf(\"%lld\",d[n]);\n    return 0;\n}",
+        "patched_file": "#include<stdio.h>\n#define MOD 1000000007\nlong long int a[1001],d[1001];\nint main(int argc, char *argv[])\n{\n    int n,i,x;\n    scanf(\"%d%d\",&n,&x);\n    a[1]=d[1]=2;\n    for(i=2;i == n;++i)\n    {\n        scanf(\"%d\",&x);\n        a[i]=(2+(d[i-1]-d[x-1]))%MOD;\n        d[i]=(a[i]+d[i-1])%MOD;\n    }\n    printf(\"%lld\",d[n]);\n    return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/407-B-bug-14668576-14668597/407-B-14668576.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<=' \u2192 '=='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/407-B-bug-14668576-14668597_mutation_best_effort.c",
+        "elapsed_seconds": 3.7,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7",
+            "pos8",
+            "pos9",
+            "pos11",
+            "pos12"
+        ],
+        "init_failed_tests": [
+            "neg1",
+            "pos10"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos5"
+        ],
+        "post_failed_tests": [
+            "pos10",
+            "pos11",
+            "pos12",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos6",
+            "pos7",
+            "pos8",
+            "pos9",
+            "neg1"
+        ]
+    },
+    "420-A-bug-14755133-14755144": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\n\tint i,j,w,v,f,l,t;\n\tchar ch[100000];\n\tchar str[13]=\"AIMOHSTUVWXY\";\n\tscanf(\"%s\",ch);\n\tw=strlen(ch);\n\tv=strlen(str);\n\tf=0;\n\tfor (i=0;i <= w;i++){\n\t\tt=0;\n\t\tfor (j=0;j<v;j++){\n\t\t\tif (ch[i]==str[j]){\n\t\t\t\tt=1;\n\t\t\t\tbreak;\n\t\t\t}\n\t\t}\n\t\tif (t==1){\n\t\t\tf=f+1;\n\t\t}\n\t}\n\tl=0;\n\tfor (i=0;i<w/2;i++){\n\t\tif (ch[i]!=ch[w-i-1]){\n\t\t\tl=1;\n\t\t\tbreak;\n\t\t}\n\t}\n\tif (f==w && l==0){\n\t\tprintf(\"YES\");\n\t}\n\telse{\n\t\tprintf(\"NO\");\n\t}\n\t//printf(\"%d\",v);\n\treturn 0;\n}",
+        "patched_file": "#include <stdio.h>\n#include <string.h>\nint main(int argc, char *argv[])\n{\n\tint i,j,w,v,f,l,t;\n\tchar ch[100000];\n\tchar str[13]=\"AIMOHSTUVWXY\";\n\tscanf(\"%s\",ch);\n\tw=strlen(ch);\n\tv=strlen(str);\n\tf=0;\n\tfor (i=0;i <= w;i++){\n\t\tt=0;\n\t\tfor (j=0;j<v;j++){\n\t\t\tif (ch[i]==str[j]){\n\t\t\t\tt=1;\n\t\t\t\tbreak;\n\t\t\t}\n\t\t}\n\t\tif (t==1){\n\t\t\tf=f+1;\n\t\t}\n\t}\n\tl=0;\n\tfor (i=0;i<w/2;i++){\n\t\tif (ch[i]!=ch[w-i-1]){\n\t\t\tl=1;\n\t\t\tbreak;\n\t\t}\n\t}\n\tif (f==w && l==0){\n\t\tprintf(\"YES\");\n\t}\n\telse{\n\t\tprintf(\"NO\");\n\t}\n\t//printf(\"%d\",v);\n\treturn 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/420-A-bug-14755133-14755144/420-A-14755133.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/420-A-bug-14755133-14755144_mutation_best_effort.c",
+        "elapsed_seconds": 14.3,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7",
+            "pos10",
+            "pos11",
+            "pos12",
+            "pos16",
+            "pos17",
+            "pos18",
+            "pos19",
+            "pos20",
+            "pos21",
+            "pos22",
+            "pos23",
+            "pos24",
+            "pos25",
+            "pos26",
+            "pos27",
+            "pos28",
+            "pos29",
+            "pos30",
+            "pos31",
+            "pos32",
+            "pos33",
+            "pos34",
+            "pos35",
+            "pos36",
+            "pos37",
+            "pos38",
+            "pos39",
+            "pos40",
+            "pos41",
+            "pos42",
+            "pos43",
+            "pos44",
+            "pos45",
+            "pos46",
+            "pos47",
+            "pos48",
+            "pos49",
+            "pos50",
+            "pos51",
+            "pos52",
+            "pos53"
+        ],
+        "init_failed_tests": [
+            "neg1",
+            "pos8",
+            "pos9",
+            "pos13",
+            "pos14",
+            "pos15"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos10",
+            "pos11",
+            "pos12",
+            "pos16",
+            "pos17",
+            "pos18",
+            "pos19",
+            "pos2",
+            "pos20",
+            "pos21",
+            "pos22",
+            "pos23",
+            "pos24",
+            "pos25",
+            "pos26",
+            "pos27",
+            "pos28",
+            "pos29",
+            "pos3",
+            "pos30",
+            "pos31",
+            "pos32",
+            "pos33",
+            "pos34",
+            "pos35",
+            "pos36",
+            "pos37",
+            "pos38",
+            "pos39",
+            "pos4",
+            "pos40",
+            "pos41",
+            "pos42",
+            "pos43",
+            "pos44",
+            "pos45",
+            "pos46",
+            "pos47",
+            "pos48",
+            "pos49",
+            "pos5",
+            "pos50",
+            "pos51",
+            "pos52",
+            "pos53",
+            "pos6",
+            "pos7"
+        ],
+        "post_failed_tests": [
+            "pos13",
+            "pos14",
+            "pos15",
+            "pos8",
+            "pos9",
+            "neg1"
+        ]
+    },
+    "447-B-bug-10225828-10225902": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\n    int t,flag=0,i,j,k,w1,l,n,m,max=0,ct,z,a[26],sum=0;\n    //gets(s);\n    char s[1001];\n    //gets(a);\n    //gets(z);\n    gets(s);\n    w1=strlen(s);\n    scanf(\"%d\",&k);\n    for(i=0;i != 26;i++)\n    {\n    scanf(\"%d\",&a[i]);\n    if(a[i]>max)\n        max=a[i];\n    }\n    for(i=0;i<w1;i++)\n    {\n    sum+=(i+1)*(a[i]);\n    }\n    sum+=max*(k*(w1+1)+(k*(k-1))/2);\n    printf(\"%d\",sum);\n    return 0;\n}",
+        "patched_file": "#include <stdio.h>\n#include <stdlib.h>\n#include<string.h>\n\nint main(int argc, char *argv[])\n{\n    int t,flag=0,i,j,k,w1,l,n,m,max=0,ct,z,a[26],sum=0;\n    //gets(s);\n    char s[1001];\n    //gets(a);\n    //gets(z);\n    gets(s);\n    w1=strlen(s);\n    scanf(\"%d\",&k);\n    for(i=0;i != 26;i++)\n    {\n    scanf(\"%d\",&a[i]);\n    if(a[i]>max)\n        max=a[i];\n    }\n    for(i=0;i<w1;i++)\n    {\n    sum+=(i+1)*(a[i]);\n    }\n    sum+=max*(k*(w1+1)+(k*(k-1))/2);\n    printf(\"%d\",sum);\n    return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/447-B-bug-10225828-10225902/447-B-10225828.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '!='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/447-B-bug-10225828-10225902_mutation_best_effort.c",
+        "elapsed_seconds": 6.3,
+        "init_passed_tests": [
+            "pos1"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1"
+        ],
+        "post_failed_tests": [
+            "neg1"
+        ]
+    },
+    "448-B-bug-10617841-10617857": {
+        "status": "failed",
+        "patched_function": "void manuString(char s[150],char t[150]){\n     \n    \n     \n     \n     \n     \n      if(strstr(s,t)!=NULL){\n           printf(\"automaton\\n\");\n           return;         \n     }\n     \n      \n     \n     \n      int aux=0,i,j,ultimo=0,anteriorok=0;\n      \n      \n      \n      \n       for(i=0;i <= strlen(t);i++){\n           for(j=ultimo;j<strlen(s);j++){\n            if(t[i]==s[j]){\n                           \n             aux++;\n             ultimo=j+1;              \n            break;\n            }                        \n           } \n      }\n      \n      if(aux==strlen(t)){\n           printf(\"automaton\\n\");\n           return;         \n     }\n      \n      \n      aux=0;ultimo=0;anteriorok=0;\n      \n      for(i=0;i<strlen(t);i++){\n           for(j=0;j<strlen(s);j++){\n            if(t[i]==s[j]){\n                           \n             aux++;\n             if(j<ultimo && anteriorok==0){\n             anteriorok=1;\n             }\n             ultimo=j;              \n            break;\n            }                        \n           } \n      }\n      \n      \n      \n      \n      if(aux==strlen(t) && strlen(t)!=strlen(s) && anteriorok!=0){\n        printf(\"both\\n\");\n        return;                  \n      }\n      if(aux==strlen(t) && strlen(t)==strlen(s)){\n        printf(\"array\\n\");\n        return;                  \n      }\n     \n           printf(\"need tree\\n\");\n          \n}",
+        "patched_file": "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n\n\nvoid manuString(char s[150],char t[150]){\n     \n    \n     \n     \n     \n     \n      if(strstr(s,t)!=NULL){\n           printf(\"automaton\\n\");\n           return;         \n     }\n     \n      \n     \n     \n      int aux=0,i,j,ultimo=0,anteriorok=0;\n      \n      \n      \n      \n       for(i=0;i <= strlen(t);i++){\n           for(j=ultimo;j<strlen(s);j++){\n            if(t[i]==s[j]){\n                           \n             aux++;\n             ultimo=j+1;              \n            break;\n            }                        \n           } \n      }\n      \n      if(aux==strlen(t)){\n           printf(\"automaton\\n\");\n           return;         \n     }\n      \n      \n      aux=0;ultimo=0;anteriorok=0;\n      \n      for(i=0;i<strlen(t);i++){\n           for(j=0;j<strlen(s);j++){\n            if(t[i]==s[j]){\n                           \n             aux++;\n             if(j<ultimo && anteriorok==0){\n             anteriorok=1;\n             }\n             ultimo=j;              \n            break;\n            }                        \n           } \n      }\n      \n      \n      \n      \n      if(aux==strlen(t) && strlen(t)!=strlen(s) && anteriorok!=0){\n        printf(\"both\\n\");\n        return;                  \n      }\n      if(aux==strlen(t) && strlen(t)==strlen(s)){\n        printf(\"array\\n\");\n        return;                  \n      }\n     \n           printf(\"need tree\\n\");\n          \n}\n\n\nint main(int argc, char *argv[])\n{\n\nchar s[150],t[150];\n\ngets(s);\ngets(t);\n\nmanuString(s,t);\n\n    \n  return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/448-B-bug-10617841-10617857/448-B-10617841.c::manuString",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/448-B-bug-10617841-10617857_mutation_best_effort.c",
+        "elapsed_seconds": 16.5,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7",
+            "pos8",
+            "pos9",
+            "pos10",
+            "pos11",
+            "pos12",
+            "pos13",
+            "pos14",
+            "pos15",
+            "pos16",
+            "pos17",
+            "pos18",
+            "pos19",
+            "pos20",
+            "pos21",
+            "pos22",
+            "pos23",
+            "pos24",
+            "pos25",
+            "pos26",
+            "pos27",
+            "pos28"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos10",
+            "pos11",
+            "pos12",
+            "pos13",
+            "pos14",
+            "pos15",
+            "pos16",
+            "pos17",
+            "pos18",
+            "pos19",
+            "pos2",
+            "pos20",
+            "pos21",
+            "pos22",
+            "pos23",
+            "pos24",
+            "pos25",
+            "pos26",
+            "pos27",
+            "pos28",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7",
+            "pos8",
+            "pos9"
+        ],
+        "post_failed_tests": [
+            "neg1"
+        ]
+    },
+    "45-D-bug-191189-191239": {
+        "status": "failed",
+        "patched_function": "long match(long now)\n{\n   long i,key;\n   for (i=l[now];i < r[i];i++)\n   {\n      key=find(i);\n      if (hash[key]!=flag)\n      {\n         hash[key]=flag;\n         if (!f[key]||match(f[key]))\n         {\n            f[key]=now;\n            return 1;\n         }\n      }\n   }\n   return 0;\n}",
+        "patched_file": "#include<math.h>\n#include<time.h>\n#include<stdio.h>\n#include<string.h>\n#include<stdlib.h>\n#define oo 1000000000\n#define pi 3.14159265359\n#define zero(a) (abb(a)<=1e-7)\n#define lowbit(a) ((a)&(-(a)))\n#define min(a,b) ((a)<(b)?(a):(b))\n#define max(a,b) ((a)>(b)?(a):(b))\n#define abb(a) ((a)>0?(a):(-(a)))\n#define cj(x1,y1,x2,y2) ((x1)*(y2)-(x2)*(y2))\n#define dj(x1,y1,x2,y2) ((x1)*(y1)+(y1)*(y2))\n#define dis(x1,y1,x2,y2) sqrt(((x2)-(x1))*((x2)-(x1))+((y2)-(y1))*((y2)-(y1)))\n\nlong f[10001]={0},hash[10001]={0},d[10001]={0},ans[101]={0},l[101]={0},r[101]={0};\nlong flag=0,tot=0;\n\nlong find(long x)\n{\n   long i;\n   for (i=1;i<=tot;i++)\n      if (d[i]==x)\n         return i;\n   d[++tot]=x;\n   return tot;\n}\n\nlong match(long now)\n{\n   long i,key;\n   for (i=l[now];i < r[i];i++)\n   {\n      key=find(i);\n      if (hash[key]!=flag)\n      {\n         hash[key]=flag;\n         if (!f[key]||match(f[key]))\n         {\n            f[key]=now;\n            return 1;\n         }\n      }\n   }\n   return 0;\n}\n\nint main(int argc, char *argv[])\n{\n   long i,n;\n   scanf(\"%ld\",&n);\n   for (i=1;i<=n;i++)\n      scanf(\"%ld%ld\",&l[i],&r[i]);\n   for (i=1;i<=n;i++)\n   {\n      flag++;\n      match(i);\n   }\n   for (i=1;i<=tot;i++)\n      if (f[i])\n         ans[f[i]]=d[i];\n   for (i=1;i<=n;i++)\n      printf(\"%ld\\n\",ans[i]);\n   return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/45-D-bug-191189-191239/45-D-191189.c::match",
+        "mutation_strategy": "\u0110\u1ed5i '<=' \u2192 '<'",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/45-D-bug-191189-191239_mutation_best_effort.c",
+        "elapsed_seconds": 4.6,
+        "init_passed_tests": [
+            "pos1",
+            "pos2"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2"
+        ],
+        "post_failed_tests": [
+            "neg1"
+        ]
+    },
+    "456-A-bug-17586003-17586007": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[]){\n    int n ,c=0;\n\n    int a,b;\n    scanf(\"%d\", &n);\n\n    for(int i=0; i <= n; i++){\n\n        scanf(\"%d %d\", &a,&b);\n        if (b>a){\n            c=1;\n        }\n    }\n    if (c==0){\n        printf(\"Sad Alex\");\n    }else{\n        printf(\"Happy Alex\");\n    }\n\n    return 0;\n}",
+        "patched_file": "#include <stdio.h>\n#include <math.h>\nint main(int argc, char *argv[]){\n    int n ,c=0;\n\n    int a,b;\n    scanf(\"%d\", &n);\n\n    for(int i=0; i <= n; i++){\n\n        scanf(\"%d %d\", &a,&b);\n        if (b>a){\n            c=1;\n        }\n    }\n    if (c==0){\n        printf(\"Sad Alex\");\n    }else{\n        printf(\"Happy Alex\");\n    }\n\n    return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/456-A-bug-17586003-17586007/456-A-17586003.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/456-A-bug-17586003-17586007_mutation_best_effort.c",
+        "elapsed_seconds": 5.0,
+        "init_passed_tests": [
+            "pos1"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1"
+        ],
+        "post_failed_tests": [
+            "neg1"
+        ]
+    },
+    "46-D-bug-208314-208422": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[]){\n  int i,j,k,l,m,n;\n  int now[200001], L, ind, len, s, ok;\n  int p[1000];\n  int mae, ushiro;\n\n  while(scanf(\"%d%d%d%d\",&L,&mae,&ushiro,&n)==4){\n    L += mae + ushiro;\n    rep(i,L) now[i]=0; ind = 0;\n    rep(i,n) p[i]=-1;\n    while(n--){\n      scanf(\"%d%d\",&m,&len); ind++;\n      if(m <= 1){\n        s = len + mae + ushiro;\n        ok = 0;\n        rep(i,L-s+1){\n          rep(j,s) if(now[i+j]) break;\n          if(j==s){ ok=1; break; }\n        }\n        if(!ok){puts(\"-1\"); continue;}\n        printf(\"%d\\n\",i-mae+1);\n        rep(k,len) now[i+k+mae]=ind; p[ind]=i+mae;\n\n/*        rep(k,L) printf(\"%d\",now[k]); puts(\"\");*/\n      } else {\n        if(p[len]<0) continue;\n        k=p[len]; p[len]=-1;\n        while(now[k]==len) now[k]=0, k++;\n      }\n    }\n    break;\n  }\n\n  return 0;\n}",
+        "patched_file": "#include<stdio.h>\n#include<stdlib.h>\n#include<math.h>\n#define REP(i,a,b) for(i=a;i<b;i++)\n#define rep(i,n) REP(i,0,n)\n\nint main(int argc, char *argv[]){\n  int i,j,k,l,m,n;\n  int now[200001], L, ind, len, s, ok;\n  int p[1000];\n  int mae, ushiro;\n\n  while(scanf(\"%d%d%d%d\",&L,&mae,&ushiro,&n)==4){\n    L += mae + ushiro;\n    rep(i,L) now[i]=0; ind = 0;\n    rep(i,n) p[i]=-1;\n    while(n--){\n      scanf(\"%d%d\",&m,&len); ind++;\n      if(m <= 1){\n        s = len + mae + ushiro;\n        ok = 0;\n        rep(i,L-s+1){\n          rep(j,s) if(now[i+j]) break;\n          if(j==s){ ok=1; break; }\n        }\n        if(!ok){puts(\"-1\"); continue;}\n        printf(\"%d\\n\",i-mae+1);\n        rep(k,len) now[i+k+mae]=ind; p[ind]=i+mae;\n\n/*        rep(k,L) printf(\"%d\",now[k]); puts(\"\");*/\n      } else {\n        if(p[len]<0) continue;\n        k=p[len]; p[len]=-1;\n        while(now[k]==len) now[k]=0, k++;\n      }\n    }\n    break;\n  }\n\n  return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/46-D-bug-208314-208422/46-D-208314.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '==' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/46-D-bug-208314-208422_mutation_best_effort.c",
+        "elapsed_seconds": 9.2,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7",
+            "pos8",
+            "pos9",
+            "pos10",
+            "pos11"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos10",
+            "pos11",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7",
+            "pos8",
+            "pos9"
+        ],
+        "post_failed_tests": [
+            "neg1"
+        ]
+    },
+    "476-A-bug-16608008-16608059": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\n    int n,m,x,rem,z,flag=0;\n    scanf(\"%d%d\",&n,&m);\n    x=n/2;\n    rem=n%2;\n    z=x+rem;\n    if(z%m==0) {\n        printf(\"%d\",z);\n    }\n    else {\n        while(1) {\n            z=z+1;\n            if(z%m==0) {\n                flag=1;\n                break;\n            }\n            else if(z >= n&&z%m!=0) {\n                flag=2;\n                break;\n            }\n        }\n        if(flag==1) {\n        printf(\"%d\",z);}\n        else if(flag==2) {\n            printf(\"-1\");\n        }\n    }\nreturn 0;\n}",
+        "patched_file": "#include<stdio.h>\nint main(int argc, char *argv[])\n{\n    int n,m,x,rem,z,flag=0;\n    scanf(\"%d%d\",&n,&m);\n    x=n/2;\n    rem=n%2;\n    z=x+rem;\n    if(z%m==0) {\n        printf(\"%d\",z);\n    }\n    else {\n        while(1) {\n            z=z+1;\n            if(z%m==0) {\n                flag=1;\n                break;\n            }\n            else if(z >= n&&z%m!=0) {\n                flag=2;\n                break;\n            }\n        }\n        if(flag==1) {\n        printf(\"%d\",z);}\n        else if(flag==2) {\n            printf(\"-1\");\n        }\n    }\nreturn 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/476-A-bug-16608008-16608059/476-A-16608008.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '>' \u2192 '>='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/476-A-bug-16608008-16608059_mutation_best_effort.c",
+        "elapsed_seconds": 58.4,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4"
+        ],
+        "post_failed_tests": [
+            "neg1"
+        ]
+    },
+    "479-C-bug-15073953-15074519": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[]){\n    int n;\n    scanf(\"%d\",&n);\n    struct stud arr[n];\n    int i;\n    for(i=0;i <= n;i++){\n        scanf(\"%lld %lld\",&arr[i].f,&arr[i].p);\n    }\n    qsort(arr,n,sizeof(struct stud),comp);\n    long long best = -1;\n    for(i = 0; i < n; i++) {\n        if (best <= arr[i].p) {\n\t\t  best = arr[i].p;\n\t   } \n       else {\n\t \t best = arr[i].f;\n\t   }\n    }\n    printf(\"%lld\",best);\n    return 0;\n}",
+        "patched_file": "#include <math.h>\n#include <stdio.h>\n#include <string.h>\n#include <stdlib.h>\n#include <assert.h>\n#include <limits.h>\n#include <stdbool.h>\n\n\nstruct stud{\n    long long f;\n    long long p;\n};\n\nint comp(const void *a, const void *b){\n\tconst struct stud *da = (const struct stud*)a;\n\tconst struct stud *db = (const struct stud*)b;\n\treturn da->f - db->f;\n}\n\nint main(int argc, char *argv[]){\n    int n;\n    scanf(\"%d\",&n);\n    struct stud arr[n];\n    int i;\n    for(i=0;i <= n;i++){\n        scanf(\"%lld %lld\",&arr[i].f,&arr[i].p);\n    }\n    qsort(arr,n,sizeof(struct stud),comp);\n    long long best = -1;\n    for(i = 0; i < n; i++) {\n        if (best <= arr[i].p) {\n\t\t  best = arr[i].p;\n\t   } \n       else {\n\t \t best = arr[i].f;\n\t   }\n    }\n    printf(\"%lld\",best);\n    return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/479-C-bug-15073953-15074519/479-C-15073953.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/479-C-bug-15073953-15074519_mutation_best_effort.c",
+        "elapsed_seconds": 6.0,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos11"
+        ],
+        "init_failed_tests": [
+            "neg1",
+            "pos5",
+            "pos6",
+            "pos7",
+            "pos8",
+            "pos9",
+            "pos10"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos11",
+            "pos2",
+            "pos3",
+            "pos4"
+        ],
+        "post_failed_tests": [
+            "pos10",
+            "pos5",
+            "pos6",
+            "pos7",
+            "pos8",
+            "pos9",
+            "neg1"
+        ]
+    },
+    "48-A-bug-18336507-18336566": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\n    char b[10],a[3],ans[]={'F','M','S' };int r=0,p=0,s=0,i;\n    for(i=0;i != 3;i++){scanf(\"%s\",b);\n     if(b[0]=='r') r++,a[i]='r';\n      else if(b[0]=='p') p++,a[i]='p';\n      else s++,a[i]='s';\n    }\n    if(r==2&&p==1){ for(i=0;i<3;i++) if(a[i]=='p') break;\n        printf(\"%c\\n\",ans[i]);\n    }else if(p==2&&s==1){for(i=0;i<3;i++) if(a[i]=='s') break;\n        printf(\"%c\\n\",ans[i]);\n    }else if(s==2&&r==1){for(i=0;i<3;i++) if(a[i]=='p') break;\n        printf(\"%c\\n\",ans[i]);\n    }else{printf(\"?\\n\"); }\n    return 0;\n}",
+        "patched_file": "#include<stdio.h>\nint main(int argc, char *argv[])\n{\n    char b[10],a[3],ans[]={'F','M','S' };int r=0,p=0,s=0,i;\n    for(i=0;i != 3;i++){scanf(\"%s\",b);\n     if(b[0]=='r') r++,a[i]='r';\n      else if(b[0]=='p') p++,a[i]='p';\n      else s++,a[i]='s';\n    }\n    if(r==2&&p==1){ for(i=0;i<3;i++) if(a[i]=='p') break;\n        printf(\"%c\\n\",ans[i]);\n    }else if(p==2&&s==1){for(i=0;i<3;i++) if(a[i]=='s') break;\n        printf(\"%c\\n\",ans[i]);\n    }else if(s==2&&r==1){for(i=0;i<3;i++) if(a[i]=='p') break;\n        printf(\"%c\\n\",ans[i]);\n    }else{printf(\"?\\n\"); }\n    return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/48-A-bug-18336507-18336566/48-A-18336507.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '!='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/48-A-bug-18336507-18336566_mutation_best_effort.c",
+        "elapsed_seconds": 16.1,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7",
+            "pos8"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7",
+            "pos8"
+        ],
+        "post_failed_tests": [
+            "neg1"
+        ]
+    },
+    "483-B-bug-9378742-9378770": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[]){\n\tlong long int start,stop,mid;\n\tscanf(\"%lld %lld %lld %lld\",&c1,&c2,&p1,&p2);\n\tstart=c1+c2;\n\tstop=100;\n\tmid=(start+stop)/2;\n\twhile(start != stop){\n\t\tif(possible(mid)){\n\t\t\tstop=mid;\n\t\t}\n\t\telse{\n\t\t\tstart=mid+1;\n\t\t}\n\t\tmid=(start+stop)/2;\n\t}\n\tprintf(\"%lld\\n\",start);\n\treturn 0;\n}",
+        "patched_file": "#include<stdio.h>\nchar possible(long long int);\nlong long int c1,c2,p1,p2;\nint main(int argc, char *argv[]){\n\tlong long int start,stop,mid;\n\tscanf(\"%lld %lld %lld %lld\",&c1,&c2,&p1,&p2);\n\tstart=c1+c2;\n\tstop=100;\n\tmid=(start+stop)/2;\n\twhile(start != stop){\n\t\tif(possible(mid)){\n\t\t\tstop=mid;\n\t\t}\n\t\telse{\n\t\t\tstart=mid+1;\n\t\t}\n\t\tmid=(start+stop)/2;\n\t}\n\tprintf(\"%lld\\n\",start);\n\treturn 0;\n}\n\nchar possible(long long int val){\n\tlong long int d1,d2,cd,g1,g2;\n\td1=val/p1;\n\td2=val/p2;\n\tcd=val/(p1*p2);\n\tg1=0;g2=0;\n\tif(c1<=d2-cd){\n\t\tif(c2<=val-d2){\n\t\t\treturn 1;\n\t\t}\n\t\telse{\n\t\t\treturn 0;\n\t\t}\n\t}\n\telse{\n\t\tif(c1<=val-d1){\n\t\t\tif(c2<=val-d2-(c1-(d2-cd))){\n\t\t\t\treturn 1;\n\t\t\t}\n\t\t\telse{\n\t\t\t\treturn 0;\n\t\t\t}\n\t\t}\n\t\telse{\n\t\t\treturn 0;\n\t\t}\n\t}\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/483-B-bug-9378742-9378770/483-B-9378742.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '!='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/483-B-bug-9378742-9378770_mutation_best_effort.c",
+        "elapsed_seconds": 103.1,
+        "init_passed_tests": [
+            "pos1",
+            "pos2"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2"
+        ],
+        "post_failed_tests": [
+            "neg1"
+        ]
+    },
+    "490-C-bug-11355146-11356082": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\n    int a, b;\n    int left_side[MAX_SIZE];\n    int right_side[MAX_SIZE];\n    \n    scanf(\"%s\", public_key);\n    scanf(\"%d %d\", &a, &b);\n    \n    int key_length = strlen(public_key);\n    int multiple = 1;\n    int tmp_l_num = 0;\n    int tmp_r_num = 0;\n    \n    int i;\n    for(i = 0; i <= key_length; i++)\n    {\n        tmp_r_num = ((public_key[key_length-1-i] - '0') * multiple + tmp_r_num) % b;\n        multiple = (multiple * 10) % b;\n        right_side[key_length-1-i] = tmp_r_num;\n        \n        tmp_l_num = (tmp_l_num * 10 + (public_key[i] - '0')) % a;\n        left_side[i] = tmp_l_num;\n    }\n    \n    int pos = key_length;\n    \n    for(i = 0; i < key_length; i++)\n    {\n        if(left_side[i] == 0 && right_side[i+1] == 0)\n        {\n            while(!(public_key[i+1] - '0')) i++;\n            pos = i;\n            break;\n        }\n    }\n    \n    if(pos < key_length)\n    {\n        printf(\"YES\\n\");\n        \n        for(i = 0; i <= pos; i++)\n            printf(\"%c\", public_key[i]);\n        printf(\"\\n\");\n        \n        for(; i < key_length; i++)\n            printf(\"%c\", public_key[i]);\n        printf(\"\\n\");\n    }\n    else\n    {\n        printf(\"NO\\n\");\n    }\n    \n    return 0;\n}",
+        "patched_file": "#include <stdio.h>\n#include <string.h>\n\n#define MAX_SIZE 1000001\n\nchar public_key[MAX_SIZE];\n\nint main(int argc, char *argv[])\n{\n    int a, b;\n    int left_side[MAX_SIZE];\n    int right_side[MAX_SIZE];\n    \n    scanf(\"%s\", public_key);\n    scanf(\"%d %d\", &a, &b);\n    \n    int key_length = strlen(public_key);\n    int multiple = 1;\n    int tmp_l_num = 0;\n    int tmp_r_num = 0;\n    \n    int i;\n    for(i = 0; i <= key_length; i++)\n    {\n        tmp_r_num = ((public_key[key_length-1-i] - '0') * multiple + tmp_r_num) % b;\n        multiple = (multiple * 10) % b;\n        right_side[key_length-1-i] = tmp_r_num;\n        \n        tmp_l_num = (tmp_l_num * 10 + (public_key[i] - '0')) % a;\n        left_side[i] = tmp_l_num;\n    }\n    \n    int pos = key_length;\n    \n    for(i = 0; i < key_length; i++)\n    {\n        if(left_side[i] == 0 && right_side[i+1] == 0)\n        {\n            while(!(public_key[i+1] - '0')) i++;\n            pos = i;\n            break;\n        }\n    }\n    \n    if(pos < key_length)\n    {\n        printf(\"YES\\n\");\n        \n        for(i = 0; i <= pos; i++)\n            printf(\"%c\", public_key[i]);\n        printf(\"\\n\");\n        \n        for(; i < key_length; i++)\n            printf(\"%c\", public_key[i]);\n        printf(\"\\n\");\n    }\n    else\n    {\n        printf(\"NO\\n\");\n    }\n    \n    return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/490-C-bug-11355146-11356082/490-C-11355146.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/490-C-bug-11355146-11356082_mutation_best_effort.c",
+        "elapsed_seconds": 15.2,
+        "init_passed_tests": [
+            "pos1",
+            "pos2"
+        ],
+        "init_failed_tests": [
+            "neg1",
+            "pos3"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2"
+        ],
+        "post_failed_tests": [
+            "pos3",
+            "neg1"
+        ]
+    },
+    "5-A-bug-15644200-15644332": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\n    char line[100 - 1];\n    unsigned long int traffic = 0UL;\n    int usernum = 0;\n    USERS *userlist = (USERS *)malloc(sizeof(USERS));\n    userlist->first = (user *)malloc(sizeof(user));\n    userlist->last = (user *)malloc(sizeof(user));\n    userlist->first->prev = NULL;\n    userlist->last->next = NULL;\n    userlist->first->next = userlist->last;\n    userlist->last->prev = userlist->first;\n    while(scanf(\"%s\", line) == 1){\n        if(line[0] == '+'){\n            user *newuser = (user *)malloc(sizeof(user));\n            newuser->name = (char *)malloc((1+strlen(line+1))*sizeof(char));\n            strcpy(newuser->name, line+1);\n            newuser->next = userlist->first->next;\n            newuser->prev = userlist->first;\n            userlist->first->next->prev = newuser;\n            userlist->first->next = newuser;\n            usernum++;\n        }\n        else if(line[0] == '-'){\n            user *moving = userlist->first->next;\n            while(strcmp(moving->name, line+1) != 0)\n                moving = moving->next;\n            moving->prev->next = moving->next;\n            moving->next->prev = moving->prev;\n            free(moving->name);\n            free(moving);\n            usernum--;\n        }\n        else{\n            int i;\n            for(i = 0; line[i] != ':'; i++)\n                ;\n            traffic += usernum*strlen(line+i+1);\n        }\n        getchar();\n    }\n    printf(\"%lu\", traffic);\n    return 0;\n}",
+        "patched_file": "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\ntypedef struct user{\n    char *name;\n    struct user *prev, *next;\n} user;\n\ntypedef struct USERS{\n    user *first, *last;\n} USERS;\n\nint main(int argc, char *argv[])\n{\n    char line[100 - 1];\n    unsigned long int traffic = 0UL;\n    int usernum = 0;\n    USERS *userlist = (USERS *)malloc(sizeof(USERS));\n    userlist->first = (user *)malloc(sizeof(user));\n    userlist->last = (user *)malloc(sizeof(user));\n    userlist->first->prev = NULL;\n    userlist->last->next = NULL;\n    userlist->first->next = userlist->last;\n    userlist->last->prev = userlist->first;\n    while(scanf(\"%s\", line) == 1){\n        if(line[0] == '+'){\n            user *newuser = (user *)malloc(sizeof(user));\n            newuser->name = (char *)malloc((1+strlen(line+1))*sizeof(char));\n            strcpy(newuser->name, line+1);\n            newuser->next = userlist->first->next;\n            newuser->prev = userlist->first;\n            userlist->first->next->prev = newuser;\n            userlist->first->next = newuser;\n            usernum++;\n        }\n        else if(line[0] == '-'){\n            user *moving = userlist->first->next;\n            while(strcmp(moving->name, line+1) != 0)\n                moving = moving->next;\n            moving->prev->next = moving->next;\n            moving->next->prev = moving->prev;\n            free(moving->name);\n            free(moving);\n            usernum--;\n        }\n        else{\n            int i;\n            for(i = 0; line[i] != ':'; i++)\n                ;\n            traffic += usernum*strlen(line+i+1);\n        }\n        getchar();\n    }\n    printf(\"%lu\", traffic);\n    return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/5-A-bug-15644200-15644332/5-A-15644200.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '+' \u2192 '-'",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/5-A-bug-15644200-15644332_mutation_best_effort.c",
+        "elapsed_seconds": 8.1,
+        "init_passed_tests": [
+            "pos1"
+        ],
+        "init_failed_tests": [
+            "neg1",
+            "pos2"
+        ],
+        "post_passed_tests": [
+            "pos1"
+        ],
+        "post_failed_tests": [
+            "pos2",
+            "neg1"
+        ]
+    },
+    "510-A-bug-16335384-16335403": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[]) {\n\tint x,y,i,say=1,j;\n\t\tscanf(\"%d %d\",&x,&y);\n\t\t\tFOR(i,1,x){\n\t\t\t\t\tif(i <= 1){\n\t\t\t\t\t\tFOR(j,0,y-1)\n\t\t\t\t\t\t\tprintf(\"#\");\n\t\t\t\t\t\tprintf(\"\\n\");\n\t\t\t\t\tcontinue;}\n\t\t\t\t\tif(i%2!=0){\n\t\t\t\t\t\tFOR(j,0,y-1)\n\t\t\t\t\t\t\tprintf(\"#\");\n\t\t\t\t\tprintf(\"\\n\");}\n\t\t\t\t\telse if(say%2!=0){\n\t\t\t\t\t\tFOR(j,1,y-1)\n\t\t\t\t\t\t\tprintf(\".\");\n\t\t\t\t\t\tprintf(\"#\\n\");\n\t\t\t\t\t\tsay++;}\n\t\t\t\t\telse{  \n\t\t\t\t\t\tprintf(\"#\");\n\t\t\t\t\t\tFOR(j,1,y-1)\n\t\t\t\t\t\tprintf(\".\");\n\t\t\t\t\t\tprintf(\"\\n\");\n\t\t\t\t\t}}\n\n\n\n\t\n\t\n\treturn 0;\n}",
+        "patched_file": "#include<string.h>\n#include<stdio.h>\n#define FOR(ii,aa,bb) for(ii=aa;ii<=bb;ii++)\n\n\nint main(int argc, char *argv[]) {\n\tint x,y,i,say=1,j;\n\t\tscanf(\"%d %d\",&x,&y);\n\t\t\tFOR(i,1,x){\n\t\t\t\t\tif(i <= 1){\n\t\t\t\t\t\tFOR(j,0,y-1)\n\t\t\t\t\t\t\tprintf(\"#\");\n\t\t\t\t\t\tprintf(\"\\n\");\n\t\t\t\t\tcontinue;}\n\t\t\t\t\tif(i%2!=0){\n\t\t\t\t\t\tFOR(j,0,y-1)\n\t\t\t\t\t\t\tprintf(\"#\");\n\t\t\t\t\tprintf(\"\\n\");}\n\t\t\t\t\telse if(say%2!=0){\n\t\t\t\t\t\tFOR(j,1,y-1)\n\t\t\t\t\t\t\tprintf(\".\");\n\t\t\t\t\t\tprintf(\"#\\n\");\n\t\t\t\t\t\tsay++;}\n\t\t\t\t\telse{  \n\t\t\t\t\t\tprintf(\"#\");\n\t\t\t\t\t\tFOR(j,1,y-1)\n\t\t\t\t\t\tprintf(\".\");\n\t\t\t\t\t\tprintf(\"\\n\");\n\t\t\t\t\t}}\n\n\n\n\t\n\t\n\treturn 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/510-A-bug-16335384-16335403/510-A-16335384.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '==' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/510-A-bug-16335384-16335403_mutation_best_effort.c",
+        "elapsed_seconds": 6.5,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3"
+        ],
+        "init_failed_tests": [
+            "neg1",
+            "pos4"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3"
+        ],
+        "post_failed_tests": [
+            "pos4",
+            "neg1"
+        ]
+    },
+    "513-B2-bug-13172231-13172292": {
+        "status": "failed",
+        "patched_function": "void permutation(int n, int l, int r)\n{\n    int k = n + l - r;\n\n    printf(\"%lld\\n\", m);\n\n    if (l == r)\n    {\n        if (--m == 0)\n        {\n            int i;\n\n            p[l] = k;\n            for (i = 0; i <= n; i++)\n                printf(\"%d%c\", p[i], (i != n - 1) ? ' ' : 0);\n\n            exit(EXIT_SUCCESS);\n        }\n        else if (m < 0)\n        {\n            return;\n        }\n    }\n    else\n    {\n        if (r - l > 1 && m > (1LL << (r - l - 1)))\n            p[l] = k, p[l + 1] = k + 1, m -= (1LL << (r - l - 1));\n        else\n            p[l] = k, permutation(n, l + 1, r);\n\n        if (r - l > 1 && m > (1LL << (r - l - 1)))\n            p[r] = k, p[r - 1] = k + 1, m -= (1LL << (r - l - 1));\n        else\n            p[r] = k, permutation(n, l, r - 1);\n    }\n}",
+        "patched_file": "/*\n *    Homework -  NCTU DCS CP\n *    =======================\n *    Student ID :    0316218\n *    GCC Option :   -std=c99\n *    -Wall -Wextra -pedantic\n */\n\n#include<stdio.h>\n#include<stdlib.h>\n\nint p[50] = {0};\nlong long int m;\n\nvoid permutation(int, int, int);\n\nint main(int argc, char *argv[])\n{\n    int n;\n\n    scanf(\"%d %lld\", &n, &m);\n\n    permutation(n, 0, n - 1);\n\n    exit(EXIT_FAILURE);\n}\n\nvoid permutation(int n, int l, int r)\n{\n    int k = n + l - r;\n\n    printf(\"%lld\\n\", m);\n\n    if (l == r)\n    {\n        if (--m == 0)\n        {\n            int i;\n\n            p[l] = k;\n            for (i = 0; i <= n; i++)\n                printf(\"%d%c\", p[i], (i != n - 1) ? ' ' : 0);\n\n            exit(EXIT_SUCCESS);\n        }\n        else if (m < 0)\n        {\n            return;\n        }\n    }\n    else\n    {\n        if (r - l > 1 && m > (1LL << (r - l - 1)))\n            p[l] = k, p[l + 1] = k + 1, m -= (1LL << (r - l - 1));\n        else\n            p[l] = k, permutation(n, l + 1, r);\n\n        if (r - l > 1 && m > (1LL << (r - l - 1)))\n            p[r] = k, p[r - 1] = k + 1, m -= (1LL << (r - l - 1));\n        else\n            p[r] = k, permutation(n, l, r - 1);\n    }\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/513-B2-bug-13172231-13172292/513-B2-13172231.c::permutation",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/513-B2-bug-13172231-13172292_mutation_best_effort.c",
+        "elapsed_seconds": 25.6,
+        "init_passed_tests": [],
+        "init_failed_tests": [
+            "neg1",
+            "pos1",
+            "pos2"
+        ],
+        "post_passed_tests": [],
+        "post_failed_tests": [
+            "pos1",
+            "pos2",
+            "neg1"
+        ]
+    },
+    "53-C-bug-10604859-10605014": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[]){\n\tint n,t,k;\n\tscanf(\"%d\",&n);\n\tk=n-1;\n\tt=n/2;\n\twhile(k >= t){\n\t\tprintf(\"%d %d \",n-k,k+1);\n\t\tk--;\n\t}\n\tif(!(n&1))\n\t\tprintf(\"%d\",n/2);\n\n\treturn 0;\n}",
+        "patched_file": "#include<stdio.h> \nint main(int argc, char *argv[]){\n\tint n,t,k;\n\tscanf(\"%d\",&n);\n\tk=n-1;\n\tt=n/2;\n\twhile(k >= t){\n\t\tprintf(\"%d %d \",n-k,k+1);\n\t\tk--;\n\t}\n\tif(!(n&1))\n\t\tprintf(\"%d\",n/2);\n\n\treturn 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/53-C-bug-10604859-10605014/53-C-10604859.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '>' \u2192 '>='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/53-C-bug-10604859-10605014_mutation_best_effort.c",
+        "elapsed_seconds": 32.2,
+        "init_passed_tests": [],
+        "init_failed_tests": [
+            "neg1",
+            "pos1",
+            "pos2"
+        ],
+        "post_passed_tests": [],
+        "post_failed_tests": [
+            "pos1",
+            "pos2",
+            "neg1"
+        ]
+    },
+    "546-B-bug-13932383-13932411": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\n    int n;scanf(\"%d\",&n);\n    int i,x;\n    int data[3000];\n    int j;\n    int temp;\n    int answer=0;\n    int shift=0;\n    for(i=0;i <= n;i++)\n    {\n        scanf(\"%d\",&x);data[i]=x;\n    }\n\n    for(i=0;i<n;i++)\n    {\n        for(j=0;j<n-1;j++)\n        {\n            if(data[j]>data[j+1])\n            {\n                temp=data[j];\n                data[j]=data[j+1];\n                data[j+1]=temp;\n            }\n        }\n    }\n    \n    for(i=1;i<=n;i++)\n    {\n        if(data[i-1]==i+shift)\n        {\n            ;\n        }\n        else if(data[i-1]>i+shift)\n        {\n            int dif=data[i-1]-i-shift;\n            answer+=((i-1)*dif);\n            shift+=dif;\n        }\n        else if(data[i-1]<i+shift)\n        {\n            answer+=(i+shift-data[i-1]);\n        }\n    }\n    printf(\"%d\",answer);\n    return 0;\n}",
+        "patched_file": "#include <stdio.h>\n\nint main(int argc, char *argv[])\n{\n    int n;scanf(\"%d\",&n);\n    int i,x;\n    int data[3000];\n    int j;\n    int temp;\n    int answer=0;\n    int shift=0;\n    for(i=0;i <= n;i++)\n    {\n        scanf(\"%d\",&x);data[i]=x;\n    }\n\n    for(i=0;i<n;i++)\n    {\n        for(j=0;j<n-1;j++)\n        {\n            if(data[j]>data[j+1])\n            {\n                temp=data[j];\n                data[j]=data[j+1];\n                data[j+1]=temp;\n            }\n        }\n    }\n    \n    for(i=1;i<=n;i++)\n    {\n        if(data[i-1]==i+shift)\n        {\n            ;\n        }\n        else if(data[i-1]>i+shift)\n        {\n            int dif=data[i-1]-i-shift;\n            answer+=((i-1)*dif);\n            shift+=dif;\n        }\n        else if(data[i-1]<i+shift)\n        {\n            answer+=(i+shift-data[i-1]);\n        }\n    }\n    printf(\"%d\",answer);\n    return 0;\n}",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/546-B-bug-13932383-13932411/546-B-13932383.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/546-B-bug-13932383-13932411_mutation_best_effort.c",
+        "elapsed_seconds": 23.9,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7"
+        ],
+        "init_failed_tests": [
+            "neg1",
+            "pos8",
+            "pos9"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7"
+        ],
+        "post_failed_tests": [
+            "pos8",
+            "pos9",
+            "neg1"
+        ]
+    },
+    "558-A-bug-12908146-12908196": {
+        "status": "success",
+        "patched_function": "int main(int argc, char *argv[])\n{\n    int n, i, j, r, ans = 0, s = 0;\n    scanf(\"%d\", &n);\n    int arr[n + 1][2];\n    for (i = 0; i < n; i++)\n            scanf(\"%d %d\", &arr[i][0], &arr[i][1]);\n    arr[n][0] = 0; arr[n][1] = 0;\n    for (i = 0; i < n + 1; i++)\n        for (j = 0; j < n + 1 - i - 1; j++)\n            if (arr[j][0] > arr[j + 1][0])\n            {\n                arr[j][0] += arr[j + 1][0];\n                arr[j + 1][0] = arr[j][0] - arr[j + 1][0];\n                arr[j][0] = arr[j][0] - arr[j ][0];\n                arr[j][1] += arr[j + 1][1];\n                arr[j + 1][1] = arr[j][1] - arr[j + 1][1];\n                arr[j][1] = arr[j][1] - arr[j + 1][1];\n            }\n    int arr1[n + 1][2];\n    for (i = 0; i < n + 1; i++)\n    {\n        arr1[i][0] = arr[i][0];\n        arr1[i][1] = arr1[i][1];\n    }\n    int g = 0;\n    for (i = 0; i < n + 1; i++)\n        if (arr[i][0] == 0)\n        {\n            g = i;\n            break;\n        }\n    i = g;\n    r = 1;\n    while (i >= 0 && i <= n)\n        if (arr[i][1] == 0)\n            i += r;\n        else\n        {\n            s += arr[i][1];\n            arr[i][1] = 0;\n            r = -r;\n        }\n    ans = s;\n    i = g;\n    s = 0;\n    r = -1;\n    while (i >= 0 && i <= n)\n        if (arr1[i][1] == 0)\n            i += r;\n        else\n        {\n            s += arr1[i][1];\n            arr1[i][1] = 0;\n            r = -r;\n        }\n    if (s > ans)\n        ans = s;\n    printf(\"%d\", ans);\n    return 0;\n}",
+        "patched_file": "#include <stdio.h>\n\nint main(int argc, char *argv[])\n{\n    int n, i, j, r, ans = 0, s = 0;\n    scanf(\"%d\", &n);\n    int arr[n + 1][2];\n    for (i = 0; i < n; i++)\n            scanf(\"%d %d\", &arr[i][0], &arr[i][1]);\n    arr[n][0] = 0; arr[n][1] = 0;\n    for (i = 0; i < n + 1; i++)\n        for (j = 0; j < n + 1 - i - 1; j++)\n            if (arr[j][0] > arr[j + 1][0])\n            {\n                arr[j][0] += arr[j + 1][0];\n                arr[j + 1][0] = arr[j][0] - arr[j + 1][0];\n                arr[j][0] = arr[j][0] - arr[j ][0];\n                arr[j][1] += arr[j + 1][1];\n                arr[j + 1][1] = arr[j][1] - arr[j + 1][1];\n                arr[j][1] = arr[j][1] - arr[j + 1][1];\n            }\n    int arr1[n + 1][2];\n    for (i = 0; i < n + 1; i++)\n    {\n        arr1[i][0] = arr[i][0];\n        arr1[i][1] = arr1[i][1];\n    }\n    int g = 0;\n    for (i = 0; i < n + 1; i++)\n        if (arr[i][0] == 0)\n        {\n            g = i;\n            break;\n        }\n    i = g;\n    r = 1;\n    while (i >= 0 && i <= n)\n        if (arr[i][1] == 0)\n            i += r;\n        else\n        {\n            s += arr[i][1];\n            arr[i][1] = 0;\n            r = -r;\n        }\n    ans = s;\n    i = g;\n    s = 0;\n    r = -1;\n    while (i >= 0 && i <= n)\n        if (arr1[i][1] == 0)\n            i += r;\n        else\n        {\n            s += arr1[i][1];\n            arr1[i][1] = 0;\n            r = -r;\n        }\n    if (s > ans)\n        ans = s;\n    printf(\"%d\", ans);\n    return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/558-A-bug-12908146-12908196/558-A-12908146.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '+ 1' \u2192 ''",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/558-A-bug-12908146-12908196_mutation_patch.c",
+        "elapsed_seconds": 38.1,
+        "init_passed_tests": [
+            "neg1",
+            "pos1",
+            "pos3"
+        ],
+        "init_failed_tests": [
+            "pos2"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "neg1"
+        ],
+        "post_failed_tests": []
+    },
+    "592-C-bug-14117787-14117792": {
+        "status": "failed",
+        "patched_function": "long long int gcd(long long int a,long long int b)\n{\n    if(b != 0)\n    return a;\n    return gcd(b,a%b);\n}",
+        "patched_file": "#include <stdio.h>\nlong long int gcd(long long int a,long long int b)\n{\n    if(b != 0)\n    return a;\n    return gcd(b,a%b);\n}\nint main(int argc, char *argv[]) {\n    long long int t,a,b,temp,l,g,ans=0;\n    scanf(\"%lld %lld %lld\",&t,&a,&b);\n    if(a==b)\n    {\n        printf(\"1/1\");\n        return 0;\n    }\n    if(b>a)\n    {\n        temp=a;\n        a=b;\n        b=temp;\n    }\n    g = gcd(a,b);\n    if(b/g>t/a)\n    {\n        if(b-1>t)\n        ans=t;\n        else\n        ans=b-1;\n        g=gcd(ans,t);\n        ans=ans/g;\n        t=t/g;\n        printf(\"%lld/%lld\",ans,t);\n        return 0;\n    }\n    l = (a/g)*b;\n    \n    ans += t/l;\n    \n    ans += (t/l)*(b-1);\n    printf(\"%lld   \",ans);\n    if(t%l<b-1)\n    ans+=t%l;\n    else\n    ans+=b-1;\n    //printf(\"%lld\",ans);\n    g=gcd(t,ans);\n    t=t/g;\n    ans=ans/g;\n    printf(\"%lld/%lld\",ans,t);\n    return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/592-C-bug-14117787-14117792/592-C-14117787.c::gcd",
+        "mutation_strategy": "\u0110\u1ed5i '==' \u2192 '!='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/592-C-bug-14117787-14117792_mutation_best_effort.c",
+        "elapsed_seconds": 16.6,
+        "init_passed_tests": [],
+        "init_failed_tests": [
+            "neg1",
+            "pos1",
+            "pos2"
+        ],
+        "post_passed_tests": [],
+        "post_failed_tests": [
+            "pos1",
+            "pos2",
+            "neg1"
+        ]
+    },
+    "6-C-bug-11148576-11150029": {
+        "status": "success",
+        "patched_function": "int main(int argc, char *argv[])\n{\n\tint loop = 0;\n\tint i;\n\t\n\tscanf(\"%d\", &loop);\n\twhile (end < loop)\n\t\tscanf(\"%d\", &chocolate[end++]);\n\n\twhile (end >= start)\n\t{\n\t\tif (result > 0)\n\t\t\tresult -= chocolate[end--];\n\t\telse\n\t\t\tresult += chocolate[start++];\n\t}\n\t\n\tprintf(\"%d %d\\n\", start, loop - start); \n\treturn 0;\n}",
+        "patched_file": "#include <stdio.h>\n#define MAX 100001\nint result, Alice, Bob, start,end;\nint chocolate[MAX + 1];\n\nint main(int argc, char *argv[])\n{\n\tint loop = 0;\n\tint i;\n\t\n\tscanf(\"%d\", &loop);\n\twhile (end < loop)\n\t\tscanf(\"%d\", &chocolate[end++]);\n\n\twhile (end >= start)\n\t{\n\t\tif (result > 0)\n\t\t\tresult -= chocolate[end--];\n\t\telse\n\t\t\tresult += chocolate[start++];\n\t}\n\t\n\tprintf(\"%d %d\\n\", start, loop - start); \n\treturn 0;\n}",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/6-C-bug-11148576-11150029/6-C-11148576.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '>' \u2192 '>='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/6-C-bug-11148576-11150029_mutation_patch.c",
+        "elapsed_seconds": 2.6,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "neg1"
+        ],
+        "post_failed_tests": []
+    },
+    "612-C-bug-15186001-15186009": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\n    char c;\n    int i,l,n,rb,sp;\n    char s[1000001];\n    scanf(\"%s\",s);\n    l=strlen(s);\n    char stack[l];\n    n=0; sp=0;\n    for (i=0;i != l;i++)\n    {\n        if (s[i]=='<' || s[i]=='{' || s[i]=='[' || s[i]=='(')\n        {\n            stack[sp]=s[i];\n            sp++;\n        }\n        else if (sp)\n        {\n            sp--;\n            c=stack[sp];\n            if (!isPair(c,s[i]))\n                n++;\n        }\n        else\n        {\n            printf(\"Impossible\\n\");\n            break;\n        }\n    }\n    if (sp)\n        printf(\"Impossible\\n\");\n    else printf(\"%d\\n\",n);\n\n    return 0;\n}",
+        "patched_file": "#include <stdbool.h>\n#include <stdio.h>\n#include <string.h>\n\n/*bool constructNeed(char* s, int* needs, int l)\n{\n    int i;\n    for (i=0;i<l;i++)\n    {\n        if (s[i]=='<' || s[i]=='{' || s[i]=='[' || s[i]=='(')\n        {\n            if (i)\n                needs[i]=needs[i-1]+1;\n            else needs[0]=1;\n        }\n        else if (s[i]=='>' || s[i]=='}' || s[i]==']' || s[i]==')')\n        {\n            if (i)\n            {\n                needs[i]=needs[i-1]-1;\n                if (needs[i]<0)\n                    return false;\n            }\n            else return false;\n        }\n        else return false;\n    }\n    if (needs[l-1])\n        return false;\n    return true;\n}\n\nint getRightBracket(int* needs, int lb, int l)\n{\n    int i;\n    for (i=lb+1;i<l;i++)\n        if (needs[i]==needs[lb]-1)\n            return i;\n    return 0;\n}*/\n\nbool isPair(char left, char right)\n{\n    if (left=='<')\n    {\n        if (right=='>')\n            return true;\n        else return false;\n    }\n    if (left=='{')\n    {\n        if (right=='}')\n            return true;\n        else return false;\n    }\n    if (left=='[')\n    {\n        if (right==']')\n            return true;\n        else return false;\n    }\n    if (left=='(')\n    {\n        if (right==')')\n            return true;\n        else return false;\n    }\n    return false;\n\n}\n\nint main(int argc, char *argv[])\n{\n    char c;\n    int i,l,n,rb,sp;\n    char s[1000001];\n    scanf(\"%s\",s);\n    l=strlen(s);\n    char stack[l];\n    n=0; sp=0;\n    for (i=0;i != l;i++)\n    {\n        if (s[i]=='<' || s[i]=='{' || s[i]=='[' || s[i]=='(')\n        {\n            stack[sp]=s[i];\n            sp++;\n        }\n        else if (sp)\n        {\n            sp--;\n            c=stack[sp];\n            if (!isPair(c,s[i]))\n                n++;\n        }\n        else\n        {\n            printf(\"Impossible\\n\");\n            break;\n        }\n    }\n    if (sp)\n        printf(\"Impossible\\n\");\n    else printf(\"%d\\n\",n);\n\n    return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/612-C-bug-15186001-15186009/612-C-15186001.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '!='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/612-C-bug-15186001-15186009_mutation_best_effort.c",
+        "elapsed_seconds": 2.2,
+        "init_passed_tests": [
+            "pos1",
+            "pos2"
+        ],
+        "init_failed_tests": [
+            "neg1",
+            "pos3"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2"
+        ],
+        "post_failed_tests": [
+            "pos3",
+            "neg1"
+        ]
+    },
+    "62-A-bug-7067912-7067978": {
+        "status": "success",
+        "patched_function": "int main(int argc, char *argv[])\n{\n\tint gl,gr,bl,br,i,j,k,l;\n\tscanf(\"%d %d\\n%d %d\",&gl,&gr,&bl,&br);\n\tprintf((gl >= 1)&&(br>=gl-1)&&(br<=gl+3)?\"YES\":((gr>1)&&(bl>=gr-1)&&(bl<=gr+3)?\"YES\":\"NO\"));\n\treturn 0;\n}",
+        "patched_file": "#include<stdio.h>\nint main(int argc, char *argv[])\n{\n\tint gl,gr,bl,br,i,j,k,l;\n\tscanf(\"%d %d\\n%d %d\",&gl,&gr,&bl,&br);\n\tprintf((gl >= 1)&&(br>=gl-1)&&(br<=gl+3)?\"YES\":((gr>1)&&(bl>=gr-1)&&(bl<=gr+3)?\"YES\":\"NO\"));\n\treturn 0;\n}",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/62-A-bug-7067912-7067978/62-A-7067912.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '>' \u2192 '>='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/62-A-bug-7067912-7067978_mutation_patch.c",
+        "elapsed_seconds": 0.4,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "neg1"
+        ],
+        "post_failed_tests": []
+    },
+    "632-A-bug-16772686-16772703": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[]){\n    int a,b,k;\n    char arr[50];\n    char store[50];\n    scanf(\"%d%d\",&a,&b);\n    getchar();\n    double s=0;\n    double res=0; double x=0;\n    int i;\n    for(i=0;i != a;i++){\n    gets(arr);\n    if(strlen(arr)==8){\n    store[i]='2';\n    }\n    else{\n    store[i]='1';\n    }\n    }\n    for(k=2;k>=0;k--){\n    if(store[k]=='2'){\n    s=(2*res)+0.5;\n    res=s;\n    x=x+(res*b);\n    }\n    else{\n    s=(2*res);\n    res=s;\n    x=x+(res*b);\n    }}\n    printf(\"%lld\",(long long int)x);\nreturn 0;\n}",
+        "patched_file": "#include<stdio.h>\nint main(int argc, char *argv[]){\n    int a,b,k;\n    char arr[50];\n    char store[50];\n    scanf(\"%d%d\",&a,&b);\n    getchar();\n    double s=0;\n    double res=0; double x=0;\n    int i;\n    for(i=0;i != a;i++){\n    gets(arr);\n    if(strlen(arr)==8){\n    store[i]='2';\n    }\n    else{\n    store[i]='1';\n    }\n    }\n    for(k=2;k>=0;k--){\n    if(store[k]=='2'){\n    s=(2*res)+0.5;\n    res=s;\n    x=x+(res*b);\n    }\n    else{\n    s=(2*res);\n    res=s;\n    x=x+(res*b);\n    }}\n    printf(\"%lld\",(long long int)x);\nreturn 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/632-A-bug-16772686-16772703/632-A-16772686.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '!='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/632-A-bug-16772686-16772703_mutation_best_effort.c",
+        "elapsed_seconds": 3.0,
+        "init_passed_tests": [
+            "pos1",
+            "pos2"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2"
+        ],
+        "post_failed_tests": [
+            "neg1"
+        ]
+    },
+    "658-A-bug-17124240-17124253": {
+        "status": "success",
+        "patched_function": "int main(int argc, char *argv[]){\n\tss(\"%d%d\",&n,&c);\n\tfor(i=0;i<n;i++)\n\t\tss(\"%d\",a+i);\n\tfor(i=0;i<n;i++){\n\t\tss(\"%d\",r+i);\n\t\tt+=r[i];\n\t\tlima+= ((a[i]-(t*c))>0) ? a[i]-(t*c) : 0;\n\t}\n\tt=0;\n\tfor(i=n-1;i >= 0;i--){\n\t\tt+=r[i];\n\t\trade+= ((a[i]-(t*c))>0) ? (a[i]-(t*c)) : 0;\n\t}\n\tif(lima==rade)\n\t\tpp(\"Tie\");\n\telse\n\t\tpp((lima>rade) ? \"Limak\" : \"Radewoosh\");\nreturn 0;\n}",
+        "patched_file": "//ardanin kodunu deneme\n#include<stdio.h>\n#define pp printf\n#define ss scanf\n#define min(a,b) ((a)<(b)) ? (a) : (b)\n#define max(a,b) ((a)>(b)) ? (a) : (b)\n\tint i,n,t,t1,c,a[55],r[55],d[55],lima,rade;\nint main(int argc, char *argv[]){\n\tss(\"%d%d\",&n,&c);\n\tfor(i=0;i<n;i++)\n\t\tss(\"%d\",a+i);\n\tfor(i=0;i<n;i++){\n\t\tss(\"%d\",r+i);\n\t\tt+=r[i];\n\t\tlima+= ((a[i]-(t*c))>0) ? a[i]-(t*c) : 0;\n\t}\n\tt=0;\n\tfor(i=n-1;i >= 0;i--){\n\t\tt+=r[i];\n\t\trade+= ((a[i]-(t*c))>0) ? (a[i]-(t*c)) : 0;\n\t}\n\tif(lima==rade)\n\t\tpp(\"Tie\");\n\telse\n\t\tpp((lima>rade) ? \"Limak\" : \"Radewoosh\");\nreturn 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/658-A-bug-17124240-17124253/658-A-17124240.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '>' \u2192 '>='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/658-A-bug-17124240-17124253_mutation_patch.c",
+        "elapsed_seconds": 4.8,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7",
+            "pos8",
+            "pos9",
+            "pos10",
+            "pos11",
+            "pos12",
+            "pos13",
+            "pos14",
+            "pos15",
+            "pos16",
+            "pos17",
+            "pos18",
+            "pos19"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos10",
+            "pos11",
+            "pos12",
+            "pos13",
+            "pos14",
+            "pos15",
+            "pos16",
+            "pos17",
+            "pos18",
+            "pos19",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7",
+            "pos8",
+            "pos9",
+            "neg1"
+        ],
+        "post_failed_tests": []
+    },
+    "68-A-bug-340593-340627": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\n    long min=oo,i,kk,a,b;\n    for(i=1;i<=4;i++)\n    {\n        scanf(\"%ld \",&kk);\n        if(kk<min)\n            min=kk;\n    }\n    scanf(\"%ld %ld\\n\",&a,&b);\n    if(b<min)\n        printf(\"%ld\\n\",b-a+1);\n    else\n        printf(\"%ld\\n\",(min-a)<0?0:a + min);\n    return 0;\n}",
+        "patched_file": "#include <stdio.h>\n#define oo 1000000000\nint main(int argc, char *argv[])\n{\n    long min=oo,i,kk,a,b;\n    for(i=1;i<=4;i++)\n    {\n        scanf(\"%ld \",&kk);\n        if(kk<min)\n            min=kk;\n    }\n    scanf(\"%ld %ld\\n\",&a,&b);\n    if(b<min)\n        printf(\"%ld\\n\",b-a+1);\n    else\n        printf(\"%ld\\n\",(min-a)<0?0:a + min);\n    return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/68-A-bug-340593-340627/68-A-340593.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '-' \u2192 '+'",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/68-A-bug-340593-340627_mutation_best_effort.c",
+        "elapsed_seconds": 8.2,
+        "init_passed_tests": [
+            "pos1"
+        ],
+        "init_failed_tests": [
+            "neg1",
+            "pos2",
+            "pos3"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "neg1"
+        ],
+        "post_failed_tests": [
+            "pos3"
+        ]
+    },
+    "81-B-bug-512758-512761": {
+        "status": "failed",
+        "patched_function": "int main(int argc, char *argv[])\n{\n   int i,o=0,s=0;\n   gets(str+1);\n   for (i=1;str[i];i++)\n      if (str[i]!=' ')\n         tmp[++o]=str[i];\n   for (i=1;tmp[i];i++)\n      if (tmp[i]==',')\n         hash[i]=1;\n      else if (tmp[i]=='.')\n      {\n         if (!s)\n            hash[i-1]=1;\n         s=(s+1)%3;\n      }\n   for (i=1;i<=o;i++)\n   {\n      putchar(tmp[i]);\n      if (i <= o&&hash[i])\n         putchar(' ');\n   }\n   puts(\"\");\n   return 0;\n}",
+        "patched_file": "#include <stdio.h>\n\nchar str[333],tmp[333],hash[333];\n\nint main(int argc, char *argv[])\n{\n   int i,o=0,s=0;\n   gets(str+1);\n   for (i=1;str[i];i++)\n      if (str[i]!=' ')\n         tmp[++o]=str[i];\n   for (i=1;tmp[i];i++)\n      if (tmp[i]==',')\n         hash[i]=1;\n      else if (tmp[i]=='.')\n      {\n         if (!s)\n            hash[i-1]=1;\n         s=(s+1)%3;\n      }\n   for (i=1;i<=o;i++)\n   {\n      putchar(tmp[i]);\n      if (i <= o&&hash[i])\n         putchar(' ');\n   }\n   puts(\"\");\n   return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/81-B-bug-512758-512761/81-B-512758.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '<' \u2192 '<='",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/81-B-bug-512758-512761_mutation_best_effort.c",
+        "elapsed_seconds": 6.2,
+        "init_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7"
+        ],
+        "init_failed_tests": [
+            "neg1"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos3",
+            "pos4",
+            "pos5",
+            "pos6",
+            "pos7"
+        ],
+        "post_failed_tests": [
+            "neg1"
+        ]
+    },
+    "98-C-bug-792005-792008": {
+        "status": "failed",
+        "patched_function": "int main(int i, char *argv[]){\n    double w,S=0,T=acos(0),s,t;\n    scanf(\"%d%d%d\",&a,&b,&l);\n    if(a>b) a^=b^=a^=b;\n    if(l<=b) w=l<=a?l:a;\n    else for(i=100;i--;(w=f(s))>f(t)?S=s:(T=t))\n    s=(S*2+T)/.3333333,t=(S - T*2)*.3333334;\n\n    printf(w>1e-7?\"%.9f\\n\":\"My poor head =(\\n\",w);\n    return 0;\n}",
+        "patched_file": "#include <stdio.h>\n#include <math.h>\nint a,b,l;\ndouble f(double x){return cos(x)*(b*tan(x)+a-l*sin(x));}\nint main(int i, char *argv[]){\n    double w,S=0,T=acos(0),s,t;\n    scanf(\"%d%d%d\",&a,&b,&l);\n    if(a>b) a^=b^=a^=b;\n    if(l<=b) w=l<=a?l:a;\n    else for(i=100;i--;(w=f(s))>f(t)?S=s:(T=t))\n    s=(S*2+T)/.3333333,t=(S - T*2)*.3333334;\n\n    printf(w>1e-7?\"%.9f\\n\":\"My poor head =(\\n\",w);\n    return 0;\n}\n",
+        "selected_function": "/Users/linhnh/Documents/Fault Localization/codeflaws/benchmark/98-C-bug-792005-792008/98-C-792005.c::main",
+        "mutation_strategy": "\u0110\u1ed5i '+' \u2192 '-'",
+        "patch_file": "/Users/linhnh/Documents/Fault Localization/Unified-Debugging/experiments/patches/98-C-bug-792005-792008_mutation_best_effort.c",
+        "elapsed_seconds": 7.5,
+        "init_passed_tests": [
+            "pos1",
+            "pos2"
+        ],
+        "init_failed_tests": [
+            "neg1",
+            "pos3",
+            "pos4"
+        ],
+        "post_passed_tests": [
+            "pos1",
+            "pos2",
+            "pos4"
+        ],
+        "post_failed_tests": [
+            "pos3",
+            "neg1"
+        ]
+    }
+}

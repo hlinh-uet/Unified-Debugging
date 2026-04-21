@@ -29,6 +29,8 @@ APR_TOP_K = int(os.getenv("APR_TOP_K", "3"))
 APR_MAX_SOURCE_CHARS = int(os.getenv("APR_MAX_SOURCE_CHARS", "30000"))
 # Với Defects4C, một bug có hàng trăm test pass – lưu hết vào JSON gây bloat.
 APR_MAX_TEST_ID_STORE = int(os.getenv("APR_MAX_TEST_ID_STORE", "50"))
+APR_ARTIFACTS_DIR = os.getenv("APR_ARTIFACTS_DIR", os.path.join(EXPERIMENTS_DIR, "apr_generated"))
+_LOCAL_MODEL_CACHE = {"path": None, "tokenizer": None, "model": None}
 
 
 def _clean_code(raw_content: str) -> str:
@@ -285,7 +287,58 @@ def _call_qwen(prompt: str, model: str = "qwen/qwen-2.5-coder-32b-instruct") -> 
         return None
 
 
-def call_llm(prompt: str, provider: Optional[str] = None) -> Optional[str]:
+def _call_kaggle_local(prompt: str, model_path: str) -> Optional[str]:
+    """Run local HF model from /kaggle/input/* (no API)."""
+    if not model_path:
+        print("[LLM] LỖI: thiếu --llm-model-path cho provider 'kaggle_local'.")
+        return None
+    try:
+        import torch
+        from transformers import AutoTokenizer, AutoModelForCausalLM
+    except ImportError:
+        print("[LLM] Thiếu transformers/torch cho kaggle_local.")
+        return None
+
+    try:
+        if _LOCAL_MODEL_CACHE["path"] != model_path:
+            tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+            mdl = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype="auto",
+                device_map="auto",
+                trust_remote_code=True,
+            )
+            _LOCAL_MODEL_CACHE.update({"path": model_path, "tokenizer": tok, "model": mdl})
+
+        tok = _LOCAL_MODEL_CACHE["tokenizer"]
+        mdl = _LOCAL_MODEL_CACHE["model"]
+        messages = [
+            {"role": "system", "content": "You are an expert in fixing C/C++ bugs. Return ONLY fixed C function code."},
+            {"role": "user", "content": prompt},
+        ]
+        try:
+            text_prompt = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        except Exception:
+            text_prompt = prompt
+        inputs = tok(text_prompt, return_tensors="pt")
+        if hasattr(mdl, "device"):
+            inputs = {k: v.to(mdl.device) for k, v in inputs.items()}
+        out = mdl.generate(
+            **inputs,
+            max_new_tokens=int(os.getenv("LOCAL_MAX_NEW_TOKENS", "1024")),
+            do_sample=True,
+            temperature=0.2,
+            top_p=0.95,
+            eos_token_id=tok.eos_token_id,
+        )
+        gen_ids = out[0][inputs["input_ids"].shape[-1]:]
+        return tok.decode(gen_ids, skip_special_tokens=True).strip()
+    except Exception as e:
+        print(f"[LLM] kaggle_local error: {e}")
+        return None
+
+
+def call_llm(prompt: str, provider: Optional[str] = None, model_path: Optional[str] = None) -> Optional[str]:
     """
     Gọi LLM để sinh bản vá.
 
@@ -318,7 +371,12 @@ def call_llm(prompt: str, provider: Optional[str] = None) -> Optional[str]:
         print(f"[LLM] Provider: Qwen ({qwen_model})")
         return _call_qwen(prompt, model=qwen_model)
 
-    print(f"[LLM] Warning: Provider không hỗ trợ '{chosen}'. Chọn 'gemini' hoặc 'openai'.")
+    if chosen == "kaggle_local":
+        local_path = model_path or os.getenv("LOCAL_LLM_MODEL_PATH", "")
+        print(f"[LLM] Provider: Kaggle Local ({local_path})")
+        return _call_kaggle_local(prompt, model_path=local_path)
+
+    print(f"[LLM] Warning: Provider không hỗ trợ '{chosen}'.")
     return None
 
 
@@ -385,6 +443,33 @@ def _compact_test_list(test_ids):
         return list(test_ids) if test_ids else []
     extra = len(test_ids) - APR_MAX_TEST_ID_STORE
     return list(test_ids[:APR_MAX_TEST_ID_STORE]) + [f"...(+{extra} more)"]
+
+
+def _safe_bug_dir_name(bug_id: str) -> str:
+    return bug_id.replace("@", "__").replace("/", "__")
+
+
+def _artifact_paths(artifacts_dir: str, bug_id: str) -> tuple:
+    bug_dir = os.path.join(artifacts_dir, _safe_bug_dir_name(bug_id))
+    return bug_dir, os.path.join(bug_dir, "candidates.json")
+
+
+def _write_bug_candidates(artifacts_dir: str, bug_id: str, payload: dict):
+    bug_dir, json_path = _artifact_paths(artifacts_dir, bug_id)
+    os.makedirs(bug_dir, exist_ok=True)
+    with open(json_path, "w") as f:
+        json.dump(payload, f, indent=2)
+
+
+def _read_bug_candidates(artifacts_dir: str, bug_id: str) -> Optional[dict]:
+    _, json_path = _artifact_paths(artifacts_dir, bug_id)
+    if not os.path.isfile(json_path):
+        return None
+    try:
+        with open(json_path, "r") as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 
 def _copy_accepted_patch(dataset: str, bug_id: str, bug_source_path: str,
@@ -470,7 +555,13 @@ def _clean_llm_patch(patched_func: str) -> str:
     return patched_func.strip()
 
 
-def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = None):
+def run_apr_pipeline(
+    dataset: str = "codeflaws",
+    llm_provider: Optional[str] = None,
+    phase: str = "all",
+    artifacts_dir: Optional[str] = None,
+    llm_model_path: Optional[str] = None,
+):
     """
     Pipeline APR (LLM-based).
     Load dữ liệu qua get_loader() – không đọc lại file JSON thủ công.
@@ -480,6 +571,8 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
         llm_provider: 'gemini' | 'openai'. Nếu None, đọc từ LLM_PROVIDER trong .env.
     """
     os.makedirs(EXPERIMENTS_DIR, exist_ok=True)
+    artifacts_dir = artifacts_dir or APR_ARTIFACTS_DIR
+    os.makedirs(artifacts_dir, exist_ok=True)
 
     tarantula_results_file = os.path.join(EXPERIMENTS_DIR, "tarantula_results.json")
     if not os.path.exists(tarantula_results_file):
@@ -490,7 +583,7 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
         fl_results = json.load(f)
 
     ds_lc = (dataset or "").lower()
-    if ds_lc in ("defects4c", "defects4c-tcpdump", "tcpdump"):
+    if phase in ("all", "validate") and ds_lc in ("defects4c", "defects4c-tcpdump", "tcpdump"):
         ok_d, info_d = defects4c_docker_ready()
         if not ok_d:
             print(f"[APR] {info_d}")
@@ -513,7 +606,7 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
         except Exception:
             pass
 
-    print("[APR] Đang chạy Automated Program Repair (LLM)...")
+    print(f"[APR] Đang chạy Automated Program Repair (mode={phase})...")
 
     for bug_id, result_data in fl_results.items():
         if bug_id in apr_results and apr_results[bug_id].get("status") != "skipped":
@@ -567,39 +660,34 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
         # Logic tách theo dataset — tránh áp sai hàm codeflaws cho defects4c.
         _copy_accepted_patch(dataset, bug_id, bug_source_path, bug_record)
 
-        for qualified_name, score in top_funcs:
-            if score == 0.0:
-                continue
+        generated_candidates = []
+        if phase in ("all", "generate"):
+            for idx, (qualified_name, score) in enumerate(top_funcs, start=1):
+                if score == 0.0:
+                    continue
 
-            file_hint, func_name = parse_sbfl_qualified_name(qualified_name)
-            if not func_name:
-                continue
+                file_hint, func_name = parse_sbfl_qualified_name(qualified_name)
+                if not func_name:
+                    continue
+                candidate_path = resolve_fl_candidate_source_path(dataset, bug_source_path, file_hint or "", raw_meta)
+                if not os.path.isfile(candidate_path):
+                    print(f"  - [Skip] Không tìm thấy file nguồn cho '{qualified_name}': {candidate_path}")
+                    continue
+                if candidate_path not in source_cache:
+                    with open(candidate_path, "r") as f:
+                        source_cache[candidate_path] = f.read()
+                source_code = source_cache[candidate_path]
+                cand_base = os.path.basename(candidate_path)
+                print(f"  - Kiểm tra hàm '{func_name}' trong {cand_base} (Score: {score:.4f})")
+                func_code, start_idx, end_idx = extract_function_code(source_code, func_name)
+                if not func_code:
+                    print(f"    WARNING: Không thể trích xuất hàm {func_name}")
+                    continue
 
-            candidate_path = resolve_fl_candidate_source_path(
-                dataset, bug_source_path, file_hint or "", raw_meta
-            )
-            if not os.path.isfile(candidate_path):
-                print(
-                    f"  - [Skip] Không tìm thấy file nguồn cho '{qualified_name}': {candidate_path}"
-                )
-                continue
-            if candidate_path not in source_cache:
-                with open(candidate_path, "r") as f:
-                    source_cache[candidate_path] = f.read()
-            source_code = source_cache[candidate_path]
-            cand_base = os.path.basename(candidate_path)
-
-            print(f"  - Kiểm tra hàm '{func_name}' trong {cand_base} (Score: {score:.4f})")
-            func_code, start_idx, end_idx = extract_function_code(source_code, func_name)
-            if not func_code:
-                print(f"    WARNING: Không thể trích xuất hàm {func_name}")
-                continue
-
-            target_func = qualified_name
-            attempted = True
-
-            prompt_source = _trim_source_for_prompt(source_code, start_idx, end_idx)
-            prompt = f"""You are an expert in fixing C/C++ bugs.
+                target_func = qualified_name
+                attempted = True
+                prompt_source = _trim_source_for_prompt(source_code, start_idx, end_idx)
+                prompt = f"""You are an expert in fixing C/C++ bugs.
 Your task is to fix an algorithmic or compilation bug in function `{func_name}` from the code below (Bug ID: {bug_id}).
 
 {failed_tests_context}
@@ -622,45 +710,88 @@ Your task is to fix an algorithmic or compilation bug in function `{func_name}` 
 ```c
 // Start rewriting function {func_name} here:
 """
+                raw_patch = call_llm(prompt, provider=llm_provider, model_path=llm_model_path)
+                if not raw_patch:
+                    print("    [ERROR] LLM trả về None. Bỏ qua hàm này.")
+                    continue
+                llm_attempted = True
+                patched_func_gen = _clean_llm_patch(raw_patch)
+                patched_source_gen = source_code[:start_idx] + patched_func_gen + source_code[end_idx:]
+                bug_dir, _ = _artifact_paths(artifacts_dir, bug_id)
+                os.makedirs(bug_dir, exist_ok=True)
+                safe_cand = cand_base.replace("/", "_").replace(" ", "_")
+                artifact_path = os.path.join(bug_dir, f"rank{idx}__{safe_cand}.c")
+                with open(artifact_path, "w") as f:
+                    f.write(patched_source_gen)
+                generated_candidates.append({
+                    "rank": idx,
+                    "score": score,
+                    "selected_function": qualified_name,
+                    "repair_target_file": candidate_path,
+                    "target_basename": cand_base,
+                    "patched_function": patched_func_gen,
+                    "patched_file_path": artifact_path,
+                })
+            _write_bug_candidates(artifacts_dir, bug_id, {"bug_id": bug_id, "dataset": dataset, "candidates": generated_candidates})
 
-            raw_patch = call_llm(prompt, provider=llm_provider)
-            if not raw_patch:
-                print("    [ERROR] LLM trả về None. Bỏ qua hàm này.")
+        if phase == "generate":
+            status = "generated" if generated_candidates else ("llm_failed" if attempted else "skipped")
+            apr_results[bug_id] = {
+                "status":             status,
+                "patched_function":   None,
+                "patched_file":       None,
+                "repair_target_file": None,
+                "selected_function":  target_func,
+                "init_passed_count":  len(init_passed_all),
+                "init_failed_count":  len(init_failed_all),
+                "init_passed_tests":  init_passed,
+                "init_failed_tests":  init_failed,
+                "post_passed_count":  0,
+                "post_failed_count":  0,
+                "post_passed_tests":  [],
+                "post_failed_tests":  [],
+            }
+            with open(apr_results_file, "w") as f:
+                json.dump(apr_results, f, indent=4)
+            continue
+
+        candidates_to_validate = generated_candidates
+        if phase == "validate":
+            art = _read_bug_candidates(artifacts_dir, bug_id)
+            candidates_to_validate = (art or {}).get("candidates", [])
+            if not candidates_to_validate:
+                print(f"  - [Skip] Không có artifact candidates cho {bug_id}")
+
+        for cand in candidates_to_validate:
+            qualified_name = cand.get("selected_function")
+            cand_base = cand.get("target_basename") or os.path.basename(cand.get("repair_target_file", "patched.c"))
+            patch_file = cand.get("patched_file_path")
+            if not patch_file or not os.path.isfile(patch_file):
                 continue
-
+            try:
+                with open(patch_file, "r") as f:
+                    patched_source = f.read()
+            except Exception:
+                continue
+            patched_func = cand.get("patched_function")
+            repair_target_file = cand.get("repair_target_file")
+            target_func = qualified_name
+            attempted = True
             llm_attempted = True
-            patched_func   = _clean_llm_patch(raw_patch)
-            patched_source = source_code[:start_idx] + patched_func + source_code[end_idx:]
-            repair_target_file = candidate_path
-
-            safe_cand = cand_base.replace("/", "_").replace(" ", "_")
-            tmp_path = os.path.join(EXPERIMENTS_DIR, f"tmp_{bug_id.replace('@', '__')}__{safe_cand}")
-            with open(tmp_path, "w") as f:
-                f.write(patched_source)
-
-            # Truyền src_basename để Defects4CAdapter biết patch này nhằm file nào
-            # (khi FL chỉ ra lỗi ở file phụ khác với file bug chính).
-            is_valid, post_passed, post_failed = validate_patch(
-                tmp_path, bug_id, dataset, src_basename=cand_base,
-            )
-
+            is_valid, post_passed, post_failed = validate_patch(patch_file, bug_id, dataset, src_basename=cand_base)
             if is_valid:
-                print(f"    [SUCCESS] Bản vá hợp lệ cho {bug_id} trong hàm '{func_name}'!")
+                safe_cand = cand_base.replace("/", "_").replace(" ", "_")
                 patch_name = f"{bug_id}_patch.c" if cand_base == primary_base else f"{bug_id}_patch__{safe_cand}"
                 patch_path = os.path.join(PATCHES_DIR, patch_name)
                 os.makedirs(PATCHES_DIR, exist_ok=True)
                 try:
-                    shutil.move(tmp_path, patch_path)  # dùng move thay rename để an toàn cross-device
+                    shutil.copy2(patch_file, patch_path)
                 except Exception as e_mv:
                     print(f"    [WARN] Không lưu được patch file: {e_mv}")
-                    if os.path.exists(tmp_path):
-                        os.remove(tmp_path)
                 status = "success"
                 break
             else:
-                print(f"    [FAIL] Bản vá không vượt qua kiểm tra.")
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
+                status = "failed"
 
         if attempted and status == "skipped":
             # Phân biệt: LLM không bao giờ sinh được patch vs. patch sinh ra nhưng fail test

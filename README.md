@@ -61,9 +61,7 @@ get_loader(dataset)
       │
       ├──► FL (Tarantula) ──────────────────────► tarantula_results.json
       │
-      └──► APR ─┬─► LLM (Gemini)       ──────► apr_results.json
-                ├─► Heuristic Mutation  ──────► apr_mutation_results.json
-                └─► GenProg             ──────► apr_genprog_results.json
+      └──► APR ─┬─► LLM                   ──────► apr_results.json
                          │
                          ▼
                 Sandbox Adapter (compile + test)
@@ -75,8 +73,6 @@ get_loader(dataset)
                    Evaluation Report
                    (Fix Rate, Regression, ED func + file)
 ```
-
-> **Điểm quan trọng:** FL và APR đều dùng **một lần load dữ liệu duy nhất** thông qua `get_loader()` → trả về `List[BugRecord]`. Không module nào đọc lại file JSON gốc sau bước này.
 
 ---
 
@@ -102,10 +98,6 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# Mở .env, điền các biến sau:
-#   GEMINI_API_KEY=...         – Gemini API Key (cho LLM baseline)
-#   GENPROG_BIN=...            – Đường dẫn tới binary GenProg (cho apr_genprog)
-#   GENPROG_TIMEOUT=3600       – Timeout (giây) mỗi lần chạy GenProg
 ```
 
 ---
@@ -201,102 +193,3 @@ if dataset_name.lower() == "defects4c":
 | **Edit Distance (file-level)**    | Levenshtein: `patched_file` (toàn bộ file) vs accepted file   |
 
 ---
-
-## Giới hạn & Hướng phát triển
-
-| Vấn đề | Hướng giải quyết |
-|---|---|
-| Trích xuất hàm C bằng Regex dễ sai với macro/comment chứa `{}` | Dùng `pycparser`, Clang AST hoặc `tree-sitter` |
-| Context window LLM bị giới hạn với file C lớn | Nén prompt, chỉ truyền hàm liên quan thay vì toàn bộ file |
-| `google-generativeai` đã deprecated | Chuyển sang `google.genai` (SDK mới) |
-| Edit Distance file-level tốn bộ nhớ với file lớn | Dùng diff-based distance hoặc AST-level comparison |
-
----
-
-## Cài đặt GenProg (tool APR)
-
-> **macOS (khuyến nghị):** Dùng Docker wrapper — chạy lệnh Python bình thường trên macOS, không cần vào container.
-
-### Cách 1: Docker Wrapper (macOS, không cần vào container)
-
-GenProg binary là Linux x86-64 nên không chạy native trên macOS. Pipeline đã có sẵn wrapper script `scripts/genprog-docker.sh` tự động gọi Docker trong suốt — bạn chỉ cần Docker Desktop đang chạy.
-
-**Bước 1: Pull image (một lần duy nhất)**
-```bash
-docker pull squareslab/genprog
-```
-
-**Bước 2: Set `GENPROG_BIN` trong `.env` trỏ đến wrapper script**
-```bash
-# Trong file Unified-Debugging/.env:
-GENPROG_BIN=/Users/linhnh/Documents/Fault Localization/Unified-Debugging/scripts/genprog-docker.sh
-```
-
-**Bước 3: Chạy pipeline bình thường từ macOS terminal**
-```bash
-cd "Unified-Debugging"
-source .venv/bin/activate
-python3 main.py --apr-genprog --dataset codeflaws
-```
-
-Wrapper script sẽ tự động mount đúng thư mục làm việc và gọi binary GenProg bên trong container, hoàn toàn trong suốt với `main.py`.
-
----
-
-### Cách 2: Chạy trực tiếp trong container (không dùng wrapper)
-
-Nếu muốn debug hoặc thử nghiệm thủ công trong container:
-
-```bash
-# Pull image
-docker pull squareslab/genprog
-
-# Vào container, mount workspace
-docker run -it \
-  -v "/Users/linhnh/Documents/Fault Localization:/workspace" \
-  squareslab/genprog \
-  /bin/bash
-```
-
-Trong container, cài Python environment và chạy pipeline:
-```bash
-cd /workspace/Unified-Debugging
-apt-get install -y python3-venv python3-pip
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python3 main.py --apr-genprog --dataset codeflaws
-```
-
-Set trong `.env` (khi chạy trong container):
-```bash
-GENPROG_BIN=/opt/genprog/bin/genprog
-```
-
-### Cách 3: Build từ source (Linux/macOS với Rosetta)
-
-```bash
-# 1. Cài OCaml + opam
-brew install opam ocaml
-opam init -y
-eval $(opam env)
-
-# 2. Cài CIL (C Intermediate Language) - GenProg phụ thuộc vào nó
-opam install cil
-
-# 3. Clone GenProg source v3.0
-cd ~/
-git clone https://github.com/squaresLab/genprog-code.git
-cd genprog-code/src
-
-# 4. Build
-make
-
-# 5. Kiểm tra binary
-./repair --help
-```
-
-Set trong `.env`:
-```bash
-GENPROG_BIN=/Users/linhnh/genprog-code/src/repair
-```

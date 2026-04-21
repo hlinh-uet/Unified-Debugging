@@ -43,6 +43,5 @@ program
 .idea/
 
 # Local data / patches
-experiments/*
 results/
 test-api.py

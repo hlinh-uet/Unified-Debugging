@@ -60,9 +60,25 @@ def main():
     parser.add_argument(
         "--llm",
         default=None,
-        choices=["gemini", "openai", "claude", "qwen"],
+        choices=["gemini", "openai", "claude", "qwen", "kaggle_local"],
         help="LLM provider cho APR: 'gemini' (mặc định) hoặc 'openai' (gpt-4o-mini). "
              "Override biến môi trường LLM_PROVIDER.",
+    )
+    parser.add_argument(
+        "--llm-model-path",
+        default=None,
+        help="Đường dẫn model local (vd /kaggle/input/...) khi dùng --llm kaggle_local.",
+    )
+    parser.add_argument(
+        "--apr-phase",
+        default="all",
+        choices=["all", "generate", "validate"],
+        help="Tách APR thành 2 phase: generate (sinh patch), validate (chấm patch), hoặc all.",
+    )
+    parser.add_argument(
+        "--apr-artifacts-dir",
+        default=None,
+        help="Thư mục lưu/đọc artifacts patch khi tách phase APR.",
     )
     args = parser.parse_args()
 
@@ -76,7 +92,7 @@ def main():
     if run_all:
         print(f"[Pipeline] Chạy toàn bộ quy trình trên dataset '{dataset}' (FL → APR LLM → Evaluation)...")
         run_fl(dataset)
-        run_apr_pipeline(dataset, llm_provider=llm_provider)
+        run_apr_pipeline(dataset, llm_provider=llm_provider, phase=args.apr_phase, artifacts_dir=args.apr_artifacts_dir, llm_model_path=args.llm_model_path)
         evaluate_fl()
         evaluate_apr(dataset)
     else:
@@ -87,7 +103,7 @@ def main():
 
         if args.apr:
             print(f"[Pipeline] Chạy APR (LLM: {llm_provider or 'default'}) trên dataset '{dataset}'...")
-            run_apr_pipeline(dataset, llm_provider=llm_provider)
+            run_apr_pipeline(dataset, llm_provider=llm_provider, phase=args.apr_phase, artifacts_dir=args.apr_artifacts_dir, llm_model_path=args.llm_model_path)
             evaluate_apr(dataset)
 
         if args.apr_mutation:
