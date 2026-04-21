@@ -100,6 +100,8 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
+> Nếu chạy chế độ `--llm kaggle_local` (model local trong `/kaggle/input/...`) thì **không cần** `.env`.
+
 ---
 
 ## Sử dụng
@@ -119,10 +121,10 @@ python3 main.py --all --dataset codeflaws
 # Bước 1 – Fault Localization
 python3 main.py --fl --dataset codeflaws
 
-# Bước 2a – APR bằng LLM (cần GEMINI_API_KEY)
-python3 main.py --apr --dataset defects4c --llm gemini      # dùng gemini-2.5-flash
-python3 main.py --apr --dataset defects4c --llm openai # dùng gpt-4o-mini
-python main.py --apr # dùng LLM_PROVIDER trong .env
+# Bước 2a – APR bằng LLM
+python3 main.py --apr --dataset defects4c --llm gemini      # dùng gemini-2.5-flash (API)
+python3 main.py --apr --dataset defects4c --llm openai      # dùng gpt-4o-mini (API)
+python3 main.py --apr                                        # dùng LLM_PROVIDER trong .env
 
 
 # Bước 2b – APR bằng Heuristic Mutation 
@@ -135,17 +137,45 @@ python3 main.py --apr-genprog --dataset codeflaws
 python3 main.py --eval
 ```
 
+### APR tách 2 phase (online generate / local validate)
+
+```bash
+# Phase 1: chỉ sinh patch candidates và lưu artifact (không validate)
+python3 main.py --apr --dataset defects4c --apr-phase generate --llm openai
+
+# Phase 1 trên Kaggle: dùng model local, không gọi API
+python3 main.py --apr --dataset defects4c --apr-phase generate \
+  --llm kaggle_local \
+  --llm-model-path "/kaggle/input/<your-model-dir>"
+
+# Phase 2: chỉ validate local qua Docker từ artifacts đã có
+python3 main.py --apr --dataset defects4c --apr-phase validate \
+  --apr-artifacts-dir "/path/to/apr_generated"
+
+# Mode cũ (generate + validate trong 1 lần chạy)
+python3 main.py --apr --dataset defects4c --apr-phase all --llm openai
+```
+
+Artifacts mặc định của phase generate:
+
+- `experiments/apr_generated/<bug_id>/candidates.json`
+- `experiments/apr_generated/<bug_id>/rankN__<target>.c`
+
 ### Tham số dòng lệnh
 
 | Tham số         | Mô tả                                              |
 |-----------------|----------------------------------------------------|
 | `--dataset`     | Tên dataset: `codeflaws` (mặc định), `defects4c`, ... |
 | `--fl`          | Chỉ chạy Fault Localization                        |
-| `--apr`         | Chỉ chạy APR với LLM (Gemini)                      |
+| `--apr`         | Chỉ chạy APR với LLM                               |
 | `--apr-mutation`| Chỉ chạy APR với Heuristic Mutation                |
 | `--apr-genprog` | Chỉ chạy APR với GenProg                           |
 | `--eval`        | Chỉ chạy Evaluation (FL + APR)                     |
 | `--all`         | Chạy FL → APR LLM → APR Mutation → Evaluation     |
+| `--llm`         | Provider LLM: `gemini`, `openai`, `claude`, `qwen`, `kaggle_local` |
+| `--llm-model-path` | Đường dẫn model local khi dùng `--llm kaggle_local` |
+| `--apr-phase`   | APR mode: `all`, `generate`, `validate`            |
+| `--apr-artifacts-dir` | Thư mục lưu/đọc artifacts patch khi tách phase |
 
 ---
 
