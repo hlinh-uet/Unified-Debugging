@@ -152,9 +152,10 @@ def resolve_fl_candidate_source_path(
     """
     Map FL key (file phần) sang đường dẫn .c thật để đọc/vá.
 
-    - Defects4C: ưu tiên ``source_dir_buggy`` trong metadata + basename(file_hint).
+    - Defects4C: ưu tiên metadata ``src_files``/``source_relpath``; nếu FL trỏ
+      sang file khác thì chỉ nhận khi file hint resolve được duy nhất trong repo.
     - Codeflaws: nếu file_hint là đường dẫn tuyệt đối tồn tại thì dùng luôn.
-    - Fallback: cùng thư mục với file bug chính.
+    - Codeflaws fallback: cùng thư mục với file bug chính.
     """
     if not file_hint or not bug_source_path:
         return bug_source_path
@@ -170,14 +171,20 @@ def resolve_fl_candidate_source_path(
         or "metadata_slug" in raw_meta
     ))
     if defects4c_like:
-        cached = _resolve_defects4c_cached_source(bug_source_path, base, raw_meta)
+        relpath = _resolve_defects4c_relpath_from_meta(fh, raw_meta)
+        if not relpath:
+            relpath = _resolve_defects4c_relpath_from_repo(fh, raw_meta)
+        if not relpath:
+            return ""
+        cached = _resolve_defects4c_cached_source(bug_source_path, relpath, raw_meta)
         if cached:
             return cached
         src_dir = raw_meta.get("source_dir_buggy") or ""
         if src_dir:
-            cand = os.path.join(src_dir, base)
+            cand = os.path.join(src_dir, relpath)
             if os.path.isfile(cand):
                 return cand
+        return ""
     parent = os.path.dirname(bug_source_path)
     cand = os.path.join(parent, base)
     if os.path.isfile(cand):
@@ -185,16 +192,68 @@ def resolve_fl_candidate_source_path(
     return bug_source_path
 
 
+def _resolve_defects4c_relpath_from_meta(file_hint: str, raw_meta: Dict[str, Any]) -> str:
+    """Resolve a Defects4C FL file hint to exactly one source relpath."""
+    if not file_hint or not isinstance(raw_meta, dict):
+        return ""
+    normalized_hint = file_hint.strip().replace("\\", "/")
+    hint_base = os.path.basename(normalized_hint)
+    src_files = raw_meta.get("src_files")
+    if not isinstance(src_files, list) or not src_files:
+        files = raw_meta.get("files", {})
+        if isinstance(files, dict):
+            src_files = files.get("src", [])
+    if not isinstance(src_files, list) or not src_files:
+        rel = raw_meta.get("source_relpath")
+        src_files = [rel] if rel else []
+
+    candidates = []
+    for rel in src_files:
+        if not isinstance(rel, str):
+            continue
+        rel_norm = rel.strip().replace("\\", "/")
+        if not rel_norm:
+            continue
+        if rel_norm == normalized_hint or os.path.basename(rel_norm) == hint_base:
+            candidates.append(rel_norm)
+    candidates = list(dict.fromkeys(candidates))
+    return candidates[0] if len(candidates) == 1 else ""
+
+
+def _resolve_defects4c_relpath_from_repo(file_hint: str, raw_meta: Dict[str, Any]) -> str:
+    """Resolve a non-ground-truth Defects4C FL file hint without fallback."""
+    if not file_hint or not isinstance(raw_meta, dict):
+        return ""
+    repo_dir = raw_meta.get("source_repo_dir") or ""
+    if not repo_dir or not os.path.isdir(repo_dir):
+        return ""
+
+    normalized_hint = file_hint.strip().replace("\\", "/")
+    if os.path.isabs(normalized_hint) or ".." in normalized_hint.split("/"):
+        return ""
+
+    direct = os.path.join(repo_dir, normalized_hint)
+    if "/" in normalized_hint and os.path.isfile(direct):
+        return normalized_hint
+
+    return _find_unique_relpath_by_basename(repo_dir, os.path.basename(normalized_hint))
+
+
 def _resolve_defects4c_cached_source(
     bug_source_path: str,
-    basename: str,
+    relpath: str,
     raw_meta: Dict[str, Any],
 ) -> str:
     """Return a cached buggy source file for a Defects4C FL file hint."""
-    if not basename:
+    if not relpath:
         return ""
 
-    if os.path.basename(bug_source_path) == basename and os.path.isfile(bug_source_path):
+    relpath = relpath.strip().replace("\\", "/")
+    if (
+        raw_meta.get("source_relpath") == relpath
+        and os.path.basename(bug_source_path) == os.path.basename(relpath)
+        and os.path.isfile(bug_source_path)
+    ):
         return bug_source_path
 
     repo_dir = raw_meta.get("source_repo_dir") or ""
@@ -203,8 +262,7 @@ def _resolve_defects4c_cached_source(
     if not repo_dir or not commit_before or not os.path.isdir(repo_dir):
         return ""
 
-    relpath = _find_unique_relpath_by_basename(repo_dir, basename)
-    if not relpath:
+    if os.path.isabs(relpath) or ".." in relpath.split("/"):
         return ""
 
     os.makedirs(cache_dir, exist_ok=True)
@@ -249,9 +307,7 @@ def _find_unique_relpath_by_basename(repo_dir: str, basename: str) -> str:
             matches.append(rel)
     if not matches:
         return ""
-    # Prefer top-level source files when there are generated/build duplicates.
-    matches.sort(key=lambda p: (p.count("/"), p))
-    return matches[0]
+    return matches[0] if len(matches) == 1 else ""
 
 
 def extract_function_code(

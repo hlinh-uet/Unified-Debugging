@@ -244,6 +244,8 @@ class Defects4CAdapter(SandboxAdapter):
         commit_before = bug_meta.get("commit_before")
         if not commit_before:
             return False, [], ["missing_commit_before"]
+        if not sha:
+            return False, [], ["missing_commit_after"]
 
         test_ids = self._collect_defects4c_test_ids(project, sha, bug_meta)
         related_ids, related_source = self._related_test_ids_from_bug_meta(bug_meta)
@@ -270,6 +272,7 @@ class Defects4CAdapter(SandboxAdapter):
             src_basename=src_basename,
             bug_meta=bug_meta,
             project=project,
+            commit_after=sha,
             commit_before=commit_before,
             test_ids=test_ids,
             related_source=related_source,
@@ -283,6 +286,7 @@ class Defects4CAdapter(SandboxAdapter):
         src_basename: str,
         bug_meta: dict,
         project: str,
+        commit_after: str,
         commit_before: str,
         test_ids: list,
         related_source: str,
@@ -300,10 +304,18 @@ class Defects4CAdapter(SandboxAdapter):
         if not container:
             return False, [], ["container_not_running"]
 
-        if not self._prepare_generic_workspace(container, container_repo, commit_before, clean=False):
+        src_files = self._phase_a_src_files(bug_meta)
+        if not self._prepare_generic_workspace(
+            container=container,
+            container_repo=container_repo,
+            commit_after=commit_after,
+            commit_before=commit_before,
+            src_files=src_files,
+            clean=True,
+        ):
             return False, [], ["phase_a_prepare_failed"]
 
-        target_src = self._resolve_source_path_in_repo(host_repo, src_basename)
+        target_src = self._resolve_source_path_in_repo(host_repo, src_basename, src_files)
         if not target_src:
             self._reset_generic_workspace(container, container_repo)
             return False, [], [f"source_not_found:{src_basename}"]
@@ -335,6 +347,9 @@ class Defects4CAdapter(SandboxAdapter):
                 "full_post_passed_tests": [],
                 "full_post_failed_tests": ["metadata_suite_failed"],
                 "phase_a_suite_ok": False,
+                "phase_a_base_commit": commit_after,
+                "phase_a_buggy_overlay_commit": commit_before,
+                "phase_a_buggy_overlay_files": list(src_files),
             }
             return False, [], ["metadata_suite_failed"]
 
@@ -361,6 +376,9 @@ class Defects4CAdapter(SandboxAdapter):
             "full_post_passed_tests": list(full_passed),
             "full_post_failed_tests": list(full_failed),
             "phase_a_suite_ok": suite_ok,
+            "phase_a_base_commit": commit_after,
+            "phase_a_buggy_overlay_commit": commit_before,
+            "phase_a_buggy_overlay_files": list(src_files),
         }
         print(
             f"    [Defects4C:{bug_meta.get('data_folder', 'metadata')}] full_scope_tests={len(test_ids)} "
@@ -373,7 +391,14 @@ class Defects4CAdapter(SandboxAdapter):
             return True, list(full_passed), []
         return False, list(full_passed), filtered_failed
 
-    def _resolve_source_path_in_repo(self, host_repo: str, src_basename: str) -> Optional[str]:
+    def _resolve_source_path_in_repo(self, host_repo: str, src_basename: str, src_files: Optional[list] = None) -> Optional[str]:
+        for rel in src_files or []:
+            if os.path.basename(rel) != src_basename:
+                continue
+            exact = os.path.join(host_repo, rel)
+            if os.path.isfile(exact):
+                return exact
+
         direct = os.path.join(host_repo, src_basename)
         if os.path.isfile(direct):
             return direct
@@ -409,15 +434,48 @@ class Defects4CAdapter(SandboxAdapter):
                 return name
         return ""
 
-    def _prepare_generic_workspace(self, container: str, container_repo: str, commit_before: str, clean: bool) -> bool:
-        clean_cmd = " && git clean -ffdx" if clean else ""
+    def _phase_a_src_files(self, bug_meta: dict) -> list:
+        values = bug_meta.get("src_files")
+        if not isinstance(values, list) or not values:
+            files = bug_meta.get("files", {})
+            if isinstance(files, dict):
+                values = files.get("src", [])
+        if not isinstance(values, list) or not values:
+            rel = bug_meta.get("source_relpath")
+            values = [rel] if rel else []
+
+        out = []
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            cleaned = value.strip().replace("\\", "/")
+            if cleaned and not cleaned.startswith("/") and ".." not in cleaned.split("/"):
+                out.append(cleaned)
+        return list(dict.fromkeys(out))
+
+    def _prepare_generic_workspace(
+        self,
+        container: str,
+        container_repo: str,
+        commit_after: str,
+        commit_before: str,
+        src_files: list,
+        clean: bool,
+    ) -> bool:
+        clean_cmd = "git -C \"$repo\" clean -ffdx && " if clean else ""
+        overlay_cmd = ""
+        if src_files:
+            src_args = " ".join(shlex.quote(path) for path in src_files)
+            overlay_cmd = f" && git -C \"$repo\" checkout --force \"$before\" -- {src_args}"
         cmd = (
             f"repo={shlex.quote(container_repo)}; "
+            f"after={shlex.quote(commit_after)}; "
             f"before={shlex.quote(commit_before)}; "
             "if [ ! -d \"$repo/.git\" ]; then exit 2; fi; "
-            "git -C \"$repo\" reset --hard"
-            f"{clean_cmd} && "
-            "git -C \"$repo\" checkout -f \"$before\""
+            "git -C \"$repo\" reset --hard && "
+            f"{clean_cmd}"
+            "git -C \"$repo\" checkout -f \"$after\""
+            f"{overlay_cmd}"
         )
         result = subprocess.run(
             ["docker", "exec", container, "bash", "-lc", cmd],

@@ -409,13 +409,16 @@ def _compact_validation_details(details: dict) -> dict:
 
 
 def _copy_accepted_patch(dataset: str, bug_id: str, bug_source_path: str,
-                        bug_record: BugRecord) -> None:
+                        bug_record: BugRecord) -> str:
     """
     Sao lưu accepted/ground-truth patch để evaluation so sánh về sau.
 
     - Codeflaws: đường dẫn được tính từ ``bug_id`` (``<prefix>-<accepted>.c``).
-    - Defects4C: dùng ``bug_record.raw['accepted_file']`` (metadata chuẩn),
-      fallback sang ``source_dir_fixed`` + basename source.
+    - Defects4C: chỉ dùng ``bug_record.raw['accepted_file']`` do loader sinh
+      từ đúng ``commit_after``. Không fallback sang thư mục khác.
+
+    Returns:
+        Chuỗi rỗng nếu thành công, hoặc mã lỗi rõ ràng nếu không copy được.
     """
     out_dir = os.path.join(EXPERIMENTS_DIR, "correct_patches")
     ds = (dataset or "").lower()
@@ -425,25 +428,26 @@ def _copy_accepted_patch(dataset: str, bug_id: str, bug_source_path: str,
         accepted_cfile = get_codeflaws_accepted_cfile(bug_id)
         if accepted_cfile:
             accepted_src = os.path.join(os.path.dirname(bug_source_path), accepted_cfile)
+        else:
+            return "accepted_name_missing"
 
     elif _is_defects4c_dataset(ds):
         raw = bug_record.raw if bug_record else None
-        if raw:
-            cand = raw.get("accepted_file")
-            if cand and os.path.exists(cand):
-                accepted_src = cand
-            else:
-                fixed_dir = raw.get("source_dir_fixed") or ""
-                if fixed_dir:
-                    cand = os.path.join(fixed_dir, os.path.basename(bug_source_path))
-                    if os.path.exists(cand):
-                        accepted_src = cand
+        if not raw:
+            return "bug_record_missing"
+        accepted_src = raw.get("accepted_file")
+    else:
+        return f"unsupported_dataset:{dataset}"
 
     if not accepted_src or not os.path.exists(accepted_src):
-        return
+        return f"accepted_file_not_found:{accepted_src or '<empty>'}"
     os.makedirs(out_dir, exist_ok=True)
     safe_id = bug_id.replace("@", "__").replace("/", "__")
-    shutil.copy2(accepted_src, os.path.join(out_dir, f"{safe_id}_accepted.c"))
+    try:
+        shutil.copy2(accepted_src, os.path.join(out_dir, f"{safe_id}_accepted.c"))
+    except Exception as exc:
+        return f"accepted_copy_failed:{exc}"
+    return ""
 
 
 def _build_failed_test_context(bug: BugRecord) -> str:
@@ -582,7 +586,9 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
 
         # Sao lưu accepted patch một lần (cho evaluation sau này).
         # Logic tách theo dataset — tránh áp sai hàm codeflaws cho defects4c.
-        _copy_accepted_patch(dataset, bug_id, bug_source_path, bug_record)
+        accepted_patch_error = _copy_accepted_patch(dataset, bug_id, bug_source_path, bug_record)
+        if accepted_patch_error:
+            print(f"    [ERROR] Không copy được accepted patch: {accepted_patch_error}")
 
         for qualified_name, score in top_funcs:
             if score == 0.0:
@@ -722,6 +728,7 @@ Your task is to fix an algorithmic or compilation bug in function `{func_name}` 
             "full_post_passed_tests": _compact_test_list(full_post_passed),
             "full_post_failed_tests": _compact_test_list(full_post_failed),
             "validation_mode":    validation_mode,
+            "accepted_patch_error": accepted_patch_error,
             "related_test_ids":   _compact_test_list(validation_details.get("related_test_ids", [])),
             "dropped_unrelated_failed_tests": _compact_test_list(validation_details.get("dropped_unrelated_failed_tests", [])),
             "baseline_unrelated_failed_tests": _compact_test_list(validation_details.get("baseline_unrelated_failed_tests", [])),

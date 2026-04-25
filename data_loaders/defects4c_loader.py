@@ -30,6 +30,7 @@ class Defects4CLoader(BugLoader):
         self.data_folder = self._resolve_data_folder(requested)
         self.cache_dir = os.path.join(DEFECTS4C_CACHE_DIR, self.data_folder or "all")
         self._records: Optional[List[BugRecord]] = None
+        self._bug_info_cache: Dict[str, List[dict]] = {}
 
     def load_all(self) -> List[BugRecord]:
         if self._records is not None:
@@ -112,6 +113,10 @@ class Defects4CLoader(BugLoader):
             return None
 
         metadata_stem = os.path.basename(path).replace("_meta.json", "")
+        bug_info = self._match_bug_info(data_folder, raw, metadata_stem)
+        bug_files = bug_info.get("files", {}) if isinstance(bug_info.get("files"), dict) else {}
+        src_files = _normalize_path_list(bug_files.get("src", []))
+        test_files = _normalize_path_list(bug_files.get("test", []))
         raw_source_file = raw.get("source_file", "")
         host_source_file = _container_to_host_path(raw_source_file)
         repo_dir = _find_git_root(host_source_file)
@@ -150,6 +155,9 @@ class Defects4CLoader(BugLoader):
             "original_source_file": raw_source_file,
             "host_source_file": host_source_file,
             "container_repo_dir": _container_repo_dir(raw_source_file, repo_dir),
+            "defects4c_bug_info": bug_info,
+            "src_files": src_files or ([source_relpath] if source_relpath else []),
+            "test_files": test_files,
         }
 
         return BugRecord(
@@ -162,6 +170,56 @@ class Defects4CLoader(BugLoader):
             test_cmd_template=raw.get("test_cmd_template"),
             raw=enriched_raw,
         )
+
+    def _match_bug_info(self, data_folder: str, raw: dict, metadata_stem: str) -> dict:
+        candidates = self._load_bug_infos(data_folder)
+        if not candidates:
+            return {}
+
+        commit_after = str(raw.get("commit_after") or "").strip()
+        commit_before = str(raw.get("commit_before") or "").strip()
+        bug_id = str(raw.get("bug_id") or metadata_stem).strip()
+
+        def type_id(item: dict) -> str:
+            bug_type = item.get("type", {})
+            return str(bug_type.get("id") or bug_type.get("name") or "").strip() if isinstance(bug_type, dict) else ""
+
+        exact = [
+            item for item in candidates
+            if commit_after and item.get("commit_after") == commit_after
+            and (not commit_before or item.get("commit_before") == commit_before)
+            and (not bug_id or type_id(item) in ("", bug_id) or bug_id.startswith(type_id(item)))
+        ]
+        if exact:
+            return exact[0]
+
+        by_after = [item for item in candidates if commit_after and item.get("commit_after") == commit_after]
+        if len(by_after) == 1:
+            return by_after[0]
+
+        by_type = [item for item in candidates if bug_id and type_id(item) == bug_id]
+        if len(by_type) == 1:
+            return by_type[0]
+        return {}
+
+    def _load_bug_infos(self, data_folder: str) -> List[dict]:
+        if data_folder in self._bug_info_cache:
+            return self._bug_info_cache[data_folder]
+
+        path = os.path.join(DEFECTS4C_UNIFIED_DIR, data_folder, "metadata", "bugs_list_new.json")
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            data = []
+        except Exception as exc:
+            print(f"[Defects4CLoader] Lỗi đọc bugs_list_new.json cho {data_folder}: {exc}")
+            data = []
+
+        if not isinstance(data, list):
+            data = []
+        self._bug_info_cache[data_folder] = [x for x in data if isinstance(x, dict)]
+        return self._bug_info_cache[data_folder]
 
     def _ensure_source_cache(
         self,
@@ -259,6 +317,19 @@ def _normalize_ground_truth(raw: dict, source_basename: str) -> List[str]:
             if isinstance(fn, str) and fn:
                 out.append(f"{source_basename}:{fn}")
     return sorted(set(out))
+
+
+def _normalize_path_list(values) -> List[str]:
+    if not isinstance(values, list):
+        return []
+    out = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        cleaned = value.strip().replace("\\", "/")
+        if cleaned:
+            out.append(cleaned)
+    return sorted(dict.fromkeys(out))
 
 
 def _normalize_coverage_key(value: str) -> str:
