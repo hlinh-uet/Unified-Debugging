@@ -1,12 +1,13 @@
 """
 core/utils.py
 -------------
-Tiện ích dùng chung cho toàn bộ pipeline (FL, APR, Mutation).
+Tiện ích dùng chung cho toàn bộ pipeline (FL, APR).
 Tránh duplicate code giữa các module.
 """
 
 import os
 import re
+import subprocess
 from typing import Any, Dict, Optional, Tuple
 
 
@@ -124,7 +125,7 @@ def parse_sbfl_qualified_name(qualified: str) -> Tuple[str, str]:
     Tách khóa suspiciousness (FL) thành (file_hint, func_name).
 
     - Codeflaws / chuẩn cũ: ``/path/to/file.c::symbol`` → đường dẫn file + tên hàm.
-    - Defects4C / metadata tcpdump: ``print-isakmp.c:ikev1_id_print`` (một dấu ``:``).
+    - Defects4C metadata: ``file.c:function`` (một dấu ``:``).
 
     Nếu không nhận dạng được, trả về ("", qualified) để tương thích hành vi cũ.
     """
@@ -162,7 +163,16 @@ def resolve_fl_candidate_source_path(
         return fh
     base = os.path.basename(fh)
     ds = (dataset_name or "").lower()
-    if ds in ("defects4c", "defects4c-tcpdump", "tcpdump") and raw_meta:
+    defects4c_like = bool(raw_meta and (
+        ds == "defects4c"
+        or "data_folder" in raw_meta
+        or "metadata_file" in raw_meta
+        or "metadata_slug" in raw_meta
+    ))
+    if defects4c_like:
+        cached = _resolve_defects4c_cached_source(bug_source_path, base, raw_meta)
+        if cached:
+            return cached
         src_dir = raw_meta.get("source_dir_buggy") or ""
         if src_dir:
             cand = os.path.join(src_dir, base)
@@ -173,6 +183,75 @@ def resolve_fl_candidate_source_path(
     if os.path.isfile(cand):
         return cand
     return bug_source_path
+
+
+def _resolve_defects4c_cached_source(
+    bug_source_path: str,
+    basename: str,
+    raw_meta: Dict[str, Any],
+) -> str:
+    """Return a cached buggy source file for a Defects4C FL file hint."""
+    if not basename:
+        return ""
+
+    if os.path.basename(bug_source_path) == basename and os.path.isfile(bug_source_path):
+        return bug_source_path
+
+    repo_dir = raw_meta.get("source_repo_dir") or ""
+    commit_before = raw_meta.get("commit_before") or ""
+    cache_dir = raw_meta.get("source_cache_dir") or os.path.dirname(bug_source_path)
+    if not repo_dir or not commit_before or not os.path.isdir(repo_dir):
+        return ""
+
+    relpath = _find_unique_relpath_by_basename(repo_dir, basename)
+    if not relpath:
+        return ""
+
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_name = relpath.replace("/", "__")
+    cache_path = os.path.join(cache_dir, cache_name)
+    if os.path.isfile(cache_path):
+        return cache_path
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", repo_dir, "show", f"{commit_before}:{relpath}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+    except Exception:
+        return ""
+
+    if result.returncode != 0:
+        return ""
+    try:
+        with open(cache_path, "w") as f:
+            f.write(result.stdout)
+    except Exception:
+        return ""
+    return cache_path
+
+
+def _find_unique_relpath_by_basename(repo_dir: str, basename: str) -> str:
+    matches = []
+    for root, dirs, files in os.walk(repo_dir):
+        dirs[:] = [
+            d for d in dirs
+            if d != ".git" and d != "CMakeFiles" and not d.startswith("build_meta_")
+        ]
+        if basename in files:
+            full = os.path.join(root, basename)
+            rel = os.path.relpath(full, repo_dir).replace(os.sep, "/")
+            matches.append(rel)
+    if not matches:
+        return ""
+    # Prefer top-level source files when there are generated/build duplicates.
+    matches.sort(key=lambda p: (p.count("/"), p))
+    return matches[0]
 
 
 def extract_function_code(

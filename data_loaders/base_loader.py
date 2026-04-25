@@ -21,6 +21,7 @@ Cách sử dụng (FL & APR đều dùng chung một entry-point):
 from __future__ import annotations
 
 import abc
+import os
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 
@@ -101,9 +102,18 @@ def get_loader(dataset_name: str) -> BugLoader:
         from data_loaders.codeflaws_loader import CodeflawsLoader
         return CodeflawsLoader()
 
-    if name in ("defects4c", "defects4c-tcpdump", "tcpdump"):
+    if name == "defects4c":
         from data_loaders.defects4c_loader import Defects4CLoader
-        return Defects4CLoader(project="tcpdump")
+        return Defects4CLoader()
+
+    from configs.path import DEFECTS4C_UNIFIED_DIR
+    defects4c_folder = name
+    if defects4c_folder.startswith("defects4c-"):
+        defects4c_folder = defects4c_folder[len("defects4c-"):]
+    folder_path = os.path.join(DEFECTS4C_UNIFIED_DIR, defects4c_folder, "metadata")
+    if os.path.isdir(folder_path):
+        from data_loaders.defects4c_loader import Defects4CLoader
+        return Defects4CLoader(data_folder=defects4c_folder)
 
     raise ValueError(
         f"Dataset '{dataset_name}' chưa có Loader tương ứng. "

@@ -13,6 +13,7 @@ from data_loaders.base_loader import get_loader, BugRecord
 from data_loaders.sandbox_adapter import get_sandbox_adapter, defects4c_docker_ready
 from core.utils import (
     extract_function_code,
+    normalize_code_for_edit_distance,
     parse_sbfl_qualified_name,
     resolve_fl_candidate_source_path,
     get_codeflaws_accepted_cfile,
@@ -23,12 +24,16 @@ load_dotenv()
 # Provider mặc định – đọc từ .env, có thể override qua CLI
 _DEFAULT_LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
 APR_TOP_K = int(os.getenv("APR_TOP_K", "3"))
-# Giới hạn độ dài source đưa vào prompt. Defects4C/tcpdump có file ~5k dòng,
+# Giới hạn độ dài source đưa vào prompt. Một số Defects4C project có file lớn,
 # vượt context window của nhiều LLM và loãng tín hiệu. Nếu vượt mức này ta
 # cắt giữa, giữ phần đầu file (includes/typedef) + neighborhood của hàm lỗi.
 APR_MAX_SOURCE_CHARS = int(os.getenv("APR_MAX_SOURCE_CHARS", "30000"))
 # Với Defects4C, một bug có hàng trăm test pass – lưu hết vào JSON gây bloat.
 APR_MAX_TEST_ID_STORE = int(os.getenv("APR_MAX_TEST_ID_STORE", "50"))
+
+
+def _is_defects4c_dataset(dataset: str) -> bool:
+    return (dataset or "").strip().lower() != "codeflaws"
 
 
 def _clean_code(raw_content: str) -> str:
@@ -354,7 +359,7 @@ validate_patch.last_details = {}
 
 def _trim_source_for_prompt(source_code: str, start_idx: int, end_idx: int) -> str:
     """
-    Rút gọn source đưa vào prompt khi file quá dài (thường gặp ở Defects4C/tcpdump).
+    Rút gọn source đưa vào prompt khi file quá dài (thường gặp ở Defects4C).
 
     Chiến lược: giữ phần đầu file (includes, typedef, hằng số) + neighborhood
     quanh hàm lỗi (để LLM thấy struct & macro liên quan). Đệm bằng comment
@@ -421,7 +426,7 @@ def _copy_accepted_patch(dataset: str, bug_id: str, bug_source_path: str,
         if accepted_cfile:
             accepted_src = os.path.join(os.path.dirname(bug_source_path), accepted_cfile)
 
-    elif ds in ("defects4c", "defects4c-tcpdump", "tcpdump"):
+    elif _is_defects4c_dataset(ds):
         raw = bug_record.raw if bug_record else None
         if raw:
             cand = raw.get("accepted_file")
@@ -470,14 +475,9 @@ def _clean_llm_patch(patched_func: str) -> str:
     patched_func = patched_func.strip()
 
     # Trường hợp LLM trả về text giải thích + code block
-    code_fence = re.search(r'```(?:c|cpp)?\s*\n', patched_func)
-    if code_fence:
-        start = code_fence.end()
-        end_fence = patched_func.rfind("```")
-        if end_fence > start:
-            patched_func = patched_func[start:end_fence]
-        else:
-            patched_func = patched_func[start:]
+    code_block = re.search(r'```(?:c|cpp)?\s*\n([\s\S]*?)```', patched_func)
+    if code_block:
+        patched_func = code_block.group(1)
 
     lines = patched_func.split("\n")
     if lines and lines[0].strip().startswith("// Bắt đầu"):
@@ -506,8 +506,8 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
         fl_results = json.load(f)
 
     ds_lc = (dataset or "").lower()
-    if ds_lc in ("defects4c", "defects4c-tcpdump", "tcpdump"):
-        ok_d, info_d = defects4c_docker_ready()
+    if _is_defects4c_dataset(ds_lc):
+        ok_d, info_d = defects4c_docker_ready(dataset)
         if not ok_d:
             print(f"[APR] {info_d}")
             print("[APR] Dừng sớm — không gọi LLM khi chưa validate được trên Docker.")
@@ -532,7 +532,7 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
     print("[APR] Đang chạy Automated Program Repair (LLM)...")
 
     for bug_id, result_data in fl_results.items():
-        if bug_id in apr_results and apr_results[bug_id].get("status") != "skipped":
+        if bug_id in apr_results and apr_results[bug_id].get("status") == "success":
             continue
 
         scores = result_data.get("scores", result_data) if isinstance(result_data, dict) else result_data
@@ -555,7 +555,7 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
             print(f"    [Skip] File nguồn không tồn tại: {bug_source_path}")
             continue
 
-        defects4c_like = ds_lc in ("defects4c", "defects4c-tcpdump", "tcpdump")
+        defects4c_like = _is_defects4c_dataset(ds_lc)
         primary_base = os.path.basename(bug_source_path)
         _br = bug_map.get(bug_id)
         raw_meta = _br.raw if _br else None
@@ -649,6 +649,14 @@ Your task is to fix an algorithmic or compilation bug in function `{func_name}` 
             patched_func   = _clean_llm_patch(raw_patch)
             patched_source = source_code[:start_idx] + patched_func + source_code[end_idx:]
             repair_target_file = candidate_path
+
+            # Chặn no-op patch: LLM trả lại y nguyên hàm lỗi (hoặc khác whitespace/comment)
+            # sẽ làm kết quả APR trông như "đã vá" nhưng thực chất không đổi logic.
+            orig_norm = normalize_code_for_edit_distance(func_code)
+            patched_norm = normalize_code_for_edit_distance(patched_func)
+            if not patched_norm or patched_norm == orig_norm or patched_source == source_code:
+                print("    [NO-OP] Patch không thay đổi hàm nguồn, bỏ qua candidate này.")
+                continue
 
             safe_cand = cand_base.replace("/", "_").replace(" ", "_")
             tmp_path = os.path.join(EXPERIMENTS_DIR, f"tmp_{bug_id.replace('@', '__')}__{safe_cand}")

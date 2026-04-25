@@ -1,443 +1,345 @@
 """
-data_loaders/defects4c_loader.py
---------------------------------
-Loader tối thiểu cho Defects4C project tcpdump.
+Defects4C loader.
 
-Defects4C không lưu sẵn JSON theo schema của Unified-Debugging như Codeflaws.
-Loader này đọc metadata gốc của Defects4C và tạo cache source trong
-experiments/defects4c_cache để các bước FL/APR đọc được file nguồn ổn định.
+Input convention:
+    defects4c/out_tmp_dirs/unified_debugging/<data_folder>/metadata/*_meta.json
+
+`<data_folder>` is the only selector used by Unified-Debugging.  The actual
+Defects4C project name, commit ids, compile command, and test command are read
+from each metadata JSON file.
 """
 
 from __future__ import annotations
 
-import csv
-import glob
 import json
 import os
-import re
+import subprocess
 from typing import Dict, List, Optional, Tuple
 
-from configs.path import (
-    DEFECTS4C_CACHE_DIR,
-    DEFECTS4C_OUT_DIR,
-    DEFECTS4C_RAW_INFO_CSV,
-    DEFECTS4C_SRC_CONTENT_JSONL,
-    DEFECTS4C_TCPDUMP_METADATA_DIR,
-    DEFECTS4C_TCPDUMP_PROJECT,
-    DEFECTS4C_TCPDUMP_PROJECT_DIR,
-)
-from core.utils import qualify_func
+from configs.path import DEFECTS4C_CACHE_DIR, DEFECTS4C_OUT_DIR, DEFECTS4C_UNIFIED_DIR
+from core.utils import parse_sbfl_qualified_name
 from data_loaders.base_loader import BugLoader, BugRecord
 
 
 class Defects4CLoader(BugLoader):
-    """Load Defects4C tcpdump records into the common BugRecord format."""
+    """Load Defects4C records by metadata folder slug."""
 
-    def __init__(self, project: str = "tcpdump"):
-        if project not in ("tcpdump", DEFECTS4C_TCPDUMP_PROJECT):
-            raise ValueError("Defects4CLoader hiện chỉ hỗ trợ project tcpdump")
-
-        self.project = DEFECTS4C_TCPDUMP_PROJECT
-        self.project_dir = DEFECTS4C_TCPDUMP_PROJECT_DIR
-        self.metadata_dir = DEFECTS4C_TCPDUMP_METADATA_DIR
-        self.cache_dir = os.path.join(DEFECTS4C_CACHE_DIR, self.project)
-
-        self._bugs: Optional[List[dict]] = None
-        self._raw_info: Optional[Dict[str, dict]] = None
-        self._accepted_content: Optional[Dict[str, str]] = None
-        self._buggy_functions: Optional[Dict[str, dict]] = None
+    def __init__(self, data_folder: Optional[str] = None, project: Optional[str] = None):
+        # `project` is accepted only for backward compatibility with older calls.
+        requested = data_folder or project
+        self.data_folder = self._resolve_data_folder(requested)
+        self.cache_dir = os.path.join(DEFECTS4C_CACHE_DIR, self.data_folder or "all")
+        self._records: Optional[List[BugRecord]] = None
 
     def load_all(self) -> List[BugRecord]:
-        standardized = self._load_standardized_records()
-        if standardized:
-            return standardized
+        if self._records is not None:
+            return self._records
 
-        records = []
-        for bug_meta in self._load_bug_list():
-            record = self._build_record(bug_meta)
-            if record:
-                records.append(record)
+        records: List[BugRecord] = []
+        for folder, metadata_dir in self._metadata_dirs():
+            for filename in sorted(os.listdir(metadata_dir)):
+                if not filename.endswith("_meta.json"):
+                    continue
+                record = self._record_from_meta_file(
+                    os.path.join(metadata_dir, filename),
+                    data_folder=folder,
+                )
+                if record:
+                    records.append(record)
+
+        self._deduplicate_bug_ids(records)
+        self._records = records
         return records
 
     def load_one(self, bug_id: str) -> Optional[BugRecord]:
-        standardized = self._load_standardized_record(bug_id)
-        if standardized:
-            return standardized
-
-        project, sha = parse_defects4c_bug_id(bug_id, default_project=self.project)
-        if project != self.project:
-            return None
-
-        for bug_meta in self._load_bug_list():
-            if bug_meta.get("commit_after") == sha:
-                return self._build_record(bug_meta)
+        for record in self.load_all():
+            raw = record.raw or {}
+            candidates = {
+                record.bug_id,
+                raw.get("original_bug_id", ""),
+                raw.get("metadata_stem", ""),
+                raw.get("commit_after", ""),
+            }
+            project = raw.get("project", "")
+            commit_after = raw.get("commit_after", "")
+            if project and commit_after:
+                candidates.add(f"{project}@{commit_after}")
+            if bug_id in candidates:
+                return record
         return None
 
-    def _load_standardized_records(self) -> List[BugRecord]:
-        if not os.path.isdir(self.metadata_dir):
+    def _resolve_data_folder(self, requested: Optional[str]) -> Optional[str]:
+        if not requested:
+            return None
+        key = requested.strip()
+        if key.lower().startswith("defects4c-"):
+            key = key[len("defects4c-"):]
+
+        direct = os.path.join(DEFECTS4C_UNIFIED_DIR, key, "metadata")
+        if os.path.isdir(direct):
+            return key
+
+        if os.path.isdir(DEFECTS4C_UNIFIED_DIR):
+            for folder in sorted(os.listdir(DEFECTS4C_UNIFIED_DIR)):
+                if folder.lower() == key.lower():
+                    return folder
+
+        raise ValueError(
+            f"Không tìm thấy Defects4C data folder '{requested}' tại "
+            f"{DEFECTS4C_UNIFIED_DIR}/<folder>/metadata"
+        )
+
+    def _metadata_dirs(self) -> List[Tuple[str, str]]:
+        if self.data_folder:
+            path = os.path.join(DEFECTS4C_UNIFIED_DIR, self.data_folder, "metadata")
+            return [(self.data_folder, path)] if os.path.isdir(path) else []
+
+        if not os.path.isdir(DEFECTS4C_UNIFIED_DIR):
             return []
+        out = []
+        for folder in sorted(os.listdir(DEFECTS4C_UNIFIED_DIR)):
+            path = os.path.join(DEFECTS4C_UNIFIED_DIR, folder, "metadata")
+            if os.path.isdir(path):
+                out.append((folder, path))
+        return out
 
-        records: List[BugRecord] = []
-        for filename in sorted(os.listdir(self.metadata_dir)):
-            if not filename.endswith("_meta.json"):
-                continue
-            record = self._record_from_meta_file(os.path.join(self.metadata_dir, filename))
-            if record:
-                records.append(record)
-        return records
-
-    def _load_standardized_record(self, bug_id: str) -> Optional[BugRecord]:
-        if not os.path.isdir(self.metadata_dir):
-            return None
-
-        safe_id = bug_id.replace("@", "__").replace("/", "__")
-        path = os.path.join(self.metadata_dir, f"{safe_id}_meta.json")
-        if os.path.exists(path):
-            return self._record_from_meta_file(path)
-
-        _, sha = parse_defects4c_bug_id(bug_id, default_project=self.project)
-        for filename in os.listdir(self.metadata_dir):
-            if sha in filename and filename.endswith("_meta.json"):
-                return self._record_from_meta_file(os.path.join(self.metadata_dir, filename))
-        return None
-
-    def _record_from_meta_file(self, path: str) -> Optional[BugRecord]:
+    def _record_from_meta_file(self, path: str, data_folder: str) -> Optional[BugRecord]:
         try:
             with open(path, "r") as f:
                 raw = json.load(f)
-        except Exception as e:
-            print(f"[Defects4CLoader] Lỗi đọc metadata chuẩn {path}: {e}")
+        except Exception as exc:
+            print(f"[Defects4CLoader] Lỗi đọc metadata {path}: {exc}")
             return None
 
-        source_file = self._normalize_host_path(raw.get("source_file", ""))
+        metadata_stem = os.path.basename(path).replace("_meta.json", "")
+        raw_source_file = raw.get("source_file", "")
+        host_source_file = _container_to_host_path(raw_source_file)
+        repo_dir = _find_git_root(host_source_file)
+        source_relpath = _relpath_or_basename(host_source_file, repo_dir)
+        source_basename = raw.get("source_basename") or os.path.basename(source_relpath)
 
-        # Suy ra accepted_file nếu meta file không có sẵn trường này.
-        # Convention: _ensure_source_cache tạo ra "<source_file>.accepted"
-        accepted_file = raw.get("accepted_file", "")
-        if not accepted_file or not os.path.exists(accepted_file):
-            # Thử "source_file.accepted" (path đã được normalize sang host path)
-            candidate = source_file + ".accepted" if source_file else ""
-            if candidate and os.path.exists(candidate):
-                accepted_file = candidate
-            else:
-                # Fallback: tìm trong cache_dir/<bug_id>/<src_basename>.accepted
-                bug_id_raw = raw.get("bug_id", "")
-                src_basename = raw.get("source_basename") or (
-                    os.path.basename(source_file) if source_file else ""
-                )
-                if bug_id_raw and src_basename:
-                    alt = os.path.join(
-                        self.cache_dir,
-                        bug_id_raw.replace("@", "__"),
-                        f"{src_basename}.accepted",
-                    )
-                    if os.path.exists(alt):
-                        accepted_file = alt
-        raw = {**raw, "accepted_file": accepted_file, "source_file": source_file}
-
-        tests = self._requalify_tests(raw.get("tests", []), source_file)
-        ground_truth = raw.get("ground_truth") or self._qualify_names(
-            raw.get("ground_truth_functions", []),
-            source_file,
+        safe_id = metadata_stem.replace("@", "__").replace("/", "__")
+        record_cache_dir = os.path.join(DEFECTS4C_CACHE_DIR, data_folder, safe_id)
+        source_file, accepted_file = self._ensure_source_cache(
+            raw=raw,
+            host_source_file=host_source_file,
+            repo_dir=repo_dir,
+            source_relpath=source_relpath,
+            source_basename=source_basename,
+            cache_dir=record_cache_dir,
         )
 
+        tests = _normalize_tests(raw.get("tests", []))
+        ground_truth = _normalize_ground_truth(raw, source_basename)
+        original_bug_id = raw.get("bug_id", metadata_stem)
+
+        enriched_raw = {
+            **raw,
+            "bug_id": original_bug_id,
+            "original_bug_id": original_bug_id,
+            "metadata_file": path,
+            "metadata_stem": metadata_stem,
+            "data_folder": data_folder,
+            "metadata_slug": data_folder,
+            "source_file": source_file,
+            "accepted_file": accepted_file,
+            "source_basename": source_basename,
+            "source_cache_dir": record_cache_dir,
+            "source_repo_dir": repo_dir,
+            "source_relpath": source_relpath,
+            "original_source_file": raw_source_file,
+            "host_source_file": host_source_file,
+            "container_repo_dir": _container_repo_dir(raw_source_file, repo_dir),
+        }
+
         return BugRecord(
-            bug_id=raw.get("bug_id", os.path.basename(path).replace("_meta.json", "")),
-            dataset=raw.get("dataset_name", "defects4c"),
+            bug_id=original_bug_id,
+            dataset="defects4c",
             tests=tests,
             ground_truth=ground_truth,
             source_file=source_file,
             compile_cmd=raw.get("compile_cmd"),
             test_cmd_template=raw.get("test_cmd_template"),
-            raw=raw,
-        )
-
-    def _normalize_host_path(self, maybe_path: str) -> str:
-        """Map container paths (/out/...) to host paths when running APR/FL on host."""
-        if not maybe_path or not isinstance(maybe_path, str):
-            return maybe_path
-        if os.path.exists(maybe_path):
-            return maybe_path
-        if maybe_path.startswith("/out/"):
-            mapped = os.path.join(DEFECTS4C_OUT_DIR, maybe_path[len("/out/"):])
-            if os.path.exists(mapped):
-                return mapped
-        return maybe_path
-
-    def _requalify_tests(self, tests: List[dict], source_file: str) -> List[dict]:
-        """Normalize coverage symbols for FL across metadata versions.
-
-        New format stores `covered_functions` as `file:function`.
-        Legacy format stores only function names or absolute_path::function.
-        """
-        result = []
-        source_name = os.path.basename(source_file) if source_file else ""
-        for test in tests:
-            covered_functions = test.get("covered_functions")
-            if covered_functions is not None:
-                result.append({**test, "covered_methods": covered_functions})
-                continue
-
-            func_names = test.get("covered_function_names")
-            if func_names is None:
-                # Legacy metadata: extract function name from qualified string
-                func_names = [
-                    m.split("::")[-1] for m in test.get("covered_methods", []) if "::" in m
-                ]
-
-            if source_name:
-                covered_functions = [f"{source_name}:{fn}" for fn in func_names]
-                result.append({**test, "covered_functions": covered_functions, "covered_methods": covered_functions})
-            else:
-                requalified = self._qualify_names(func_names, source_file)
-                result.append({**test, "covered_methods": requalified})
-        return result
-
-    def _qualify_names(self, names: List[str], source_file: str) -> List[str]:
-        return [
-            fn if "::" in fn else qualify_func(source_file, fn)
-            for fn in names
-        ]
-
-    def _load_bug_list(self) -> List[dict]:
-        if self._bugs is None:
-            path = os.path.join(self.project_dir, "bugs_list_new.json")
-            if not os.path.exists(path):
-                print(f"[Defects4CLoader] Không tìm thấy {path}")
-                self._bugs = []
-            else:
-                with open(path, "r") as f:
-                    self._bugs = json.load(f)
-        return self._bugs
-
-    def _load_raw_info(self) -> Dict[str, dict]:
-        if self._raw_info is not None:
-            return self._raw_info
-
-        result: Dict[str, dict] = {}
-        if not os.path.exists(DEFECTS4C_RAW_INFO_CSV):
-            self._raw_info = result
-            return result
-
-        with open(DEFECTS4C_RAW_INFO_CSV, newline="") as f:
-            for row in csv.DictReader(f):
-                github = row.get("github", "")
-                if "the-tcpdump-group/tcpdump" not in github:
-                    continue
-                sha = _sha_from_github_url(github)
-                if sha:
-                    result[sha] = row
-
-        self._raw_info = result
-        return result
-
-    def _load_accepted_content(self) -> Dict[str, str]:
-        if self._accepted_content is not None:
-            return self._accepted_content
-
-        shas = {b.get("commit_after") for b in self._load_bug_list()}
-        result: Dict[str, str] = {}
-        if os.path.exists(DEFECTS4C_SRC_CONTENT_JSONL):
-            with open(DEFECTS4C_SRC_CONTENT_JSONL, "r") as f:
-                for line in f:
-                    rec = json.loads(line)
-                    src_id = rec.get("id", "")
-                    sha = _sha_from_src_id(src_id)
-                    if sha in shas and rec.get("content") is not None:
-                        result[sha] = rec["content"]
-
-        self._accepted_content = result
-        return result
-
-    def _load_buggy_functions(self) -> Dict[str, dict]:
-        if self._buggy_functions is not None:
-            return self._buggy_functions
-
-        result: Dict[str, dict] = {}
-        patterns = [
-            "buggy_errmsg/*.json",
-            "buggy_errmsg_cve/*.json",
-        ]
-        for pattern in patterns:
-            for path in glob.glob(os.path.join(os.path.dirname(DEFECTS4C_SRC_CONTENT_JSONL), pattern)):
-                try:
-                    with open(path, "r") as f:
-                        data = json.load(f)
-                except Exception:
-                    continue
-                for key, value in data.items():
-                    sha = _sha_from_src_id(key)
-                    if sha and isinstance(value, dict) and value.get("buggy"):
-                        result[sha] = value
-
-        self._buggy_functions = result
-        return result
-
-    def _build_record(self, bug_meta: dict) -> Optional[BugRecord]:
-        sha = bug_meta.get("commit_after")
-        if not sha:
-            return None
-
-        raw_info = self._load_raw_info().get(sha, {})
-        accepted = self._load_accepted_content().get(sha)
-        buggy_func_meta = self._load_buggy_functions().get(sha, {})
-        buggy_func = buggy_func_meta.get("buggy")
-        if accepted is None or not buggy_func:
-            print(f"[Defects4CLoader] Thiếu source/function metadata cho {sha}, bỏ qua.")
-            return None
-
-        src_rel = _first_src_file(bug_meta)
-        src_basename = os.path.basename(src_rel or raw_info.get("src_path", f"{sha}.c"))
-        bug_id = format_defects4c_bug_id(self.project, sha)
-
-        source_file, accepted_file = self._ensure_source_cache(
-            bug_id=bug_id,
-            sha=sha,
-            src_basename=src_basename,
-            accepted_content=accepted,
-            buggy_func=buggy_func,
-            raw_info=raw_info,
-        )
-
-        func_name = _extract_c_function_name(buggy_func) or _func_name_from_prompt(buggy_func_meta)
-        covered = [qualify_func(source_file, func_name)] if func_name else []
-
-        test_ids = _test_ids_from_meta(bug_meta)
-        tests = [
-            {
-                "test_id": test_id,
-                "outcome": "FAIL",
-                "covered_methods": covered,
-                "fail_reason": bug_meta.get("type", {}).get("name", "Defects4C regression test fails"),
-            }
-            for test_id in test_ids
-        ]
-        if not tests:
-            tests = [{
-                "test_id": "defects4c_regression",
-                "outcome": "FAIL",
-                "covered_methods": covered,
-                "fail_reason": bug_meta.get("type", {}).get("name", "Defects4C regression test fails"),
-            }]
-
-        return BugRecord(
-            bug_id=bug_id,
-            dataset="defects4c",
-            tests=tests,
-            ground_truth=covered,
-            source_file=source_file,
-            compile_cmd="bash inplace_rebuild.sh <build_dir> <log>",
-            test_cmd_template="bash inplace_test.sh <build_dir> <log>",
-            raw={
-                **bug_meta,
-                "defects4c_project": self.project,
-                "source_file": source_file,
-                "accepted_file": accepted_file,
-                "func_name": func_name,
-                "raw_info": raw_info,
-            },
+            raw=enriched_raw,
         )
 
     def _ensure_source_cache(
         self,
-        bug_id: str,
-        sha: str,
-        src_basename: str,
-        accepted_content: str,
-        buggy_func: str,
-        raw_info: dict,
+        raw: dict,
+        host_source_file: str,
+        repo_dir: str,
+        source_relpath: str,
+        source_basename: str,
+        cache_dir: str,
     ) -> Tuple[str, str]:
-        bug_dir = os.path.join(self.cache_dir, bug_id.replace("@", "__"))
-        os.makedirs(bug_dir, exist_ok=True)
+        os.makedirs(cache_dir, exist_ok=True)
+        buggy_path = os.path.join(cache_dir, source_basename)
+        accepted_path = os.path.join(cache_dir, f"{source_basename}.accepted")
 
-        buggy_path = os.path.join(bug_dir, src_basename)
-        accepted_path = os.path.join(bug_dir, f"{src_basename}.accepted")
+        buggy_content = _git_show(repo_dir, raw.get("commit_before", ""), source_relpath)
+        accepted_content = _git_show(repo_dir, raw.get("commit_after", ""), source_relpath)
 
-        with open(accepted_path, "w") as f:
-            f.write(accepted_content)
+        if buggy_content is None:
+            buggy_content = _read_file(host_source_file)
+        if accepted_content is None:
+            accepted_content = _read_file(host_source_file)
 
-        patched_buggy = _replace_function_by_offsets(accepted_content, buggy_func, raw_info)
-        with open(buggy_path, "w") as f:
-            f.write(patched_buggy)
+        if buggy_content is not None:
+            with open(buggy_path, "w") as f:
+                f.write(buggy_content)
+        else:
+            buggy_path = host_source_file
+
+        if accepted_content is not None:
+            with open(accepted_path, "w") as f:
+                f.write(accepted_content)
+        else:
+            accepted_path = raw.get("accepted_file", "")
 
         return buggy_path, accepted_path
 
+    @staticmethod
+    def _deduplicate_bug_ids(records: List[BugRecord]) -> None:
+        counts: Dict[str, int] = {}
+        for record in records:
+            counts[record.bug_id] = counts.get(record.bug_id, 0) + 1
 
-def format_defects4c_bug_id(project: str, sha: str) -> str:
-    return f"{project}@{sha}"
-
-
-def parse_defects4c_bug_id(bug_id: str, default_project: str = DEFECTS4C_TCPDUMP_PROJECT) -> Tuple[str, str]:
-    if "@" in bug_id:
-        project, sha = bug_id.split("@", 1)
-    else:
-        project, sha = default_project, bug_id
-    return project, sha
+        for record in records:
+            if counts.get(record.bug_id, 0) <= 1:
+                continue
+            raw = record.raw or {}
+            record.bug_id = raw.get("metadata_stem") or record.bug_id
+            raw["bug_id"] = record.bug_id
 
 
 def get_defects4c_accepted_path(bug_id: str) -> str:
-    loader = Defects4CLoader(project="tcpdump")
-    record = loader.load_one(bug_id)
+    record = Defects4CLoader().load_one(bug_id)
     if not record or not record.raw:
         return ""
     return record.raw.get("accepted_file", "")
 
 
 def get_defects4c_source_path(bug_id: str) -> str:
-    loader = Defects4CLoader(project="tcpdump")
-    record = loader.load_one(bug_id)
+    record = Defects4CLoader().load_one(bug_id)
     return record.source_file if record else ""
 
 
 def get_defects4c_raw_record(bug_id: str) -> Optional[dict]:
-    loader = Defects4CLoader(project="tcpdump")
-    record = loader.load_one(bug_id)
+    record = Defects4CLoader().load_one(bug_id)
     return record.raw if record else None
 
 
-def _replace_function_by_offsets(accepted: str, buggy_func: str, raw_info: dict) -> str:
-    try:
-        start = int(raw_info.get("func_start_byte", -1))
-        end = int(raw_info.get("func_end_byte", -1))
-    except (TypeError, ValueError):
-        start, end = -1, -1
-
-    if 0 <= start < end <= len(accepted):
-        return accepted[:start] + buggy_func.rstrip() + "\n" + accepted[end:]
-
-    return accepted
+def parse_defects4c_bug_id(bug_id: str, default_project: str = "") -> Tuple[str, str]:
+    if "@" in bug_id:
+        return tuple(bug_id.split("@", 1))  # type: ignore[return-value]
+    return default_project, bug_id
 
 
-def _extract_c_function_name(function_code: str) -> str:
-    match = re.search(r'\b([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{', function_code, re.MULTILINE)
-    return match.group(1) if match else ""
+def _normalize_tests(tests: List[dict]) -> List[dict]:
+    out = []
+    for test in tests:
+        covered = test.get("covered_functions")
+        if covered is None:
+            covered = test.get("covered_methods", [])
+        normalized = [_normalize_coverage_key(x) for x in covered if isinstance(x, str)]
+        out.append({**test, "covered_functions": normalized, "covered_methods": normalized})
+    return out
 
 
-def _func_name_from_prompt(meta: dict) -> str:
-    prefix = meta.get("prefix", "")
-    return _extract_c_function_name(prefix)
+def _normalize_ground_truth(raw: dict, source_basename: str) -> List[str]:
+    out = []
+    for item in raw.get("ground_truth", []) or []:
+        if isinstance(item, str):
+            normalized = _normalize_coverage_key(item)
+            if normalized:
+                out.append(normalized)
+
+    if not out:
+        for fn in raw.get("ground_truth_functions", []) or []:
+            if isinstance(fn, str) and fn:
+                out.append(f"{source_basename}:{fn}")
+    return sorted(set(out))
 
 
-def _first_src_file(bug_meta: dict) -> str:
-    src_files = bug_meta.get("files", {}).get("src", [])
-    return src_files[0] if src_files else ""
-
-
-def _test_ids_from_meta(bug_meta: dict) -> List[str]:
-    tests = []
-    for path in bug_meta.get("files", {}).get("test", []):
-        if path.endswith(".pcap"):
-            tests.append(os.path.basename(path))
-    return tests
-
-
-def _sha_from_github_url(url: str) -> str:
-    return url.rstrip("/").split("/")[-1] if url else ""
-
-
-def _sha_from_src_id(src_id: str) -> str:
-    base = os.path.basename(src_id)
-    if "___" not in base:
+def _normalize_coverage_key(value: str) -> str:
+    if not value:
         return ""
-    sha = base.split("___", 1)[0]
-    return sha if re.fullmatch(r"[0-9a-f]{40}", sha) else ""
+    if "::" in value:
+        file_hint, func = value.rsplit("::", 1)
+        return f"{os.path.basename(file_hint)}:{func}"
+    file_hint, func = parse_sbfl_qualified_name(value)
+    if file_hint and func:
+        return f"{os.path.basename(file_hint)}:{func}"
+    return value
+
+
+def _container_to_host_path(path: str) -> str:
+    if not path or not isinstance(path, str):
+        return path
+    if os.path.exists(path):
+        return path
+    if path.startswith("/out/"):
+        mapped = os.path.join(DEFECTS4C_OUT_DIR, path[len("/out/"):])
+        if os.path.exists(mapped):
+            return mapped
+    return path
+
+
+def _container_repo_dir(raw_source_file: str, repo_dir: str) -> str:
+    if raw_source_file.startswith("/out/"):
+        rel = raw_source_file[len("/out/"):]
+        parts = rel.split("/")
+        if len(parts) >= 2:
+            return "/out/" + "/".join(parts[:2])
+    if repo_dir.startswith(DEFECTS4C_OUT_DIR):
+        rel = os.path.relpath(repo_dir, DEFECTS4C_OUT_DIR).replace(os.sep, "/")
+        return f"/out/{rel}"
+    return ""
+
+
+def _find_git_root(path: str) -> str:
+    cur = path if os.path.isdir(path) else os.path.dirname(path)
+    while cur and cur != os.path.dirname(cur):
+        if os.path.isdir(os.path.join(cur, ".git")):
+            return cur
+        cur = os.path.dirname(cur)
+    return ""
+
+
+def _relpath_or_basename(path: str, root: str) -> str:
+    if root:
+        try:
+            return os.path.relpath(path, root).replace(os.sep, "/")
+        except ValueError:
+            pass
+    return os.path.basename(path)
+
+
+def _git_show(repo_dir: str, commit: str, relpath: str) -> Optional[str]:
+    if not repo_dir or not commit or not relpath:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", repo_dir, "show", f"{commit}:{relpath}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def _read_file(path: str) -> Optional[str]:
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", errors="replace") as f:
+            return f.read()
+    except Exception:
+        return None

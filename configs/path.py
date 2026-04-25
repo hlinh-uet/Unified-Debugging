@@ -11,21 +11,17 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 CODEFLAWS_RESULTS_DIR = os.path.join(BASE_DIR, "codeflaws", "codeflaws", "all_results")
 CODEFLAWS_SOURCE_DIR = os.path.join(BASE_DIR, "codeflaws", "benchmark")
 
-# 3b. Đường dẫn tới Defects4C (mặc định project tcpdump)
+# 3b. Đường dẫn tới Defects4C
 DEFECTS4C_ROOT_DIR = os.path.join(BASE_DIR, "defects4c")
 DEFECTS4C_TPL_DIR = os.path.join(DEFECTS4C_ROOT_DIR, "defectsc_tpl")
 DEFECTS4C_PROJECTS_DIR = os.path.join(DEFECTS4C_TPL_DIR, "projects")
 DEFECTS4C_OUT_DIR = os.path.join(DEFECTS4C_ROOT_DIR, "out_tmp_dirs")
 DEFECTS4C_PATCHES_DIR = os.path.join(DEFECTS4C_ROOT_DIR, "patche_dirs")
-DEFECTS4C_TCPDUMP_PROJECT = "the-tcpdump-group___tcpdump"
-DEFECTS4C_TCPDUMP_PROJECT_DIR = os.path.join(DEFECTS4C_PROJECTS_DIR, DEFECTS4C_TCPDUMP_PROJECT)
 DEFECTS4C_DATA_DIR = os.path.join(DEFECTS4C_TPL_DIR, "data")
 DEFECTS4C_RAW_INFO_CSV = os.path.join(DEFECTS4C_DATA_DIR, "raw_info_step1.csv")
 DEFECTS4C_SRC_CONTENT_JSONL = os.path.join(DEFECTS4C_DATA_DIR, "github_src_path.jsonl")
-# Metadata chuẩn tcpdump hiện được sinh vào out_tmp_dirs/unified_debugging.
+# Metadata chuẩn hiện được sinh vào out_tmp_dirs/unified_debugging/<slug>/metadata.
 DEFECTS4C_UNIFIED_DIR = os.path.join(DEFECTS4C_OUT_DIR, "unified_debugging")
-DEFECTS4C_TCPDUMP_UNIFIED_DIR = os.path.join(DEFECTS4C_UNIFIED_DIR, "tcpdump")
-DEFECTS4C_TCPDUMP_METADATA_DIR = os.path.join(DEFECTS4C_TCPDUMP_UNIFIED_DIR, "metadata")
 
 # 4. Đường dẫn để lưu kết quả thực nghiệm (Lưu ngay bên trong Unified-Debugging)
 EXPERIMENTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "experiments")

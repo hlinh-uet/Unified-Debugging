@@ -87,9 +87,7 @@ def evaluate_apr(dataset: str = "codeflaws"):
         print("         Install with: pip install python-Levenshtein")
 
     apr_files = [
-        ("LLM-based APR",      "apr_results.json"),
-        ("Mutation-based APR", "apr_mutation_results.json"),
-        ("GenProg APR",        "apr_genprog_results.json"),
+        ("LLM-based APR", "apr_results.json"),
     ]
 
     for label, filename in apr_files:
@@ -246,7 +244,7 @@ def _print_edit_distance_stats(edit_distances: list, attempted: int, level: str 
 
 def _get_accepted_path(bug_id: str, dataset: str = "codeflaws") -> str:
     """Return the path to the benchmark accepted file for a given bug_id."""
-    if dataset.lower() in ("defects4c", "defects4c-tcpdump", "tcpdump"):
+    if dataset.lower() != "codeflaws":
         return get_defects4c_accepted_path(bug_id)
 
     cfilename = get_codeflaws_accepted_cfile(bug_id)

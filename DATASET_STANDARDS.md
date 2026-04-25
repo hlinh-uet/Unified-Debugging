@@ -58,9 +58,9 @@ Mỗi bug trong bộ dữ liệu cần có riêng một tệp `{bug_id}_meta.jso
 
 ---
 
-## 2. Chuẩn Format Kết quả APR (`apr_*_results.json`)
+## 2. Chuẩn Format Kết quả APR (`apr_results.json`)
 
-Ba APR engine (LLM, Mutation, GenProg) đều lưu kết quả theo cùng một schema để `eval_apr.py` đọc thống nhất:
+LLM APR lưu kết quả theo schema dưới đây để `eval_apr.py` đọc thống nhất:
 
 ```json
 {

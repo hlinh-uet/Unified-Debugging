@@ -44,7 +44,7 @@ def evaluate_fl():
 
         scores = result_data.get('scores', {})
         ground_truth = result_data.get('ground_truth', [])
-        ground_truth = _normalize_ground_truth_for_defects4c(bug_id, ground_truth)
+        ground_truth = _normalize_ground_truth_for_score_keys(ground_truth, scores)
 
         if not ground_truth:
             skipped_no_gt += 1
@@ -127,19 +127,20 @@ def _assign_worst_case_ranks(sorted_funcs):
     return ranks
 
 
-def _normalize_ground_truth_for_defects4c(bug_id, ground_truth):
+def _normalize_ground_truth_for_score_keys(ground_truth, scores):
     """
-    Chuẩn hóa ground truth cho Defects4C:
-      - path::func -> basename:path
-
-    Chỉ áp dụng cho bug id Defects4C tcpdump dạng:
-      the-tcpdump-group___tcpdump@<sha>
-    Dataset khác giữ nguyên để tránh side effects.
+    Chuẩn hóa GT khi score keys dùng schema Defects4C `file.c:function`.
+    Codeflaws giữ nguyên vì score keys của nó thường là `path::function`.
     """
     if not isinstance(ground_truth, list):
         return []
 
-    if not (isinstance(bug_id, str) and bug_id.startswith("the-tcpdump-group___tcpdump@")):
+    if not isinstance(scores, dict):
+        return ground_truth
+    uses_file_colon = any(
+        isinstance(k, str) and "::" not in k and ":" in k for k in scores.keys()
+    )
+    if not uses_file_colon:
         return ground_truth
 
     normalized = []

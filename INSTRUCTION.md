@@ -20,8 +20,8 @@
 ┌───────▼──────┐        ┌─────────────▼──────────────────────────┐
 │  core/        │        │  core/                                 │
 │  fl_tarantula │        │  apr_baseline.py  (LLM – Gemini)       │
-│  .py          │        │  apr_mutation.py  (Heuristic Mutation)  │
-└───────┬──────┘        │  apr_genprog.py   (GenProg)             │
+│  .py          │        │                                      │
+└───────┬──────┘        │                                      │
         │                └─────────────┬──────────────────────────┘
         │                              │
         │                ┌─────────────▼───────────────────────────┐
@@ -34,8 +34,6 @@
 │  experiments/                         │
 │  tarantula_results.json               │
 │  apr_results.json                     │
-│  apr_mutation_results.json            │
-│  apr_genprog_results.json             │
 │  patches/  correct_patches/           │
 └───────┬──────────────────────────────┘
         │
@@ -191,51 +189,7 @@ Với mỗi bug:
      → Luôn lưu patched_function + patched_file kể cả khi FAIL
 ```
 
-### 4.2 APR bằng Heuristic Mutation (`core/apr_mutation.py`)
-
-Không cần LLM. Sinh các biến thể (mutants) bằng Regex trên mã nguồn hàm:
-
-| Loại đột biến | Ví dụ |
-|---|---|
-| Quan hệ so sánh | `<` → `<=`, `>`, `>=`, `==`, `!=` |
-| Toán tử số học | `+` → `-` và ngược lại |
-| Off-by-one | `+ 1` → `- 1` hoặc bỏ hẳn |
-
-Mỗi mutant được nạp vào `SandboxAdapter.validate()`. Lưu **mutant tốt nhất** (nhiều test pass nhất) vào `patched_file`, kể cả khi không có mutant nào pass 100%. Mutant thành công lưu vào `experiments/patches/<bug_id>_mutation_patch.c`.
-
-### 4.3 APR bằng GenProg (`core/apr_genprog.py`)
-
-Sử dụng GenProg binary để tìm bản vá bằng Genetic Programming:
-
-```
-Với mỗi bug:
-  1. Parse .revlog → lấy số pos/neg tests
-  2. Copy thư mục bug vào workdir sandbox (experiments/genprog-run/)
-  3. Sinh file configuration-<bug_id> và bugged-program.txt
-  4. Chạy cilly build → tạo file .cil.c (preprocessed/)
-  5. Gọi `genprog configuration-<bug_id>` với timeout
-  6. Nếu "Repair Found":
-     a. Đọc repair/<cfile> → patched_file_content
-     b. Trích xuất hàm thay đổi → patched_function
-     c. Validate: compile repair + chạy tất cả test
-     d. Lưu patch vào experiments/patches/<bug_id>_genprog_patch.c
-  7. Ghi kết quả vào experiments/apr_genprog_results.json (incremental)
-     → Luôn lưu patched_file nếu GenProg tìm được repair file
-```
-
-**Trạng thái kết quả GenProg:**
-
-| Status | Ý nghĩa |
-|---|---|
-| `success` | Repair found + validate 100% pass |
-| `plausible_only` | Repair found nhưng còn test fail |
-| `repair_found_no_file` | GenProg báo found nhưng không có file |
-| `no_repair` | GenProg không tìm được bản vá |
-| `timeout` | Quá thời gian cho phép |
-| `build_failed` | Lỗi biên dịch (cilly/make) |
-| `error` | Lỗi hệ thống / không có binary |
-
-### 4.4 Sandbox Adapter
+### 4.2 Sandbox Adapter
 
 `data_loaders/sandbox_adapter.py` thực hiện kiểm chứng an toàn:
 
@@ -283,7 +237,7 @@ Trích xuất mã nguồn của một hàm C từ chuỗi source:
 
 ### APR – `evaluation/eval_apr.py`
 
-Đọc từng file JSON kết quả (`apr_results.json`, `apr_mutation_results.json`, `apr_genprog_results.json`):
+Đọc file JSON kết quả `apr_results.json`:
 
 | Chỉ số | Mô tả |
 |---|---|

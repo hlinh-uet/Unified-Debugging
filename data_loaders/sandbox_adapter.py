@@ -3,8 +3,8 @@ import signal
 import shutil
 import shlex
 import subprocess
+import time
 from typing import Optional, Tuple
-import re
 import glob
 import hashlib
 from configs.path import CODEFLAWS_SOURCE_DIR, DEFECTS4C_OUT_DIR, DEFECTS4C_PATCHES_DIR
@@ -235,24 +235,20 @@ class Defects4CAdapter(SandboxAdapter):
         if not raw:
             return False, [], ["metadata_not_found"]
 
-        project, sha = parse_defects4c_bug_id(self.bug_id)
         bug_meta = raw.get("raw", raw)
-        # Chọn basename từ caller nếu có; nếu không, fallback về src chính
-        # của bug. Việc này bắt buộc để helper trong container áp patch vào
-        # đúng file khi FL/APR nhắm tới file phụ thay vì file bug chính.
         if not src_basename:
-            src_file = bug_meta.get("files", {}).get("src", ["patched.c"])[0]
-            src_basename = os.path.basename(src_file)
+            return False, [], ["missing_src_basename"]
 
-        commit_before = bug_meta.get("commit_before") or bug_meta.get("sha_before")
+        project = bug_meta.get("project") or parse_defects4c_bug_id(self.bug_id)[0]
+        sha = bug_meta.get("commit_after") or parse_defects4c_bug_id(self.bug_id)[1]
+        commit_before = bug_meta.get("commit_before")
         if not commit_before:
             return False, [], ["missing_commit_before"]
 
-        test_ids = self._collect_defects4c_test_ids(project, sha)
-        metadata_test_ids = self._metadata_test_ids_from_bug_meta(bug_meta)
+        test_ids = self._collect_defects4c_test_ids(project, sha, bug_meta)
         related_ids, related_source = self._related_test_ids_from_bug_meta(bug_meta)
         baseline_unrelated = self._baseline_unrelated_failed_tests_from_bug_meta(bug_meta)
-        related_scope_ids = metadata_test_ids or test_ids
+        related_scope_ids = related_ids
         if not related_scope_ids:
             return False, [], ["empty_related_scope"]
         try:
@@ -269,45 +265,94 @@ class Defects4CAdapter(SandboxAdapter):
         with open(host_patch_path, "wb") as f:
             f.write(content)
 
-        # Phase A cho APR:
-        #   1) reset về buggy commit
-        #   2) checkout tests từ commit_after
-        #   3) chép patch vào file buggy
-        #   4) build ASAN + chạy full TESTrun.sh
-        if not self._prepare_phase_a_workspace(project, sha, commit_before):
-            return False, [], ["phase_a_prepare_failed"]
-
-        host_repo = os.path.join(DEFECTS4C_OUT_DIR, project, f"git_repo_dir_{sha}")
-        target_src = self._resolve_source_path_in_repo(host_repo, src_basename)
-        if not target_src:
-            self._reset_defects4c_repo(project, sha)
-            return False, [], [f"source_not_found:{src_basename}"]
-
-        try:
-            shutil.copy2(patched_file_path, target_src)
-        except Exception:
-            self._reset_defects4c_repo(project, sha)
-            return False, [], [f"patch_copy_failed:{src_basename}"]
-        print(
-            f"    [Defects4C] patch_applied src={os.path.basename(patched_file_path)} "
-            f"target={target_src}"
+        return self._validate_metadata_patch(
+            patched_file_path=patched_file_path,
+            src_basename=src_basename,
+            bug_meta=bug_meta,
+            project=project,
+            commit_before=commit_before,
+            test_ids=test_ids,
+            related_source=related_source,
+            baseline_unrelated=baseline_unrelated,
+            related_scope_ids=related_scope_ids,
         )
 
-        _, _, full_failed = self._run_phase_a_full_suite(project, sha)
-        self._reset_defects4c_repo(project, sha)
+    def _validate_metadata_patch(
+        self,
+        patched_file_path: str,
+        src_basename: str,
+        bug_meta: dict,
+        project: str,
+        commit_before: str,
+        test_ids: list,
+        related_source: str,
+        baseline_unrelated: list,
+        related_scope_ids: list,
+    ):
+        host_repo = bug_meta.get("source_repo_dir") or ""
+        container_repo = bug_meta.get("container_repo_dir") or ""
+        if not host_repo or not os.path.isdir(host_repo):
+            return False, [], ["repo_not_found"]
+        if not container_repo:
+            return False, [], ["container_repo_not_found"]
+
+        container = self._select_defects4c_container(bug_meta)
+        if not container:
+            return False, [], ["container_not_running"]
+
+        if not self._prepare_generic_workspace(container, container_repo, commit_before, clean=False):
+            return False, [], ["phase_a_prepare_failed"]
+
+        target_src = self._resolve_source_path_in_repo(host_repo, src_basename)
+        if not target_src:
+            self._reset_generic_workspace(container, container_repo)
+            return False, [], [f"source_not_found:{src_basename}"]
+
+        if not self._apply_generic_patch(container, patched_file_path, host_repo, target_src, container_repo):
+            self._reset_generic_workspace(container, container_repo)
+            return False, [], [f"patch_copy_failed:{src_basename}"]
+
+        suite_ok, full_passed, full_failed = self._run_metadata_test_suite(
+            container=container,
+            container_repo=container_repo,
+            bug_meta=bug_meta,
+            test_ids=test_ids,
+        )
+        self._reset_generic_workspace(container, container_repo)
+
+        if (not suite_ok) and (not full_failed) and (not full_passed):
+            self.last_validation_details = {
+                "validation_mode": "defects4c_metadata",
+                "related_scope_source": related_source,
+                "related_scope_test_count": len(related_scope_ids),
+                "full_scope_test_count": len(test_ids),
+                "related_test_ids": list(related_scope_ids),
+                "dropped_unrelated_failed_tests": [],
+                "baseline_unrelated_failed_tests": list(baseline_unrelated),
+                "full_failed_total": 1,
+                "related_failed_total": 1,
+                "unrelated_dropped_total": 0,
+                "full_post_passed_tests": [],
+                "full_post_failed_tests": ["metadata_suite_failed"],
+                "phase_a_suite_ok": False,
+            }
+            return False, [], ["metadata_suite_failed"]
+
         full_failed_set = set(full_failed)
-        related_id_set = set(related_ids)
+        related_id_set = set(related_scope_ids)
         filtered_failed = [t for t in full_failed if t in related_id_set]
         dropped_unrelated = [t for t in full_failed if t not in related_id_set]
         filtered_failed_set = set(filtered_failed)
-        filtered_passed = [t for t in related_scope_ids if t not in filtered_failed_set]
-        full_passed = [t for t in test_ids if t not in full_failed_set]
+        full_passed = full_passed or [t for t in test_ids if t not in full_failed_set]
+        related_passed = [t for t in related_scope_ids if t not in filtered_failed_set]
+
         self.last_validation_details = {
-            "validation_mode": "defects4c_phase_a_filtered",
+            "validation_mode": "defects4c_metadata",
             "related_scope_source": related_source,
             "related_scope_test_count": len(related_scope_ids),
             "full_scope_test_count": len(test_ids),
-            "related_test_ids": list(related_ids),
+            "related_test_ids": list(related_scope_ids),
+            "related_post_passed_tests": list(related_passed),
             "dropped_unrelated_failed_tests": list(dropped_unrelated),
             "baseline_unrelated_failed_tests": list(baseline_unrelated),
             "full_failed_total": len(full_failed),
@@ -315,135 +360,18 @@ class Defects4CAdapter(SandboxAdapter):
             "unrelated_dropped_total": len(dropped_unrelated),
             "full_post_passed_tests": list(full_passed),
             "full_post_failed_tests": list(full_failed),
+            "phase_a_suite_ok": suite_ok,
         }
         print(
-            f"    [Defects4C] full_scope_tests={len(test_ids)} "
+            f"    [Defects4C:{bug_meta.get('data_folder', 'metadata')}] full_scope_tests={len(test_ids)} "
             f"full_failed_total={len(full_failed)} "
             f"related_scope_tests={len(related_scope_ids)} "
             f"related_failed={len(filtered_failed)} "
             f"unrelated_dropped={len(dropped_unrelated)}"
         )
-        if dropped_unrelated:
-            print(f"    [Defects4C] dropped_unrelated={dropped_unrelated}")
         if not filtered_failed:
-            return True, (filtered_passed or related_scope_ids or ["defects4c_related_suite"]), []
-        return False, filtered_passed, filtered_failed
-
-    @staticmethod
-    def _defects4c_fix_shell(project: str, sha: str, container_patch: str) -> str:
-        """
-        Bash một dòng: chọn Python trong container (venv nếu có, không thì python3/python).
-        Cho phép override: docker exec -e DEFECTS4C_PYTHON=/path/to/python
-        """
-        bug_id = f"{project}@{sha}"
-        return (
-            "cd /src && "
-            "PY=''; "
-            'if [ -n "$DEFECTS4C_PYTHON" ] && [ -x "$DEFECTS4C_PYTHON" ]; then PY="$DEFECTS4C_PYTHON"; '
-            "elif [ -x /src/.venv/bin/python ]; then PY=/src/.venv/bin/python; "
-            "elif command -v python3 >/dev/null 2>&1; then PY=$(command -v python3); "
-            "elif command -v python >/dev/null 2>&1; then PY=$(command -v python); fi; "
-            'if [ -z "$PY" ]; then echo "Defects4C: khong tim thay python trong /src" >&2; exit 127; fi; '
-            f'exec "$PY" bug_helper_v1_out2.py fix {bug_id} {container_patch}'
-        )
-
-    def _resolve_defects4c_python_binary(self) -> Optional[str]:
-        override = (os.getenv("DEFECTS4C_PYTHON") or "").strip()
-        if override and os.path.isfile(override) and os.access(override, os.X_OK):
-            return override
-        venv_py = "/src/.venv/bin/python"
-        if os.path.isfile(venv_py) and os.access(venv_py, os.X_OK):
-            return venv_py
-        return shutil.which("python3") or shutil.which("python")
-
-    def _run_defects4c_fix(self, project, sha, host_patch_path):
-        container = os.getenv("DEFECTS4C_CONTAINER", "my_defects4c_tcpdump")
-        container_patch = self._container_patch_path(host_patch_path)
-        inner = self._defects4c_fix_shell(project, sha, container_patch)
-
-        if shutil.which("docker") and self._docker_container_running(container):
-            cmd = ["docker", "exec"]
-            py_host = (os.getenv("DEFECTS4C_PYTHON") or "").strip()
-            if py_host:
-                cmd.extend(["-e", f"DEFECTS4C_PYTHON={py_host}"])
-            cmd.extend([container, "bash", "-lc", inner])
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60 * 30)
-            if result.returncode != 0:
-                err = result.stderr.decode("utf-8", errors="ignore")
-                if err.strip():
-                    print(err[-1000:])
-            return result.returncode == 0
-
-        if os.path.exists("/src/bug_helper_v1_out2.py"):
-            py = self._resolve_defects4c_python_binary()
-            if not py:
-                print("    [Defects4C] Không tìm thấy python để chạy bug_helper (đặt DEFECTS4C_PYTHON).")
-                return False
-            cmd = [
-                py,
-                "bug_helper_v1_out2.py",
-                "fix",
-                f"{project}@{sha}",
-                container_patch,
-            ]
-            result = subprocess.run(cmd, cwd="/src", stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60 * 30)
-            return result.returncode == 0
-
-        print(
-            "    [Defects4C] Không tìm thấy container Defects4C đang chạy. "
-            "Hãy chạy Docker theo README hoặc đặt DEFECTS4C_CONTAINER."
-        )
-        return False
-
-    def _reset_defects4c_repo(self, project: str, sha: str) -> bool:
-        repo_rel = f"/out/{project}/git_repo_dir_{sha}"
-        container = os.getenv("DEFECTS4C_CONTAINER", "my_defects4c_tcpdump")
-        reset_cmd = (
-            f"repo={repo_rel}; "
-            "if [ -d \"$repo/.git\" ]; then "
-            "cd \"$repo\" && git reset --hard && git clean -ffdx; "
-            "fi"
-        )
-        if shutil.which("docker") and self._docker_container_running(container):
-            cmd = ["docker", "exec", container, "bash", "-lc", reset_cmd]
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            return result.returncode == 0
-
-        host_repo = os.path.join(DEFECTS4C_OUT_DIR, project, f"git_repo_dir_{sha}")
-        if os.path.isdir(os.path.join(host_repo, ".git")):
-            r1 = subprocess.run(["git", "-C", host_repo, "reset", "--hard"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            r2 = subprocess.run(["git", "-C", host_repo, "clean", "-ffdx"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            return r1.returncode == 0 and r2.returncode == 0
-        return False
-
-    def _prepare_phase_a_workspace(self, project: str, sha: str, commit_before: str) -> bool:
-        container = os.getenv("DEFECTS4C_CONTAINER", "my_defects4c_tcpdump")
-        repo_rel = f"/out/{project}/git_repo_dir_{sha}"
-        prep_cmd = (
-            f"repo={shlex.quote(repo_rel)}; "
-            f"before={shlex.quote(commit_before)}; "
-            "if [ ! -d \"$repo/.git\" ]; then exit 2; fi; "
-            "git -C \"$repo\" reset --hard && "
-            "git -C \"$repo\" clean -ffdx && "
-            "git -C \"$repo\" checkout -f \"$before\" && "
-            f"git -C \"$repo\" checkout {shlex.quote(sha)} -- tests"
-        )
-        if shutil.which("docker") and self._docker_container_running(container):
-            result = subprocess.run(
-                ["docker", "exec", container, "bash", "-lc", prep_cmd],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            return result.returncode == 0
-
-        host_repo = os.path.join(DEFECTS4C_OUT_DIR, project, f"git_repo_dir_{sha}")
-        if not os.path.isdir(os.path.join(host_repo, ".git")):
-            return False
-        r1 = subprocess.run(["git", "-C", host_repo, "reset", "--hard"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        r2 = subprocess.run(["git", "-C", host_repo, "clean", "-ffdx"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        r3 = subprocess.run(["git", "-C", host_repo, "checkout", "-f", commit_before], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        r4 = subprocess.run(["git", "-C", host_repo, "checkout", sha, "--", "tests"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        return all(x.returncode == 0 for x in (r1, r2, r3, r4))
+            return True, list(full_passed), []
+        return False, list(full_passed), filtered_failed
 
     def _resolve_source_path_in_repo(self, host_repo: str, src_basename: str) -> Optional[str]:
         direct = os.path.join(host_repo, src_basename)
@@ -458,124 +386,158 @@ class Defects4CAdapter(SandboxAdapter):
         if not matches:
             return None
         if len(matches) > 1:
-            print(f"    [Defects4C] WARN multiple candidates for {src_basename}, chọn {matches[0]}")
+            print(f"    [Defects4C] ERROR multiple candidates for {src_basename}: {matches}")
+            return None
         return matches[0]
 
-    def _run_phase_a_full_suite(self, project: str, sha: str) -> Tuple[bool, list, list]:
-        container = os.getenv("DEFECTS4C_CONTAINER", "my_defects4c_tcpdump")
-        repo_rel = f"/out/{project}/git_repo_dir_{sha}"
-        all_ids = self._collect_defects4c_test_ids(project, sha)
-        cflags = "-O0 -g -fno-omit-frame-pointer -fno-common -fsanitize=address"
-        ldflags = "-fsanitize=address"
-        run_cmd = (
-            f"repo={shlex.quote(repo_rel)}; "
-            "if [ ! -d \"$repo/tests\" ]; then exit 2; fi; "
-            "cd \"$repo\" && "
-            f"CFLAGS={shlex.quote(cflags)} LDFLAGS={shlex.quote(ldflags)} ./configure --prefix=\"$repo\" >/dev/null 2>&1 && "
-            "make -j\"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)\" >/dev/null 2>&1 && "
-            "cd tests && timeout 1800 ./TESTrun.sh > \"$repo/apr_phaseA_fullsuite.log\" 2>&1; "
-            "rc=$?; "
-            "if [ $rc -ne 0 ]; then exit 1; fi; "
-            "if grep -q \"TEST FAILED\" \"$repo/apr_phaseA_fullsuite.log\"; then exit 1; fi; "
-            "exit 0"
-        )
-        if shutil.which("docker") and self._docker_container_running(container):
-            result = subprocess.run(
-                ["docker", "exec", container, "bash", "-lc", run_cmd],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=60 * 50,
-            )
-            failed = self._parse_failed_tests_from_fullsuite_log(project, sha, "apr_phaseA_fullsuite.log")
-            passed = [t for t in all_ids if t not in set(failed)]
-            return result.returncode == 0 and not failed, passed, failed
+    def _select_defects4c_container(self, bug_meta: Optional[dict] = None) -> str:
+        bug_meta = bug_meta or {}
+        env_c = (os.getenv("DEFECTS4C_CONTAINER") or "").strip()
+        folder = str(bug_meta.get("data_folder") or bug_meta.get("metadata_slug") or "").strip()
+        project = str(bug_meta.get("project") or "").strip()
+        project_tail = project.split("___")[-1].lower() if project else ""
+        candidates = []
+        if env_c:
+            candidates.append(env_c)
+        if folder:
+            candidates.append(f"my_defects4c_{folder.lower()}")
+        if project_tail and project_tail != folder.lower():
+            candidates.append(f"my_defects4c_{project_tail}")
+        candidates.append("my_defects4c")
+        for name in dict.fromkeys(candidates):
+            if shutil.which("docker") and self._docker_container_running(name):
+                return name
+        return ""
 
-        host_repo = os.path.join(DEFECTS4C_OUT_DIR, project, f"git_repo_dir_{sha}")
-        if not os.path.isdir(os.path.join(host_repo, "tests")):
-            return False, [], (all_ids or ["defects4c_full_suite"])
-        try:
-            subprocess.run(
-                ["bash", "-lc", f"CFLAGS={shlex.quote(cflags)} LDFLAGS={shlex.quote(ldflags)} ./configure --prefix={shlex.quote(host_repo)} >/dev/null 2>&1 && make -j4 >/dev/null 2>&1"],
-                cwd=host_repo,
-                timeout=60 * 20,
-                check=True,
-            )
-            log_path = os.path.join(host_repo, "apr_phaseA_fullsuite.log")
-            with open(log_path, "w") as log_f:
-                result = subprocess.run(
-                    ["bash", "-lc", "timeout 1800 ./TESTrun.sh"],
-                    cwd=os.path.join(host_repo, "tests"),
-                    stdout=log_f,
-                    stderr=log_f,
-                    timeout=60 * 50,
-                )
-            if result.returncode != 0:
-                failed = self._parse_failed_tests_from_fullsuite_log(project, sha, "apr_phaseA_fullsuite.log")
-                passed = [t for t in all_ids if t not in set(failed)]
-                return False, passed, (failed or ["defects4c_full_suite"])
-            with open(log_path, "r", errors="ignore") as f:
-                failed = self._extract_failed_tests_from_log_text(f.read())
-            passed = [t for t in all_ids if t not in set(failed)]
-            return not failed, passed, failed
-        except Exception:
-            return False, [], (all_ids or ["defects4c_full_suite"])
-
-    def _run_defects4c_full_suite(self, project: str, sha: str) -> Tuple[bool, list, list]:
-        test_ids = self._collect_defects4c_test_ids(project, sha)
-        container = os.getenv("DEFECTS4C_CONTAINER", "my_defects4c_tcpdump")
-        repo_rel = f"/out/{project}/git_repo_dir_{sha}"
+    def _prepare_generic_workspace(self, container: str, container_repo: str, commit_before: str, clean: bool) -> bool:
+        clean_cmd = " && git clean -ffdx" if clean else ""
         cmd = (
-            f"repo={repo_rel}; "
-            "if [ ! -d \"$repo/tests\" ]; then exit 2; fi; "
-            "cd \"$repo/tests\" && timeout 1800 ./TESTrun.sh > \"$repo/apr_fullsuite.log\" 2>&1; "
-            "rc=$?; "
-            "if [ $rc -ne 0 ]; then exit 1; fi; "
-            "if grep -q \"TEST FAILED\" \"$repo/apr_fullsuite.log\"; then exit 1; fi; "
-            "exit 0"
+            f"repo={shlex.quote(container_repo)}; "
+            f"before={shlex.quote(commit_before)}; "
+            "if [ ! -d \"$repo/.git\" ]; then exit 2; fi; "
+            "git -C \"$repo\" reset --hard"
+            f"{clean_cmd} && "
+            "git -C \"$repo\" checkout -f \"$before\""
         )
+        result = subprocess.run(
+            ["docker", "exec", container, "bash", "-lc", cmd],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return result.returncode == 0
 
-        if shutil.which("docker") and self._docker_container_running(container):
-            result = subprocess.run(
-                ["docker", "exec", container, "bash", "-lc", cmd],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=60 * 40,
-            )
-            if result.returncode == 0:
-                return True, (test_ids or ["defects4c_full_suite"]), []
-            return False, [], (test_ids or ["defects4c_full_suite"])
+    def _reset_generic_workspace(self, container: str, container_repo: str) -> bool:
+        cmd = (
+            f"repo={shlex.quote(container_repo)}; "
+            "if [ -d \"$repo/.git\" ]; then "
+            "git -C \"$repo\" reset --hard >/dev/null 2>&1; "
+            "fi"
+        )
+        result = subprocess.run(
+            ["docker", "exec", container, "bash", "-lc", cmd],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return result.returncode == 0
 
-        host_repo = os.path.join(DEFECTS4C_OUT_DIR, project, f"git_repo_dir_{sha}")
-        tests_dir = os.path.join(host_repo, "tests")
-        if not os.path.isdir(tests_dir):
-            return False, [], (test_ids or ["defects4c_full_suite"])
+    def _apply_generic_patch(
+        self,
+        container: str,
+        patched_file_path: str,
+        host_repo: str,
+        host_target: str,
+        container_repo: str,
+    ) -> bool:
         try:
-            log_path = os.path.join(host_repo, "apr_fullsuite.log")
-            with open(log_path, "w") as log_f:
-                result = subprocess.run(
-                    ["bash", "-lc", "timeout 1800 ./TESTrun.sh"],
-                    cwd=tests_dir,
-                    stdout=log_f,
-                    stderr=log_f,
-                    timeout=60 * 40,
-                )
-            if result.returncode == 0:
-                try:
-                    with open(log_path, "r", errors="ignore") as f:
-                        if "TEST FAILED" in f.read():
-                            return False, [], (test_ids or ["defects4c_full_suite"])
-                except Exception:
-                    pass
-                return True, (test_ids or ["defects4c_full_suite"]), []
-            return False, [], (test_ids or ["defects4c_full_suite"])
+            shutil.copy2(patched_file_path, host_target)
+            rel = os.path.relpath(host_target, host_repo).replace(os.sep, "/")
         except Exception:
-            return False, [], (test_ids or ["defects4c_full_suite"])
+            return False
+        if rel.startswith(".."):
+            return False
 
-    def _collect_defects4c_test_ids(self, project: str, sha: str) -> list:
-        host_testlist = os.path.join(
+        container_target = f"{container_repo.rstrip('/')}/{rel}"
+        tmp_in_container = f"/tmp/apr_patch_{int(time.time() * 1000)}_{os.getpid()}.c"
+        cp_in = subprocess.run(
+            ["docker", "cp", patched_file_path, f"{container}:{tmp_in_container}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if cp_in.returncode != 0:
+            return False
+        install_cmd = (
+            f"dst={shlex.quote(container_target)}; "
+            f"tmp={shlex.quote(tmp_in_container)}; "
+            "mkdir -p \"$(dirname \"$dst\")\" && cp \"$tmp\" \"$dst\" && rm -f \"$tmp\""
+        )
+        cp_out = subprocess.run(
+            ["docker", "exec", container, "bash", "-lc", install_cmd],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return cp_out.returncode == 0
+
+    def _run_metadata_test_suite(
+        self,
+        container: str,
+        container_repo: str,
+        bug_meta: dict,
+        test_ids: list,
+    ) -> Tuple[bool, list, list]:
+        compile_cmd = (bug_meta.get("compile_cmd") or "").strip()
+        template = (bug_meta.get("test_cmd_template") or "").strip()
+        if not compile_cmd or not template or not test_ids:
+            return False, [], []
+
+        lines = [
+            "set +e",
+            f"cd {shlex.quote(container_repo)} || exit 2",
+            f"({compile_cmd}) >/tmp/udbg_compile.log 2>&1",
+            "compile_rc=$?",
+            "if [ $compile_rc -ne 0 ]; then echo __UD_COMPILE_FAIL__; tail -80 /tmp/udbg_compile.log; exit 97; fi",
+        ]
+        for tid in test_ids:
+            test_cmd = template.replace("{test_id}", shlex.quote(tid))
+            marker = shlex.quote(tid)
+            lines.extend([
+                f"({test_cmd}) >/tmp/udbg_test.log 2>&1",
+                "rc=$?",
+                f"if [ $rc -eq 0 ]; then echo __UD_PASS__ {marker}; else echo __UD_FAIL__ {marker}; fi",
+            ])
+        script = "\n".join(lines)
+        result = subprocess.run(
+            ["docker", "exec", container, "bash", "-lc", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60 * 40,
+        )
+        passed, failed = [], []
+        for line in (result.stdout or "").splitlines():
+            if line.startswith("__UD_PASS__ "):
+                passed.append(line.split(" ", 1)[1].strip())
+            elif line.startswith("__UD_FAIL__ "):
+                failed.append(line.split(" ", 1)[1].strip())
+        if result.returncode == 97:
+            return False, passed, ["compile_failed"]
+        if result.returncode != 0 and not failed and not passed:
+            return False, [], []
+        return not failed, passed, failed
+
+    def _collect_defects4c_test_ids(self, project: str, sha: str, bug_meta: Optional[dict] = None) -> list:
+        metadata_ids = self._metadata_test_ids_from_bug_meta(bug_meta or {})
+        if metadata_ids:
+            return metadata_ids
+
+        host_repo = (bug_meta or {}).get("source_repo_dir") or os.path.join(
             DEFECTS4C_OUT_DIR,
             project,
             f"git_repo_dir_{sha}",
+        )
+        host_testlist = os.path.join(
+            host_repo,
             "tests",
             "TESTLIST",
         )
@@ -621,33 +583,17 @@ class Defects4CAdapter(SandboxAdapter):
             normalized = self._unique_test_ids(str(x).strip() for x in related if str(x).strip())
             if normalized:
                 return normalized, "filter_info.related_test_ids"
-
-        tests = bug_meta.get("tests", [])
-        fail_ids = []
-        for test in tests if isinstance(tests, list) else []:
+        failed = []
+        for test in bug_meta.get("tests", []) or []:
             if not isinstance(test, dict):
                 continue
-            if str(test.get("outcome", "")).upper() != "FAIL":
-                continue
-            tid = str(test.get("test_id", "")).strip()
-            if tid:
-                fail_ids.append(tid)
-        normalized = self._unique_test_ids(fail_ids)
+            if str(test.get("outcome", "")).upper() in ("FAIL", "FAILED"):
+                tid = str(test.get("test_id", "")).strip()
+                if tid:
+                    failed.append(tid)
+        normalized = self._unique_test_ids(failed)
         if normalized:
-            return normalized, "metadata.tests.fail"
-
-        legacy_paths = bug_meta.get("files", {}).get("test", [])
-        legacy_ids = []
-        for path in legacy_paths if isinstance(legacy_paths, list) else []:
-            base = os.path.basename(str(path))
-            if not base or base == "TESTLIST":
-                continue
-            legacy_ids.append(base)
-            if "." in base:
-                legacy_ids.append(base.split(".", 1)[0])
-        normalized = self._unique_test_ids(legacy_ids)
-        if normalized:
-            return normalized, "legacy.files.test"
+            return normalized, "metadata.initial_failed_tests"
         return [], "empty"
 
     @staticmethod
@@ -661,26 +607,6 @@ class Defects4CAdapter(SandboxAdapter):
             out.append(value)
         return out
 
-    def _parse_failed_tests_from_fullsuite_log(self, project: str, sha: str, log_name: str) -> list:
-        host_repo = os.path.join(DEFECTS4C_OUT_DIR, project, f"git_repo_dir_{sha}")
-        log_path = os.path.join(host_repo, log_name)
-        if not os.path.isfile(log_path):
-            return []
-        try:
-            with open(log_path, "r", errors="ignore") as f:
-                txt = f.read()
-        except Exception:
-            return []
-        return self._extract_failed_tests_from_log_text(txt)
-
-    def _extract_failed_tests_from_log_text(self, text: str) -> list:
-        failed = set()
-        for m in re.finditer(r"^\s*([A-Za-z0-9._+\-]+)\s*:\s*TEST FAILED", text, flags=re.MULTILINE):
-            failed.add(m.group(1).strip())
-        for m in re.finditer(r"^\s*Failed test:\s*([A-Za-z0-9._+\-]+)\s*$", text, flags=re.MULTILINE):
-            failed.add(m.group(1).strip())
-        return sorted(failed)
-
     def _docker_container_running(self, container):
         result = subprocess.run(
             ["docker", "inspect", "-f", "{{.State.Running}}", container],
@@ -688,24 +614,6 @@ class Defects4CAdapter(SandboxAdapter):
             stderr=subprocess.PIPE,
         )
         return result.returncode == 0 and result.stdout.decode().strip() == "true"
-
-    def _container_patch_path(self, host_patch_path):
-        rel = os.path.relpath(host_patch_path, DEFECTS4C_PATCHES_DIR)
-        return "/patches/" + rel.replace(os.sep, "/")
-
-    def _read_status_values(self, project, sha, md5):
-        status_paths = [
-            os.path.join(os.path.dirname(DEFECTS4C_PATCHES_DIR), "out_tmp_dirs", project, "logs", f"patch_{sha}_{md5}.status"),
-            f"/out/{project}/logs/patch_{sha}_{md5}.status",
-        ]
-        for path in status_paths:
-            if os.path.exists(path):
-                try:
-                    with open(path, "r") as f:
-                        return [line.strip() for line in f if line.strip()]
-                except Exception:
-                    return []
-        return []
 
 
 def _compare_output(actual: str, expected: str) -> bool:
@@ -724,7 +632,7 @@ def _compare_output(actual: str, expected: str) -> bool:
     return actual_lines == expected_lines
 
 
-def defects4c_docker_ready() -> Tuple[bool, str]:
+def defects4c_docker_ready(dataset_name: str = "defects4c") -> Tuple[bool, str]:
     """
     Kiểm tra APR/validate Defects4C có thể chạy không (Docker + container đang Running).
 
@@ -739,7 +647,14 @@ def defects4c_docker_ready() -> Tuple[bool, str]:
     env_c = (os.getenv("DEFECTS4C_CONTAINER") or "").strip()
     if env_c:
         candidates.append(env_c)
-    for name in ("my_defects4c_tcpdump", "my_defects4c"):
+    ds = (dataset_name or "").strip().lower()
+    if ds.startswith("defects4c-"):
+        ds = ds[len("defects4c-"):]
+    ordered = []
+    if ds and ds != "defects4c":
+        ordered.append(f"my_defects4c_{ds}")
+    ordered.append("my_defects4c")
+    for name in ordered:
         if name not in candidates:
             candidates.append(name)
 
@@ -753,7 +668,7 @@ def defects4c_docker_ready() -> Tuple[bool, str]:
             return True, name
 
     tried = ", ".join(candidates)
-    hint = env_c or "my_defects4c_tcpdump"
+    hint = env_c or (f"my_defects4c_{ds}" if ds and ds != "defects4c" else "my_defects4c")
     return (
         False,
         f"Không có container Defects4C đang chạy (đã thử: {tried}). "
@@ -767,7 +682,9 @@ def get_sandbox_adapter(dataset_name, bug_id):
     if dataset_name.lower() == "codeflaws":
         return CodeflawsAdapter(bug_id)
 
-    if dataset_name.lower() in ("defects4c", "defects4c-tcpdump", "tcpdump"):
+    # Any non-Codeflaws dataset handled here is expected to be a Defects4C
+    # data folder under out_tmp_dirs/unified_debugging/<dataset_name>/metadata.
+    if dataset_name.lower() == "defects4c" or get_defects4c_raw_record(bug_id):
         return Defects4CAdapter(bug_id)
 
     raise ValueError(f"Dataset '{dataset_name}' chưa có Adapter tương ứng hỗ trợ!")
