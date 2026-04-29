@@ -15,7 +15,9 @@ from core.utils import (
     extract_function_code,
     normalize_code_for_edit_distance,
     parse_sbfl_qualified_name,
+    replace_source_range_bytes,
     resolve_fl_candidate_source_path,
+    source_byte_range_to_char_range,
     get_codeflaws_accepted_cfile,
 )
 
@@ -231,24 +233,26 @@ def _call_claude(prompt: str, model: Optional[str] = None) -> Optional[str]:
         return None
     
 
-def _call_qwen(prompt: str, model: str = "qwen/qwen-2.5-coder-32b-instruct") -> Optional[str]:
+def _call_qwen(prompt: str, model: str = "qwen/qwen3-coder-30b-a3b-instruct") -> Optional[str]:
     try:
-        # 1. Lấy Key và kiểm tra
-        api_key = os.getenv("QWEN_API_KEY")
+        # OpenRouter key is preferred; QWEN_API_KEY remains as a backward-compatible alias.
+        api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("QWEN_API_KEY")
+        base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+        referer = os.getenv("OPENROUTER_SITE_URL", "http://localhost:3000")
+        app_title = os.getenv("OPENROUTER_APP_NAME", "UET_APR_Research")
         log_dir = Path(f"results/qwen_logs/{model}")
         log_dir.mkdir(parents=True, exist_ok=True)
         if not api_key:
-            print("[LLM] LỖI: Không tìm thấy API Key trong môi trường.")
+            print("[LLM] LỖI: Không tìm thấy OPENROUTER_API_KEY trong môi trường.")
             return None
 
-        url = "https://openrouter.ai/api/v1/chat/completions"
+        url = f"{base_url}/chat/completions"
         
-        # 2. Ép Header chuẩn OpenRouter - Đây là chỗ sửa lỗi 401 của bạn
         headers = {
             "Authorization": f"Bearer {api_key.strip()}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "http://localhost:3000", # Bắt buộc cho OpenRouter
-            "X-Title": "UET_APR_Research"
+            "HTTP-Referer": referer,
+            "X-Title": app_title,
         }
 
         payload = {
@@ -261,7 +265,7 @@ def _call_qwen(prompt: str, model: str = "qwen/qwen-2.5-coder-32b-instruct") -> 
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.1, # Để kết quả ổn định hơn (ít NoiseFix hơn)
-            "max_tokens": 4096
+            "max_tokens": int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "12000")),
         }
 
         # 3. Gọi API với timeout để tránh treo máy như lúc nãy
@@ -296,8 +300,8 @@ def call_llm(prompt: str, provider: Optional[str] = None) -> Optional[str]:
 
     Args:
         prompt:   Nội dung prompt gửi đến LLM.
-        provider: 'gemini' | 'openai'. Nếu None, đọc từ biến môi trường
-                  LLM_PROVIDER (mặc định: 'gemini').
+        provider: 'gemini' | 'openai' | 'claude' | 'qwen' | 'openrouter'.
+                  Nếu None, đọc từ biến môi trường LLM_PROVIDER.
 
     Returns:
         Chuỗi mã nguồn do LLM trả về, hoặc None nếu lỗi.
@@ -318,12 +322,12 @@ def call_llm(prompt: str, provider: Optional[str] = None) -> Optional[str]:
         print(f"[LLM] Provider: Claude ({claude_model})")
         return _call_claude(prompt, model=claude_model)
 
-    if chosen == "qwen":
-        qwen_model = os.getenv("QWEN_MODEL", "qwen/qwen-2.5-coder-32b-instruct")
+    if chosen in ("qwen", "openrouter"):
+        qwen_model = os.getenv("QWEN_MODEL", "qwen/qwen3-coder-30b-a3b-instruct")
         print(f"[LLM] Provider: Qwen ({qwen_model})")
         return _call_qwen(prompt, model=qwen_model)
 
-    print(f"[LLM] Warning: Provider không hỗ trợ '{chosen}'. Chọn 'gemini' hoặc 'openai'.")
+    print(f"[LLM] Warning: Provider không hỗ trợ '{chosen}'. Chọn 'gemini', 'openai', 'claude', hoặc 'qwen'.")
     return None
 
 
@@ -332,17 +336,22 @@ def call_llm(prompt: str, provider: Optional[str] = None) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def validate_patch(patched_file_path: str, bug_id: str, dataset: str = "codeflaws",
-                   src_basename: Optional[str] = None):
+                   src_basename: Optional[str] = None,
+                   src_relpath: Optional[str] = None):
     """Sử dụng Sandbox Adapter để kiểm chứng bản vá.
 
-    ``src_basename`` cho Defects4C biết patch này nhằm thay thế file nào
-    (cần thiết khi APR vá một file phụ thay vì file bug chính).
+    ``src_relpath`` cho Defects4C biết chính xác file nào trong buggy version
+    cần thay thế. ``src_basename`` chỉ còn là fallback/tên hiển thị.
     """
     print(f"[APR] Validating patch cho {bug_id} với adapter '{dataset}'...")
     validate_patch.last_details = {}
     try:
         adapter = get_sandbox_adapter(dataset, bug_id)
-        result = adapter.validate(patched_file_path, src_basename=src_basename)
+        result = adapter.validate(
+            patched_file_path,
+            src_basename=src_basename,
+            src_relpath=src_relpath,
+        )
         validate_patch.last_details = getattr(adapter, "last_validation_details", {}) or {}
         return result
     except Exception as e:
@@ -351,6 +360,21 @@ def validate_patch(patched_file_path: str, bug_id: str, dataset: str = "codeflaw
 
 
 validate_patch.last_details = {}
+
+
+def _candidate_relpath_from_buggy_tree(candidate_path: str, raw_meta: Optional[dict]) -> str:
+    if not candidate_path or not raw_meta:
+        return ""
+    buggy_tree_dir = raw_meta.get("buggy_tree_dir") or ""
+    if not buggy_tree_dir:
+        return ""
+    try:
+        rel = os.path.relpath(candidate_path, buggy_tree_dir).replace(os.sep, "/")
+    except ValueError:
+        return ""
+    if rel.startswith("../") or rel == ".." or os.path.isabs(rel):
+        return ""
+    return rel
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +389,8 @@ def _trim_source_for_prompt(source_code: str, start_idx: int, end_idx: int) -> s
     quanh hàm lỗi (để LLM thấy struct & macro liên quan). Đệm bằng comment
     "... [source truncated] ..." để LLM biết có cắt bỏ.
     """
-    if len(source_code) <= APR_MAX_SOURCE_CHARS or start_idx < 0 or end_idx < 0:
+    start_char, end_char = source_byte_range_to_char_range(source_code, start_idx, end_idx)
+    if len(source_code) <= APR_MAX_SOURCE_CHARS or start_char < 0 or end_char < 0:
         return source_code
 
     head_budget = min(6000, APR_MAX_SOURCE_CHARS // 4)
@@ -373,8 +398,8 @@ def _trim_source_for_prompt(source_code: str, start_idx: int, end_idx: int) -> s
     neighborhood = max(2000, remaining // 2)
 
     head = source_code[:head_budget]
-    func_lo = max(head_budget, start_idx - neighborhood)
-    func_hi = min(len(source_code), end_idx + neighborhood)
+    func_lo = max(head_budget, start_char - neighborhood)
+    func_hi = min(len(source_code), end_char + neighborhood)
     middle_skipped = func_lo > head_budget
     tail_skipped   = func_hi < len(source_code)
 
@@ -396,16 +421,6 @@ def _compact_test_list(test_ids):
         return list(test_ids) if test_ids else []
     extra = len(test_ids) - APR_MAX_TEST_ID_STORE
     return list(test_ids[:APR_MAX_TEST_ID_STORE]) + [f"...(+{extra} more)"]
-
-
-def _compact_validation_details(details: dict) -> dict:
-    """Rút gọn các list test IDs trong validation details trước khi ghi JSON."""
-    if not isinstance(details, dict):
-        return {}
-    compacted = {}
-    for key, value in details.items():
-        compacted[key] = _compact_test_list(value) if isinstance(value, list) else value
-    return compacted
 
 
 def _copy_accepted_patch(dataset: str, bug_id: str, bug_source_path: str,
@@ -451,27 +466,22 @@ def _copy_accepted_patch(dataset: str, bug_id: str, bug_source_path: str,
 
 
 def _build_failed_test_context(bug: BugRecord) -> str:
-    """Trích xuất context test thất bại đầu tiên từ BugRecord (không đọc lại disk)."""
+    """Tóm tắt toàn bộ failed tests từ BugRecord (không đọc lại disk)."""
     failed_tests = [t for t in bug.tests if t.get("outcome") in ("FAIL", "FAILED")]
     if not failed_tests:
         return ""
 
-    tc = failed_tests[0]
-    tc_name     = tc.get("test_id", "Unknown")
-    tc_reason   = tc.get("fail_reason", "Unknown")
-    tc_actual   = tc.get("actual_output", "N/A")
+    lines = [
+        "### Failed test summary",
+        "The following tests fail on the buggy version:",
+    ]
+    for idx, tc in enumerate(failed_tests, start=1):
+        tc_name = str(tc.get("test_id") or "Unknown").strip()
+        tc_reason = str(tc.get("fail_reason") or "Unknown").strip()
+        lines.append(f"{idx}. test_id: {tc_name}")
+        lines.append(f"   fail_reason: {tc_reason}")
 
-    if len(tc_actual) > 500:
-        tc_actual = tc_actual[:500] + "\n...[truncated]"
-
-    return f"""
-### Failed test information (Test Case: {tc_name})
-- **Failure reason:** {tc_reason}
-- **Actual output:**
-```
-{tc_actual.strip()}
-```
-"""
+    return "\n".join(lines) + "\n"
 
 
 def _clean_llm_patch(patched_func: str) -> str:
@@ -497,7 +507,8 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
 
     Args:
         dataset:      Tên dataset (mặc định 'codeflaws').
-        llm_provider: 'gemini' | 'openai'. Nếu None, đọc từ LLM_PROVIDER trong .env.
+        llm_provider: 'gemini' | 'openai' | 'claude' | 'qwen' | 'openrouter'.
+                      Nếu None, đọc từ LLM_PROVIDER trong .env.
     """
     os.makedirs(EXPERIMENTS_DIR, exist_ok=True)
 
@@ -523,6 +534,27 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
     print(f"[APR] Đang load bug records từ dataset '{dataset}'...")
     loader  = get_loader(dataset)
     bug_map = {b.bug_id: b for b in loader.load_all()}
+    dataset_key = (dataset or "").strip().lower()
+    filtered_fl_results = {}
+    skipped_other_dataset = 0
+    skipped_missing_bug = 0
+    for bug_id, result_data in fl_results.items():
+        result_dataset = ""
+        if isinstance(result_data, dict):
+            result_dataset = str(result_data.get("dataset") or "").strip().lower()
+        if result_dataset and result_dataset != dataset_key:
+            skipped_other_dataset += 1
+            continue
+        if bug_id not in bug_map:
+            skipped_missing_bug += 1
+            continue
+        filtered_fl_results[bug_id] = result_data
+    fl_results = filtered_fl_results
+    if skipped_other_dataset or skipped_missing_bug:
+        print(
+            f"[APR] Bỏ qua {skipped_other_dataset} FL records khác dataset và "
+            f"{skipped_missing_bug} records không có trong loader '{dataset}'."
+        )
 
     apr_results = {}
     apr_results_file = os.path.join(EXPERIMENTS_DIR, "apr_results.json")
@@ -532,6 +564,15 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
                 apr_results = json.load(f)
         except Exception:
             pass
+    apr_results = {
+        bug_id: result
+        for bug_id, result in apr_results.items()
+        if bug_id in bug_map and (
+            not isinstance(result, dict)
+            or not result.get("dataset")
+            or str(result.get("dataset")).strip().lower() == dataset_key
+        )
+    }
 
     print("[APR] Đang chạy Automated Program Repair (LLM)...")
 
@@ -583,6 +624,8 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
         validation_details = {}
         attempted     = False   # đã thử ít nhất 1 hàm
         llm_attempted = False   # LLM đã thực sự sinh patch ít nhất 1 lần
+        candidate_results = []
+        best_candidate = None
 
         # Sao lưu accepted patch một lần (cho evaluation sau này).
         # Logic tách theo dataset — tránh áp sai hàm codeflaws cho defects4c.
@@ -610,9 +653,11 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
                 with open(candidate_path, "r") as f:
                     source_cache[candidate_path] = f.read()
             source_code = source_cache[candidate_path]
-            cand_base = os.path.basename(candidate_path)
+            candidate_relpath = _candidate_relpath_from_buggy_tree(candidate_path, raw_meta)
+            cand_base = os.path.basename(candidate_relpath or candidate_path)
+            cand_label = candidate_relpath or cand_base
 
-            print(f"  - Kiểm tra hàm '{func_name}' trong {cand_base} (Score: {score:.4f})")
+            print(f"  - Kiểm tra hàm '{func_name}' trong {cand_label} (Score: {score:.4f})")
             func_code, start_idx, end_idx = extract_function_code(source_code, func_name)
             if not func_code:
                 print(f"    WARNING: Không thể trích xuất hàm {func_name}")
@@ -622,8 +667,9 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
             attempted = True
 
             prompt_source = _trim_source_for_prompt(source_code, start_idx, end_idx)
-            prompt = f"""You are an expert in fixing C/C++ bugs.
-Your task is to fix an algorithmic or compilation bug in function `{func_name}` from the code below (Bug ID: {bug_id}).
+            prompt = f"""You are an expert C/C++ maintenance engineer.
+Your task is to repair the likely defect in function `{func_name}` from the code below (Bug ID: {bug_id}).
+The defect may be a crash, memory-safety issue, bounds-checking error, parser edge case, undefined behavior, or incorrect error handling.
 
 {failed_tests_context}
 
@@ -632,15 +678,17 @@ Your task is to fix an algorithmic or compilation bug in function `{func_name}` 
 {prompt_source}
 ```
 
-### The buggy function to repair (`{func_name}` in `{cand_base}`):
+### The buggy function to repair (`{func_name}` in `{cand_label}`):
 ```c
 {func_code}
 ```
 
 ### Requirements:
 1. Find and fix the bug inside function `{func_name}`.
-2. RETURN ONLY the fixed C source code of function `{func_name}` (so I can parse and replace it directly using regex).
-3. Do NOT include any explanation or preface text, do NOT rewrite `#include` lines, and do NOT add `main()` if you are fixing another function.
+2. Keep the patch minimal and preserve existing coding style, signatures, macros, and helper APIs.
+3. Do not invent new global helpers, includes, or unrelated refactors.
+4. RETURN ONLY the complete fixed C source code of function `{func_name}`.
+5. Do NOT include any explanation or preface text, do NOT rewrite `#include` lines, and do NOT add `main()`.
 
 ```c
 // Start rewriting function {func_name} here:
@@ -652,19 +700,48 @@ Your task is to fix an algorithmic or compilation bug in function `{func_name}` 
                 continue
 
             llm_attempted = True
-            patched_func   = _clean_llm_patch(raw_patch)
-            patched_source = source_code[:start_idx] + patched_func + source_code[end_idx:]
-            repair_target_file = candidate_path
-
-            # Chặn no-op patch: LLM trả lại y nguyên hàm lỗi (hoặc khác whitespace/comment)
-            # sẽ làm kết quả APR trông như "đã vá" nhưng thực chất không đổi logic.
-            orig_norm = normalize_code_for_edit_distance(func_code)
-            patched_norm = normalize_code_for_edit_distance(patched_func)
-            if not patched_norm or patched_norm == orig_norm or patched_source == source_code:
-                print("    [NO-OP] Patch không thay đổi hàm nguồn, bỏ qua candidate này.")
+            candidate_patched_func = _clean_llm_patch(raw_patch)
+            reparsed_func, _, _ = extract_function_code(candidate_patched_func, func_name)
+            if not reparsed_func:
+                print("    [ERROR] LLM trả về function không hoàn chỉnh/không parse được. Bỏ qua validate.")
+                candidate_results.append({
+                    "function": qualified_name,
+                    "score": score,
+                    "status": "validation_error",
+                    "validation_error": "malformed_function",
+                    "repair_target_file": candidate_path,
+                    "repair_target_relpath": candidate_relpath,
+                    "patched_function": candidate_patched_func,
+                    "patched_file": "",
+                    "post_passed_count": 0,
+                    "post_failed_count": 0,
+                    "post_passed_tests": [],
+                    "post_failed_tests": [],
+                })
                 continue
 
-            safe_cand = cand_base.replace("/", "_").replace(" ", "_")
+            candidate_patched_source = replace_source_range_bytes(
+                source_code,
+                start_idx,
+                end_idx,
+                candidate_patched_func,
+            )
+
+            # Chặn no-op tuyệt đối. Không bỏ qua chỉ vì normalized code bằng nhau,
+            # vì normalizer có thể false-positive khi token C/C++ phụ thuộc whitespace.
+            orig_norm = normalize_code_for_edit_distance(func_code)
+            patched_norm = normalize_code_for_edit_distance(candidate_patched_func)
+            if not patched_norm or candidate_patched_source == source_code:
+                print("    [NO-OP] Patch không thay đổi hàm nguồn, bỏ qua candidate này.")
+                continue
+            if patched_norm == orig_norm:
+                print("    [WARN] Patch chỉ khác theo normalized diff; vẫn validate để tránh bỏ nhầm.")
+
+            patched_func = candidate_patched_func
+            patched_source = candidate_patched_source
+            repair_target_file = candidate_path
+
+            safe_cand = cand_label.replace("/", "__").replace(" ", "_")
             tmp_path = os.path.join(EXPERIMENTS_DIR, f"tmp_{bug_id.replace('@', '__')}__{safe_cand}")
             with open(tmp_path, "w") as f:
                 f.write(patched_source)
@@ -672,9 +749,51 @@ Your task is to fix an algorithmic or compilation bug in function `{func_name}` 
             # Truyền src_basename để Defects4CAdapter biết patch này nhằm file nào
             # (khi FL chỉ ra lỗi ở file phụ khác với file bug chính).
             is_valid, post_passed, post_failed = validate_patch(
-                tmp_path, bug_id, dataset, src_basename=cand_base,
+                tmp_path,
+                bug_id,
+                dataset,
+                src_basename=cand_base,
+                src_relpath=candidate_relpath,
             )
             validation_details = getattr(validate_patch, "last_details", {}) or {}
+            validation_error = validation_details.get("validation_error", "")
+            full_post_passed = validation_details.get("full_post_passed_tests", post_passed)
+            full_post_failed = validation_details.get("full_post_failed_tests", post_failed)
+            patch_comparison_post_passed = validation_details.get("effective_post_passed_tests", post_passed)
+            patch_comparison_post_failed = validation_details.get("effective_post_failed_tests", post_failed)
+            fixed_fail_excluded = validation_details.get("fixed_fail_excluded_tests", [])
+            patch_comparison_status = "success" if not patch_comparison_post_failed and not validation_error else "failed"
+            real_status = "success" if not full_post_failed and not validation_error else "failed"
+            candidate_result = {
+                "function": qualified_name,
+                "score": score,
+                "status": "success" if is_valid else ("validation_error" if validation_error else "failed"),
+                "status_scope": "patch_comparison_excluding_fixed_fail_tests",
+                "patch_comparison_status": patch_comparison_status,
+                "real_status": real_status,
+                "validation_error": validation_error,
+                "repair_target_file": candidate_path,
+                "repair_target_relpath": candidate_relpath,
+                "patched_function": candidate_patched_func,
+                "patched_file": candidate_patched_source,
+                "post_scope": "full_suite",
+                "post_passed_count": len(full_post_passed),
+                "post_failed_count": len(full_post_failed),
+                "post_passed_tests": list(full_post_passed),
+                "post_failed_tests": list(full_post_failed),
+                "full_post_passed_count": len(full_post_passed),
+                "full_post_failed_count": len(full_post_failed),
+                "full_post_passed_tests": list(full_post_passed),
+                "full_post_failed_tests": list(full_post_failed),
+                "patch_comparison_post_passed_count": len(patch_comparison_post_passed),
+                "patch_comparison_post_failed_count": len(patch_comparison_post_failed),
+                "patch_comparison_post_passed_tests": list(patch_comparison_post_passed),
+                "patch_comparison_post_failed_tests": list(patch_comparison_post_failed),
+                "fixed_fail_excluded_count": len(fixed_fail_excluded),
+                "fixed_fail_excluded_tests": list(fixed_fail_excluded),
+                "validation_details": validation_details,
+            }
+            candidate_results.append(candidate_result)
 
             if is_valid:
                 print(f"    [SUCCESS] Bản vá hợp lệ cho {bug_id} trong hàm '{func_name}'!")
@@ -688,11 +807,39 @@ Your task is to fix an algorithmic or compilation bug in function `{func_name}` 
                     if os.path.exists(tmp_path):
                         os.remove(tmp_path)
                 status = "success"
+                best_candidate = candidate_result
                 break
             else:
                 print(f"    [FAIL] Bản vá không vượt qua kiểm tra.")
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
+
+        if status != "success" and candidate_results:
+            best_candidate = min(
+                candidate_results,
+                key=lambda c: (
+                    1 if c.get("validation_error") else 0,
+                    c["patch_comparison_post_failed_count"],
+                    -c["patch_comparison_post_passed_count"],
+                ),
+            )
+            patched_func = best_candidate["patched_function"]
+            patched_source = best_candidate["patched_file"]
+            repair_target_file = best_candidate["repair_target_file"]
+            target_func = best_candidate["function"]
+            post_passed = best_candidate["post_passed_tests"]
+            post_failed = best_candidate["post_failed_tests"]
+            validation_details = best_candidate.get("validation_details") or {
+                "validation_error": best_candidate.get("validation_error", ""),
+                "full_post_passed_tests": best_candidate.get("full_post_passed_tests", post_passed),
+                "full_post_failed_tests": best_candidate.get("full_post_failed_tests", post_failed),
+                "fixed_fail_excluded_tests": best_candidate.get("fixed_fail_excluded_tests", []),
+            }
+            print(
+                f"    [BEST] Chọn candidate tốt nhất: {target_func} "
+                f"(patch_failed={best_candidate['patch_comparison_post_failed_count']}, "
+                f"full_failed={best_candidate['full_post_failed_count']})"
+            )
 
         if attempted and status == "skipped":
             # Phân biệt: LLM không bao giờ sinh được patch vs. patch sinh ra nhưng fail test
@@ -700,40 +847,47 @@ Your task is to fix an algorithmic or compilation bug in function `{func_name}` 
 
         full_post_passed = validation_details.get("full_post_passed_tests", post_passed)
         full_post_failed = validation_details.get("full_post_failed_tests", post_failed)
-        validation_mode = validation_details.get("validation_mode", f"{ds_lc}_default")
-        validation_summary = {
-            "related_scope_source": validation_details.get("related_scope_source"),
-            "related_scope_test_count": validation_details.get("related_scope_test_count", len(post_passed) + len(post_failed)),
-            "full_scope_test_count": validation_details.get("full_scope_test_count", len(full_post_passed) + len(full_post_failed)),
-            "related_failed_total": validation_details.get("related_failed_total", len(post_failed)),
-            "unrelated_dropped_total": validation_details.get("unrelated_dropped_total", 0),
-        }
+        patch_comparison_post_passed = validation_details.get("effective_post_passed_tests", post_passed)
+        patch_comparison_post_failed = validation_details.get("effective_post_failed_tests", post_failed)
+        fixed_fail_excluded = validation_details.get("fixed_fail_excluded_tests", [])
+        validation_error = validation_details.get("validation_error", "")
+        patch_comparison_status = (
+            "success" if not patch_comparison_post_failed and not validation_error else "failed"
+        )
+        real_status = "success" if not full_post_failed and not validation_error else "failed"
 
         apr_results[bug_id] = {
+            "dataset":            dataset,
             "status":             status,
+            "status_scope":        "patch_comparison_excluding_fixed_fail_tests",
+            "patch_comparison_status": patch_comparison_status,
+            "real_status":         real_status,
             "patched_function":   patched_func,
             "patched_file":       patched_source,  # toàn bộ nội dung file đã vá (có thể khác file bug chính)
             "repair_target_file": repair_target_file,
+            "repair_target_relpath": _candidate_relpath_from_buggy_tree(repair_target_file or "", raw_meta),
             "selected_function":  target_func,
             "init_passed_count":  len(init_passed_all),
             "init_failed_count":  len(init_failed_all),
             "init_passed_tests":  init_passed,
             "init_failed_tests":  init_failed,
-            "post_passed_count":  len(post_passed),
-            "post_failed_count":  len(post_failed),
-            "post_passed_tests":  _compact_test_list(post_passed),
-            "post_failed_tests":  _compact_test_list(post_failed),
+            "post_scope":         "full_suite",
+            "post_passed_count":  len(full_post_passed),
+            "post_failed_count":  len(full_post_failed),
+            "post_passed_tests":  list(full_post_passed),
+            "post_failed_tests":  list(full_post_failed),
             "full_post_passed_count": len(full_post_passed),
             "full_post_failed_count": len(full_post_failed),
-            "full_post_passed_tests": _compact_test_list(full_post_passed),
-            "full_post_failed_tests": _compact_test_list(full_post_failed),
-            "validation_mode":    validation_mode,
+            "full_post_passed_tests": list(full_post_passed),
+            "full_post_failed_tests": list(full_post_failed),
+            "patch_comparison_post_passed_count": len(patch_comparison_post_passed),
+            "patch_comparison_post_failed_count": len(patch_comparison_post_failed),
+            "patch_comparison_post_passed_tests": list(patch_comparison_post_passed),
+            "patch_comparison_post_failed_tests": list(patch_comparison_post_failed),
+            "fixed_fail_excluded_count": len(fixed_fail_excluded),
+            "fixed_fail_excluded_tests": list(fixed_fail_excluded),
+            "validation_error": validation_error,
             "accepted_patch_error": accepted_patch_error,
-            "related_test_ids":   _compact_test_list(validation_details.get("related_test_ids", [])),
-            "dropped_unrelated_failed_tests": _compact_test_list(validation_details.get("dropped_unrelated_failed_tests", [])),
-            "baseline_unrelated_failed_tests": _compact_test_list(validation_details.get("baseline_unrelated_failed_tests", [])),
-            "full_failed_total":  validation_details.get("full_failed_total", len(full_post_failed)),
-            "validation_details": _compact_validation_details(validation_summary),
         }
 
         with open(apr_results_file, "w") as f:

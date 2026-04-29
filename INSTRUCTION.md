@@ -179,7 +179,7 @@ Ba APR engine đều lưu vào JSON kết quả các trường:
 ```
 Với mỗi bug:
   1. Lấy danh sách hàm nghi ngờ từ tarantula_results.json (sắp xếp giảm dần)
-  2. extract_function_code() → trích xuất mã nguồn hàm (từ core/utils.py)
+ 2. extract_function_code() → trích xuất mã nguồn hàm (từ core/utils.py)
   3. Xây dựng prompt với context test FAIL từ BugRecord.tests
   4. Gọi call_llm() → Gemini sinh bản vá
   5. Ghép patched_function vào source gốc → patched_source (= patched_file)
@@ -217,11 +217,21 @@ Tách ngược `<path>::<func_name>` thành tuple.
 ### `extract_function_code(source_code, func_name) → (code, start, end)`
 
 Trích xuất mã nguồn của một hàm C từ chuỗi source:
-- Dùng Regex để tìm điểm bắt đầu (signature + `{`)
-- Đếm ngoặc nhọn để tìm điểm kết thúc
-- Có fallback riêng cho hàm `main`
+- Ưu tiên parse bằng `tree-sitter` (`tree-sitter-c` / `tree-sitter-cpp`)
+- Duyệt node `function_definition`, match tên hàm, trả về `start_byte/end_byte`
+- APR thay function bằng byte-range replacement để tránh lệch offset khi source có non-ASCII
+- Fallback về Regex + đếm ngoặc nếu tree-sitter chưa khả dụng hoặc không match được hàm
 
-> **Giới hạn:** Hoạt động không đúng nếu `{` / `}` xuất hiện trong macro không chuẩn. Hướng nâng cấp: dùng `pycparser` hoặc `tree-sitter`.
+> **Giới hạn:** Tree-sitter vẫn có thể cần thêm line/signature hint nếu C++ overload hoặc macro tạo function khiến chỉ `func_name` không đủ phân biệt.
+
+### Defects4C source versions
+
+Loader materialize hai workspace trong `experiments/defects4c_cache/<folder>/<bug_id>/`:
+
+- `fixed_ver/`: checkout `commit_after`.
+- `buggy_ver/`: checkout `commit_after`, sau đó overlay `src_files` từ `commit_before`.
+
+APR luôn extract và ghép patch trên `buggy_ver/<relpath>`. Evaluation đọc accepted code từ `fixed_ver/<relpath>`.
 
 ---
 

@@ -32,6 +32,7 @@ def run_fl(dataset: str = "codeflaws"):
         print(f"[FL] Tính điểm Tarantula cho {bug.bug_id}...")
         scores = calculate_tarantula(bug.tests)
         results[bug.bug_id] = {
+            "dataset":      dataset,
             "scores":       scores,
             "ground_truth": bug.ground_truth,
         }
@@ -56,8 +57,8 @@ def main():
     parser.add_argument(
         "--llm",
         default=None,
-        choices=["gemini", "openai", "claude", "qwen"],
-        help="LLM provider cho APR: 'gemini' (mặc định) hoặc 'openai' (gpt-4o-mini). "
+        choices=["gemini", "openai", "claude", "qwen", "openrouter"],
+        help="LLM provider cho APR: gemini, openai, claude, qwen/openrouter. "
              "Override biến môi trường LLM_PROVIDER.",
     )
     args = parser.parse_args()
@@ -72,13 +73,13 @@ def main():
         print(f"[Pipeline] Chạy toàn bộ quy trình trên dataset '{dataset}' (FL → APR LLM → Evaluation)...")
         run_fl(dataset)
         run_apr_pipeline(dataset, llm_provider=llm_provider)
-        evaluate_fl()
+        evaluate_fl(dataset)
         evaluate_apr(dataset)
     else:
         if args.fl:
             print(f"[Pipeline] Chạy Fault Localization trên dataset '{dataset}'...")
             run_fl(dataset)
-            evaluate_fl()
+            evaluate_fl(dataset)
 
         if args.apr:
             print(f"[Pipeline] Chạy APR (LLM: {llm_provider or 'default'}) trên dataset '{dataset}'...")
@@ -87,7 +88,7 @@ def main():
 
         if args.eval:
             print("[Pipeline] Chạy Evaluation...")
-            evaluate_fl()
+            evaluate_fl(dataset)
             evaluate_apr(dataset)
 
 

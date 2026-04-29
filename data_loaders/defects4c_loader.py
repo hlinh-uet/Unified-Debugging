@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from typing import Dict, List, Optional, Tuple
 
@@ -122,17 +123,33 @@ class Defects4CLoader(BugLoader):
         repo_dir = _find_git_root(host_source_file)
         source_relpath = _relpath_or_basename(host_source_file, repo_dir)
         source_basename = raw.get("source_basename") or os.path.basename(source_relpath)
+        normalized_src_files = src_files or ([source_relpath] if source_relpath else [])
+        cache_raw = {
+            **raw,
+            "src_files": normalized_src_files,
+            "source_relpath": source_relpath,
+        }
 
         safe_id = metadata_stem.replace("@", "__").replace("/", "__")
         record_cache_dir = os.path.join(DEFECTS4C_CACHE_DIR, data_folder, safe_id)
-        source_file, accepted_file = self._ensure_source_cache(
-            raw=raw,
-            host_source_file=host_source_file,
+        buggy_tree_dir, fixed_tree_dir = self._ensure_version_workspaces(
+            raw=cache_raw,
             repo_dir=repo_dir,
-            source_relpath=source_relpath,
-            source_basename=source_basename,
+            src_files=normalized_src_files,
             cache_dir=record_cache_dir,
         )
+        if not buggy_tree_dir or not fixed_tree_dir:
+            print(f"[Defects4CLoader] Không tạo được buggy/fixed workspace cho {path}")
+            return None
+
+        source_file = os.path.join(buggy_tree_dir, source_relpath)
+        accepted_file = os.path.join(fixed_tree_dir, source_relpath)
+        if not os.path.isfile(source_file):
+            print(f"[Defects4CLoader] Buggy source không tồn tại: {source_file}")
+            return None
+        if not os.path.isfile(accepted_file):
+            print(f"[Defects4CLoader] Fixed source không tồn tại: {accepted_file}")
+            return None
 
         tests = _normalize_tests(raw.get("tests", []))
         ground_truth = _normalize_ground_truth(raw, source_basename)
@@ -148,6 +165,8 @@ class Defects4CLoader(BugLoader):
             "metadata_slug": data_folder,
             "source_file": source_file,
             "accepted_file": accepted_file,
+            "buggy_tree_dir": buggy_tree_dir,
+            "fixed_tree_dir": fixed_tree_dir,
             "source_basename": source_basename,
             "source_cache_dir": record_cache_dir,
             "source_repo_dir": repo_dir,
@@ -156,7 +175,7 @@ class Defects4CLoader(BugLoader):
             "host_source_file": host_source_file,
             "container_repo_dir": _container_repo_dir(raw_source_file, repo_dir),
             "defects4c_bug_info": bug_info,
-            "src_files": src_files or ([source_relpath] if source_relpath else []),
+            "src_files": normalized_src_files,
             "test_files": test_files,
         }
 
@@ -221,40 +240,50 @@ class Defects4CLoader(BugLoader):
         self._bug_info_cache[data_folder] = [x for x in data if isinstance(x, dict)]
         return self._bug_info_cache[data_folder]
 
-    def _ensure_source_cache(
+    def _ensure_version_workspaces(
         self,
         raw: dict,
-        host_source_file: str,
         repo_dir: str,
-        source_relpath: str,
-        source_basename: str,
+        src_files: List[str],
         cache_dir: str,
     ) -> Tuple[str, str]:
         os.makedirs(cache_dir, exist_ok=True)
-        buggy_path = os.path.join(cache_dir, source_basename)
-        accepted_path = os.path.join(cache_dir, f"{source_basename}.accepted")
+        commit_after = str(raw.get("commit_after") or "").strip()
+        commit_before = str(raw.get("commit_before") or "").strip()
+        if not repo_dir or not os.path.isdir(repo_dir) or not commit_after or not commit_before:
+            return "", ""
 
-        buggy_content = _git_show(repo_dir, raw.get("commit_before", ""), source_relpath)
-        accepted_content = _git_show(repo_dir, raw.get("commit_after", ""), source_relpath)
+        fixed_dir = os.path.join(cache_dir, "fixed_ver")
+        buggy_dir = os.path.join(cache_dir, "buggy_ver")
+        if not _ensure_worktree(repo_dir, fixed_dir, commit_after):
+            return "", ""
+        if not _ensure_worktree(repo_dir, buggy_dir, commit_after):
+            return "", ""
 
-        if buggy_content is None:
-            buggy_content = _read_file(host_source_file)
-        if accepted_content is None:
-            accepted_content = _read_file(host_source_file)
+        overlay_files = [
+            rel for rel in src_files
+            if isinstance(rel, str)
+            and rel.strip()
+            and not rel.strip().startswith("/")
+            and ".." not in rel.strip().replace("\\", "/").split("/")
+        ]
+        if overlay_files:
+            result = subprocess.run(
+                ["git", "-C", buggy_dir, "checkout", "--force", commit_before, "--", *overlay_files],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+            )
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "").strip().splitlines()
+                tail = detail[-1] if detail else "unknown"
+                print(f"[Defects4CLoader] Overlay buggy src_files lỗi: {tail}")
+                return "", ""
 
-        if buggy_content is not None:
-            with open(buggy_path, "w") as f:
-                f.write(buggy_content)
-        else:
-            buggy_path = host_source_file
-
-        if accepted_content is not None:
-            with open(accepted_path, "w") as f:
-                f.write(accepted_content)
-        else:
-            accepted_path = raw.get("accepted_file", "")
-
-        return buggy_path, accepted_path
+        return buggy_dir, fixed_dir
 
     @staticmethod
     def _deduplicate_bug_ids(records: List[BugRecord]) -> None:
@@ -270,20 +299,20 @@ class Defects4CLoader(BugLoader):
             raw["bug_id"] = record.bug_id
 
 
-def get_defects4c_accepted_path(bug_id: str) -> str:
-    record = Defects4CLoader().load_one(bug_id)
+def get_defects4c_accepted_path(bug_id: str, data_folder: Optional[str] = None) -> str:
+    record = Defects4CLoader(data_folder=data_folder).load_one(bug_id)
     if not record or not record.raw:
         return ""
     return record.raw.get("accepted_file", "")
 
 
-def get_defects4c_source_path(bug_id: str) -> str:
-    record = Defects4CLoader().load_one(bug_id)
+def get_defects4c_source_path(bug_id: str, data_folder: Optional[str] = None) -> str:
+    record = Defects4CLoader(data_folder=data_folder).load_one(bug_id)
     return record.source_file if record else ""
 
 
-def get_defects4c_raw_record(bug_id: str) -> Optional[dict]:
-    record = Defects4CLoader().load_one(bug_id)
+def get_defects4c_raw_record(bug_id: str, data_folder: Optional[str] = None) -> Optional[dict]:
+    record = Defects4CLoader(data_folder=data_folder).load_one(bug_id)
     return record.raw if record else None
 
 
@@ -386,31 +415,53 @@ def _relpath_or_basename(path: str, root: str) -> str:
     return os.path.basename(path)
 
 
-def _git_show(repo_dir: str, commit: str, relpath: str) -> Optional[str]:
-    if not repo_dir or not commit or not relpath:
-        return None
-    try:
-        result = subprocess.run(
-            ["git", "-C", repo_dir, "show", f"{commit}:{relpath}"],
-            stdout=subprocess.PIPE,
+def _ensure_worktree(repo_dir: str, worktree_dir: str, commit: str) -> bool:
+    """Create or reset a detached git worktree at ``commit``."""
+    if not repo_dir or not os.path.isdir(repo_dir) or not commit:
+        return False
+
+    git_marker = os.path.join(worktree_dir, ".git")
+    if not os.path.exists(git_marker):
+        if os.path.exists(worktree_dir):
+            shutil.rmtree(worktree_dir)
+        os.makedirs(os.path.dirname(worktree_dir), exist_ok=True)
+        subprocess.run(
+            ["git", "-C", repo_dir, "worktree", "prune"],
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+        )
+        add = subprocess.run(
+            ["git", "-C", repo_dir, "worktree", "add", "--detach", "--force", worktree_dir, commit],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=30,
+            timeout=120,
         )
-    except Exception:
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout
+        if add.returncode != 0:
+            detail = (add.stderr or add.stdout or "").strip().splitlines()
+            tail = detail[-1] if detail else "unknown"
+            print(f"[Defects4CLoader] git worktree add lỗi ({worktree_dir}): {tail}")
+            return False
 
-
-def _read_file(path: str) -> Optional[str]:
-    if not path or not os.path.exists(path):
-        return None
-    try:
-        with open(path, "r", errors="replace") as f:
-            return f.read()
-    except Exception:
-        return None
+    reset = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            "git -C \"$wt\" reset --hard && git -C \"$wt\" clean -ffdx && git -C \"$wt\" checkout -f \"$commit\"",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        env={**os.environ, "wt": worktree_dir, "commit": commit},
+    )
+    if reset.returncode != 0:
+        detail = (reset.stderr or reset.stdout or "").strip().splitlines()
+        tail = detail[-1] if detail else "unknown"
+        print(f"[Defects4CLoader] git worktree reset lỗi ({worktree_dir}): {tail}")
+        return False
+    return True

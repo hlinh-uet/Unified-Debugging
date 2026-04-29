@@ -3,7 +3,7 @@ import json
 from configs.path import EXPERIMENTS_DIR
 
 
-def evaluate_fl():
+def evaluate_fl(dataset: str = ""):
     """
     Đánh giá Fault Localization (Tarantula) với các metrics chuẩn:
       - Top-K accuracy (K=1, 3, 5): GT function xuất hiện trong top K?
@@ -23,8 +23,6 @@ def evaluate_fl():
     with open(tarantula_file, 'r') as f:
         tarantula_results = json.load(f)
 
-    total_bugs = len(tarantula_results)
-
     top_1_hit = 0
     top_3_hit = 0
     top_5_hit = 0
@@ -36,11 +34,20 @@ def evaluate_fl():
     evaluated_bugs = 0
     skipped_no_gt  = 0
     skipped_no_scores = 0
+    skipped_other_dataset = 0
+    total_bugs = 0
+
+    dataset_key = (dataset or "").strip().lower()
 
     for bug_id, result_data in tarantula_results.items():
         if not isinstance(result_data, dict) or 'scores' not in result_data:
             skipped_no_scores += 1
             continue
+        result_dataset = str(result_data.get("dataset") or "").strip().lower()
+        if dataset_key and result_dataset and result_dataset != dataset_key:
+            skipped_other_dataset += 1
+            continue
+        total_bugs += 1
 
         scores = result_data.get('scores', {})
         ground_truth = result_data.get('ground_truth', [])
@@ -88,6 +95,8 @@ def evaluate_fl():
     print(f"  Đánh giá được (có GT + scores): {evaluated_bugs}")
     print(f"  Bỏ qua (thiếu ground truth):    {skipped_no_gt}")
     print(f"  Bỏ qua (thiếu scores/format):   {skipped_no_scores}")
+    if skipped_other_dataset:
+        print(f"  Bỏ qua (khác dataset):          {skipped_other_dataset}")
     print()
 
     if evaluated_bugs > 0:

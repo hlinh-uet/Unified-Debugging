@@ -1,6 +1,5 @@
 import os
 import json
-import subprocess
 from typing import Tuple
 
 from configs.path import EXPERIMENTS_DIR, CODEFLAWS_SOURCE_DIR
@@ -108,6 +107,10 @@ def _evaluate_one_apr(label: str, apr_results_file: str, dataset: str):
     if not apr_results:
         print("  (No results)")
         return
+    apr_results = _filter_apr_results_for_dataset(apr_results, dataset)
+    if not apr_results:
+        print(f"  (No results for dataset '{dataset}')")
+        return
 
     edit_distances_func: list[int] = []
     edit_distances_file: list[int] = []
@@ -157,6 +160,41 @@ def _evaluate_one_apr(label: str, apr_results_file: str, dataset: str):
     _print_edit_distance_stats(edit_distances_func, attempted_for_ed, level="function")
     _print_edit_distance_stats(edit_distances_file, attempted_for_ed, level="file")
     _print_edit_distance_errors(edit_distance_errors)
+
+
+def _filter_apr_results_for_dataset(apr_results: dict, dataset: str) -> dict:
+    dataset_key = (dataset or "").strip().lower()
+    try:
+        bug_ids = {record.bug_id for record in get_loader(dataset).load_all()}
+    except Exception:
+        bug_ids = set()
+
+    filtered = {}
+    for bug_id, result in apr_results.items():
+        if bug_ids and bug_id not in bug_ids:
+            continue
+        result_dataset = ""
+        if isinstance(result, dict):
+            result_dataset = str(result.get("dataset") or "").strip().lower()
+        if dataset_key and result_dataset and result_dataset != dataset_key:
+            continue
+        filtered[bug_id] = result
+    return filtered
+
+
+def _validation_error_from_result(result: dict) -> str:
+    explicit = str(result.get("validation_error") or "").strip()
+    if explicit:
+        return explicit
+    values = result.get("post_failed_tests")
+    if isinstance(values, list):
+        for value in values:
+            text = str(value).strip()
+            if text in {"compile_failed", "metadata_suite_failed", "test_helper_missing"}:
+                return text
+            if text.startswith("test_helper_missing:"):
+                return text
+    return ""
 
 
 def _build_test_eval_context(bug_id: str, dataset: str) -> Tuple[dict, str]:
@@ -223,6 +261,14 @@ def _build_fix_eval_row(
         return row
     if context_err:
         row["fix_label"] = f"ERR:{context_err}"
+        return row
+
+    validation_error = _validation_error_from_result(bug_res)
+    if validation_error:
+        row["post_pass"] = "ERR"
+        row["post_fail"] = "ERR"
+        row["fix_label"] = f"ERR:{validation_error}"
+        row["error"] = validation_error
         return row
 
     post_failed, post_err = _post_failed_ids_from_result(bug_res)
@@ -479,34 +525,21 @@ def _get_accepted_bug_code_and_function(
             return "", accepted_path, "", f"accepted_file_read_error:{exc}"
 
     raw = record.raw
-    repo_dir = raw.get("source_repo_dir") or ""
-    commit_after = raw.get("commit_after") or ""
-    if not repo_dir or not os.path.isdir(repo_dir):
-        return "", "", "", "source_repo_dir_missing"
-    if not commit_after:
-        return "", "", "", "commit_after_missing"
-
     relpath, rel_err = _resolve_accepted_bug_relpath(raw, accepted_file_hint)
     if rel_err:
         return "", "", "", rel_err
 
+    fixed_tree_dir = raw.get("fixed_tree_dir") or ""
+    accepted_path = os.path.join(fixed_tree_dir, relpath) if fixed_tree_dir else raw.get("accepted_file", "")
+    if not accepted_path:
+        return "", relpath, "", "accepted_path_missing"
+    if not os.path.isfile(accepted_path):
+        return "", accepted_path, "", f"accepted_file_not_found:{accepted_path}"
     try:
-        result = subprocess.run(
-            ["git", "-C", repo_dir, "show", f"{commit_after}:{relpath}"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-        )
+        with open(accepted_path, "r", errors="replace") as f:
+            return f.read(), accepted_path, accepted_func_name, ""
     except Exception as exc:
-        return "", relpath, "", f"accepted_git_show_error:{exc}"
-    if result.returncode != 0:
-        stderr = (result.stderr or "").strip().splitlines()
-        detail = stderr[-1] if stderr else "git_show_failed"
-        return "", relpath, "", f"accepted_git_show_failed:{relpath}:{detail}"
-    return result.stdout, relpath, accepted_func_name, ""
+        return "", accepted_path, "", f"accepted_file_read_error:{exc}"
 
 
 def _load_bug_record(bug_id: str, dataset: str):
@@ -547,10 +580,10 @@ def _resolve_accepted_bug_relpath(raw: dict, accepted_file_hint: str) -> Tuple[s
         candidates.append(source_relpath.strip().replace("\\", "/"))
 
     accepted_file = raw.get("accepted_file")
-    repo_dir = raw.get("source_repo_dir") or ""
-    if isinstance(accepted_file, str) and accepted_file and repo_dir:
+    fixed_tree_dir = raw.get("fixed_tree_dir") or ""
+    if isinstance(accepted_file, str) and accepted_file and fixed_tree_dir:
         try:
-            rel = os.path.relpath(accepted_file, repo_dir).replace(os.sep, "/")
+            rel = os.path.relpath(accepted_file, fixed_tree_dir).replace(os.sep, "/")
             if not rel.startswith("../") and rel != "..":
                 candidates.append(rel)
         except ValueError:

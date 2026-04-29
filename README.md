@@ -31,8 +31,8 @@ Unified-Debugging/
 │   └── eval_apr.py            # Đánh giá APR: Fix Rate, Regression, Edit Distance
 │
 ├── experiments/               # Sinh ra sau khi chạy – chứa kết quả
-│   ├── tarantula_results.json          # Kết quả FL (Tarantula scores)
-│   ├── apr_results.json                # Kết quả APR – LLM
+│   ├── tarantula_results.json          # Kết quả FL; mỗi record có dataset + scores
+│   ├── apr_results.json                # Kết quả APR – chỉ lưu best candidate mỗi bug
 │   ├── patches/                        # Bản vá thành công (status=success)
 │   │   └── <bug_id>_patch.c            #   – từ LLM baseline
 │   └── correct_patches/                # Bản vá tham chiếu
@@ -67,7 +67,7 @@ get_loader(dataset)
                    (Fix Rate, Regression, ED func + file)
 ```
 
-> **Điểm quan trọng:** FL và APR đều dùng **một lần load dữ liệu duy nhất** thông qua `get_loader()` → trả về `List[BugRecord]`. Không module nào đọc lại file JSON gốc sau bước này.
+> **Điểm quan trọng:** APR đọc `tarantula_results.json`, nên cần chạy FL cho đúng dataset trước khi chạy APR. Kết quả FL/APR hiện có trường `dataset` và evaluation sẽ tự lọc theo dataset đang chạy.
 
 ---
 
@@ -94,7 +94,23 @@ pip install -r requirements.txt
 ```bash
 cp .env.example .env
 # Mở .env, điền các biến sau:
-#   GEMINI_API_KEY=...         – Gemini API Key (cho LLM baseline)
+#   OPENROUTER_API_KEY=...     – OpenRouter API Key (cho Qwen APR)
+#   LLM_PROVIDER=qwen
+#   QWEN_MODEL=openai/gpt-oss-120b
+#   LLM_MAX_OUTPUT_TOKENS=12000
+```
+
+Model OpenRouter có thể đổi bằng `QWEN_MODEL`. Một số lựa chọn:
+
+```bash
+# Rẻ, nên thử trước cho APR
+QWEN_MODEL=openai/gpt-oss-120b
+
+# Model đang dùng ban đầu
+QWEN_MODEL=qwen/qwen3-coder-30b-a3b-instruct
+
+# Mạnh hơn nhưng thường đắt hơn
+QWEN_MODEL=deepseek/deepseek-v3.2
 ```
 
 ---
@@ -108,33 +124,69 @@ Tất cả lệnh chạy từ thư mục `Unified-Debugging/`.
 ```bash
 python3 main.py                          # mặc định: dataset=codeflaws
 python3 main.py --all --dataset codeflaws
+python3 main.py --all --dataset tcpdump --llm qwen
 ```
 
 ### Chạy từng bước
 
 ```bash
-# Bước 1 – Fault Localization
-python3 main.py --fl --dataset defects4c
+# Bước 1 – Fault Localization.
+# Lệnh này ghi experiments/tarantula_results.json cho dataset đang chọn.
+python3 main.py --fl --dataset tcpdump
 
-# Bước 2a – APR bằng LLM (cần GEMINI_API_KEY)
-python3 main.py --apr --dataset defects4c --llm gemini      # dùng gemini-2.5-flash
-python3 main.py --apr --dataset defects4c --llm openai # dùng gpt-4o-mini
-python main.py --apr # dùng LLM_PROVIDER trong .env
+# Bước 2 – APR bằng LLM.
+# Cần có tarantula_results.json từ bước FL cùng dataset.
+python3 main.py --apr --dataset tcpdump --llm qwen
+python3 main.py --apr --dataset defects4c --llm gemini
+python3 main.py --apr --dataset defects4c --llm openai
+python3 main.py --apr --dataset tcpdump           # dùng LLM_PROVIDER trong .env
 
+# Bước 3 – Evaluation (FL + APR), lọc theo dataset.
+python3 main.py --eval --dataset tcpdump
+```
 
-# Bước 3 – Evaluation (FL + APR)
-python3 main.py --eval
+Nếu đổi dataset, hãy chạy lại `--fl` trước. Ví dụ không nên dùng `tarantula_results.json` sinh từ `tcpdump` để chạy APR cho `php`. Code hiện tại có filter bảo vệ, nhưng lệnh đúng vẫn là:
+
+```bash
+python3 main.py --fl  --dataset php
+python3 main.py --apr --dataset php --llm qwen
+python3 main.py --eval --dataset php
 ```
 
 ### Tham số dòng lệnh
 
 | Tham số         | Mô tả                                              |
 |-----------------|----------------------------------------------------|
-| `--dataset`     | Tên dataset: `codeflaws` (mặc định), `defects4c`, ... |
+| `--dataset`     | Tên dataset: `codeflaws`, `defects4c`, hoặc folder Defects4C như `tcpdump`, `php`, `cjson` |
 | `--fl`          | Chỉ chạy Fault Localization                        |
-| `--apr`         | Chỉ chạy APR với LLM (Gemini)                      |
-| `--eval`        | Chỉ chạy Evaluation (FL + APR)                     |
+| `--apr`         | Chỉ chạy APR với LLM; cần kết quả FL trước đó      |
+| `--eval`        | Chỉ chạy Evaluation (FL + APR), lọc theo dataset   |
 | `--all`         | Chạy FL → APR LLM → Evaluation                     |
+| `--llm`         | Provider APR: `qwen`/`openrouter`, `gemini`, `openai`, `claude` |
+
+### Kết quả APR
+
+`experiments/apr_results.json` chỉ lưu **best candidate** cho mỗi bug. APR vẫn thử top-K function nội bộ, nhưng JSON cuối cùng chỉ chứa candidate được chọn:
+
+1. Nếu có candidate pass ở scope `patch_comparison` (đã loại các test `outcome=FAIL` và `outcome_fixed=FAIL`): chọn candidate success đầu tiên.
+2. Nếu không có success: chọn candidate có `patch_comparison_post_failed_count` nhỏ nhất.
+3. Nếu hòa: chọn candidate có `patch_comparison_post_passed_count` lớn nhất.
+4. Candidate có `validation_error` như `compile_failed`, `malformed_function`, `metadata_suite_failed` bị xếp sau candidate chạy test thật.
+
+Các field chính:
+
+| Field | Ý nghĩa |
+|---|---|
+| `selected_function` | Function best candidate được chọn |
+| `patched_function` | Function LLM sinh ra |
+| `patched_file` | Toàn bộ source file sau khi byte-range replace function |
+| `repair_target_relpath` | File relative path trong buggy tree/container |
+| `post_passed_tests`, `post_failed_tests` | Full-suite test IDs thật sau validate (`post_scope = full_suite`) |
+| `patch_comparison_post_passed_tests`, `patch_comparison_post_failed_tests` | Test IDs dùng cho patch-comparison, đã loại các fixed-fail nền |
+| `status_scope`, `patch_comparison_status`, `real_status` | Phân biệt status dùng để chọn patch với status full-suite |
+| `validation_error` | Lỗi validate/build nếu không chạy được test suite; không phải test id |
+
+Nếu `apr_results.json` được sinh từ code cũ, có thể còn `candidate_results` hoặc `compile_failed` trong `post_failed_tests`. Hãy chạy lại APR để sinh format mới.
 
 ---
 
@@ -174,7 +226,7 @@ rồi chạy:
 
 ```bash
 python3 main.py --fl --dataset thetcp
-python3 main.py --apr --dataset thetcp --llm gemini
+python3 main.py --apr --dataset thetcp --llm qwen
 ```
 
 ### Container cho APR Defects4C
@@ -189,14 +241,24 @@ Ví dụ:
 
 ```bash
 # Dùng container mặc định theo data folder, ví dụ my_defects4c_cjson
-python3 main.py --apr --dataset cjson --llm gemini
+python3 main.py --apr --dataset cjson --llm qwen
 
 # Override container thủ công
 DEFECTS4C_CONTAINER=my_defects4c_custom \
-python3 main.py --apr --dataset thetcp --llm gemini
+python3 main.py --apr --dataset thetcp --llm qwen
 ```
 
 Lưu ý: `compile_cmd` và `test_cmd_template` trong metadata nên dùng đường dẫn container dạng `/out/...`, vì validation chạy bên trong container.
+
+Với Defects4C, loader tạo cache workspace ở:
+
+```text
+Unified-Debugging/experiments/defects4c_cache/<data_folder>/<bug_id>/
+├── buggy_ver/   # commit_after + overlay src_files từ commit_before
+└── fixed_ver/   # commit_after
+```
+
+APR extract function từ `buggy_ver`, ghép patch vào file tương ứng trong buggy version rồi validate trong container. Evaluation lấy accepted code từ `fixed_ver`.
 
 ---
 
@@ -214,9 +276,9 @@ if name == "defects4c":
     from data_loaders.defects4c_loader import Defects4CLoader
     return Defects4CLoader()
 
-# data_loaders/sandbox_adapter.py  →  get_sandbox_adapter()
-if dataset_name.lower() == "defects4c":
-    return Defects4CAdapter(bug_id)
+# data_loaders/sandbox_adapter.py → get_sandbox_adapter()
+if ds_lc == "mydataset":
+    return MyDatasetAdapter(bug_id)
 ```
 
 ---
@@ -249,7 +311,6 @@ if dataset_name.lower() == "defects4c":
 
 | Vấn đề | Hướng giải quyết |
 |---|---|
-| Trích xuất hàm C bằng Regex dễ sai với macro/comment chứa `{}` | Dùng `pycparser`, Clang AST hoặc `tree-sitter` |
-| Context window LLM bị giới hạn với file C lớn | Nén prompt, chỉ truyền hàm liên quan thay vì toàn bộ file |
+| Context window LLM bị giới hạn với function C lớn | Tăng `LLM_MAX_OUTPUT_TOKENS`, hoặc chia nhỏ prompt/repair region |
 | `google-generativeai` đã deprecated | Chuyển sang `google.genai` (SDK mới) |
 | Edit Distance file-level tốn bộ nhớ với file lớn | Dùng diff-based distance hoặc AST-level comparison |

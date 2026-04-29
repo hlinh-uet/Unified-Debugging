@@ -7,8 +7,23 @@ Tránh duplicate code giữa các module.
 
 import os
 import re
-import subprocess
 from typing import Any, Dict, Optional, Tuple
+
+try:
+    from tree_sitter import Language, Parser
+except Exception:  # pragma: no cover - optional dependency
+    Language = None
+    Parser = None
+
+try:
+    import tree_sitter_c
+except Exception:  # pragma: no cover - optional dependency
+    tree_sitter_c = None
+
+try:
+    import tree_sitter_cpp
+except Exception:  # pragma: no cover - optional dependency
+    tree_sitter_cpp = None
 
 
 # ---------------------------------------------------------------------------
@@ -160,8 +175,6 @@ def resolve_fl_candidate_source_path(
     if not file_hint or not bug_source_path:
         return bug_source_path
     fh = file_hint.strip()
-    if os.path.isabs(fh) and os.path.isfile(fh):
-        return fh
     base = os.path.basename(fh)
     ds = (dataset_name or "").lower()
     defects4c_like = bool(raw_meta and (
@@ -185,6 +198,8 @@ def resolve_fl_candidate_source_path(
             if os.path.isfile(cand):
                 return cand
         return ""
+    if os.path.isabs(fh) and os.path.isfile(fh):
+        return fh
     parent = os.path.dirname(bug_source_path)
     cand = os.path.join(parent, base)
     if os.path.isfile(cand):
@@ -224,7 +239,7 @@ def _resolve_defects4c_relpath_from_repo(file_hint: str, raw_meta: Dict[str, Any
     """Resolve a non-ground-truth Defects4C FL file hint without fallback."""
     if not file_hint or not isinstance(raw_meta, dict):
         return ""
-    repo_dir = raw_meta.get("source_repo_dir") or ""
+    repo_dir = raw_meta.get("buggy_tree_dir") or raw_meta.get("source_repo_dir") or ""
     if not repo_dir or not os.path.isdir(repo_dir):
         return ""
 
@@ -244,54 +259,26 @@ def _resolve_defects4c_cached_source(
     relpath: str,
     raw_meta: Dict[str, Any],
 ) -> str:
-    """Return a cached buggy source file for a Defects4C FL file hint."""
+    """Return a materialized buggy-version source file for a Defects4C hint."""
     if not relpath:
         return ""
 
     relpath = relpath.strip().replace("\\", "/")
-    if (
-        raw_meta.get("source_relpath") == relpath
-        and os.path.basename(bug_source_path) == os.path.basename(relpath)
-        and os.path.isfile(bug_source_path)
-    ):
-        return bug_source_path
-
-    repo_dir = raw_meta.get("source_repo_dir") or ""
-    commit_before = raw_meta.get("commit_before") or ""
-    cache_dir = raw_meta.get("source_cache_dir") or os.path.dirname(bug_source_path)
-    if not repo_dir or not commit_before or not os.path.isdir(repo_dir):
-        return ""
-
     if os.path.isabs(relpath) or ".." in relpath.split("/"):
         return ""
 
-    os.makedirs(cache_dir, exist_ok=True)
-    cache_name = relpath.replace("/", "__")
-    cache_path = os.path.join(cache_dir, cache_name)
-    if os.path.isfile(cache_path):
-        return cache_path
+    buggy_tree_dir = raw_meta.get("buggy_tree_dir") or ""
+    if buggy_tree_dir:
+        cand = os.path.join(buggy_tree_dir, relpath)
+        if os.path.isfile(cand):
+            return cand
 
-    try:
-        result = subprocess.run(
-            ["git", "-C", repo_dir, "show", f"{commit_before}:{relpath}"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-        )
-    except Exception:
-        return ""
-
-    if result.returncode != 0:
-        return ""
-    try:
-        with open(cache_path, "w") as f:
-            f.write(result.stdout)
-    except Exception:
-        return ""
-    return cache_path
+    if (
+        raw_meta.get("source_relpath") == relpath
+        and os.path.isfile(bug_source_path)
+    ):
+        return bug_source_path
+    return ""
 
 
 def _find_unique_relpath_by_basename(repo_dir: str, basename: str) -> str:
@@ -312,12 +299,20 @@ def _find_unique_relpath_by_basename(repo_dir: str, basename: str) -> str:
 
 def extract_function_code(
     source_code: str,
-    func_name: str
+    func_name: str,
+    language: str = "c",
 ) -> Tuple[Optional[str], int, int]:
     """
     Trích xuất mã nguồn của một hàm C/C++ từ chuỗi source_code.
 
-    Thuật toán:
+    Thuật toán mặc định:
+      1. Parse source bằng tree-sitter (C/C++).
+      2. Duyệt các node ``function_definition``.
+      3. Lấy tên hàm từ declarator và so khớp với ``func_name``.
+      4. Trả về source slice theo ``start_byte``/``end_byte`` của node.
+
+    Nếu tree-sitter không khả dụng hoặc không tìm thấy hàm, fallback về
+    extractor cũ dựa trên regex + counter:
       1. Tìm mọi lần xuất hiện ``<func_name>(`` (word-boundary).
       2. Tìm ngoặc tròn đóng tương ứng – có cân bằng paren lồng nhau
          (xử lý được function-pointer parameter, e.g. ``void (*cb)(int)``).
@@ -329,6 +324,7 @@ def extract_function_code(
     Args:
         source_code: Toàn bộ nội dung file mã nguồn.
         func_name:   Tên hàm cần trích xuất.
+        language:    ``"c"`` hoặc ``"cpp"``/``"c++"``.
 
     Returns:
         Tuple (func_code, start_idx, end_idx):
@@ -336,6 +332,172 @@ def extract_function_code(
             - start_idx:  Vị trí byte bắt đầu (return type) trong source_code.
             - end_idx:    Vị trí ngay sau ``}`` đóng (exclusive).
     """
+    ts_result = _extract_function_code_tree_sitter(source_code, func_name, language)
+    if ts_result[0] is not None:
+        return ts_result
+    return _extract_function_code_regex(source_code, func_name)
+
+
+def replace_source_range_bytes(
+    source_code: str,
+    start_byte: int,
+    end_byte: int,
+    replacement: str,
+) -> str:
+    """
+    Thay một đoạn source theo byte range UTF-8.
+
+    Tree-sitter trả ``start_byte``/``end_byte`` theo bytes, không phải chỉ số
+    ký tự Python. Dùng helper này để tránh slice nhầm khi source có non-ASCII.
+    """
+    if start_byte < 0 or end_byte < start_byte:
+        raise ValueError(f"Invalid byte range: {start_byte}:{end_byte}")
+    source_bytes = source_code.encode("utf-8")
+    patched = (
+        source_bytes[:start_byte]
+        + replacement.encode("utf-8")
+        + source_bytes[end_byte:]
+    )
+    return patched.decode("utf-8", errors="replace")
+
+
+def source_byte_range_to_char_range(
+    source_code: str,
+    start_byte: int,
+    end_byte: int,
+) -> Tuple[int, int]:
+    """Chuyển byte range UTF-8 sang char range để dùng với string slicing."""
+    if start_byte < 0 or end_byte < start_byte:
+        return -1, -1
+    source_bytes = source_code.encode("utf-8")
+    if end_byte > len(source_bytes):
+        return -1, -1
+    start_char = len(source_bytes[:start_byte].decode("utf-8", errors="replace"))
+    end_char = len(source_bytes[:end_byte].decode("utf-8", errors="replace"))
+    return start_char, end_char
+
+
+def _extract_function_code_tree_sitter(
+    source_code: str,
+    func_name: str,
+    language: str,
+) -> Tuple[Optional[str], int, int]:
+    if Parser is None:
+        return None, -1, -1
+    lang = _tree_sitter_language(language)
+    if lang is None:
+        return None, -1, -1
+
+    source_bytes = source_code.encode("utf-8")
+    parser = Parser()
+    try:
+        parser.language = lang
+    except Exception:
+        try:
+            parser.set_language(lang)
+        except Exception:
+            return None, -1, -1
+
+    try:
+        tree = parser.parse(source_bytes)
+    except Exception:
+        return None, -1, -1
+
+    for node in _walk_tree_sitter_nodes(tree.root_node):
+        if node.type != "function_definition":
+            continue
+        declarator = node.child_by_field_name("declarator")
+        if declarator is None:
+            continue
+        name = _tree_sitter_function_name(declarator, source_bytes)
+        if name != func_name:
+            continue
+        code = source_bytes[node.start_byte:node.end_byte].decode(
+            "utf-8",
+            errors="replace",
+        )
+        return code, node.start_byte, node.end_byte
+
+    return None, -1, -1
+
+
+def _tree_sitter_language(language: str):
+    key = (language or "c").strip().lower()
+    module = tree_sitter_cpp if key in ("cpp", "c++", "cc", "cxx") else tree_sitter_c
+    if module is None or Language is None:
+        return None
+    try:
+        return Language(module.language())
+    except Exception:
+        try:
+            return module.language()
+        except Exception:
+            return None
+
+
+def _walk_tree_sitter_nodes(root):
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        yield node
+        stack.extend(reversed(node.children))
+
+
+def _tree_sitter_function_name(declarator, source_bytes: bytes) -> str:
+    """
+    Lấy tên function từ declarator tree-sitter.
+
+    Với C thông thường declarator có ``identifier`` trực tiếp. Với C++ hoặc
+    declarator phức tạp, tên có thể nằm trong ``qualified_identifier``,
+    ``field_identifier``, ``operator_name`` hoặc lồng trong pointer declarator.
+    """
+    name_node = declarator.child_by_field_name("declarator")
+    if name_node is not None:
+        nested = _tree_sitter_function_name(name_node, source_bytes)
+        if nested:
+            return nested
+
+    for field in ("name", "field", "operator"):
+        try:
+            child = declarator.child_by_field_name(field)
+        except Exception:
+            child = None
+        if child is not None:
+            text = source_bytes[child.start_byte:child.end_byte].decode(
+                "utf-8",
+                errors="replace",
+            )
+            return text.split("::")[-1].strip()
+
+    if declarator.type in (
+        "identifier",
+        "field_identifier",
+        "destructor_name",
+        "operator_name",
+    ):
+        return source_bytes[declarator.start_byte:declarator.end_byte].decode(
+            "utf-8",
+            errors="replace",
+        )
+
+    if declarator.type in ("qualified_identifier", "template_function"):
+        text = source_bytes[declarator.start_byte:declarator.end_byte].decode(
+            "utf-8",
+            errors="replace",
+        )
+        return text.split("::")[-1].split("<", 1)[0].strip()
+
+    for child in declarator.children:
+        name = _tree_sitter_function_name(child, source_bytes)
+        if name:
+            return name
+    return ""
+
+
+def _extract_function_code_regex(
+    source_code: str,
+    func_name: str
+) -> Tuple[Optional[str], int, int]:
     pattern = re.compile(r'\b' + re.escape(func_name) + r'\s*\(')
 
     for m in pattern.finditer(source_code):
@@ -398,7 +560,9 @@ def extract_function_code(
         if end_idx < 0:
             continue
 
-        return source_code[start_idx:end_idx], start_idx, end_idx
+        start_byte = len(source_code[:start_idx].encode("utf-8"))
+        end_byte = len(source_code[:end_idx].encode("utf-8"))
+        return source_code[start_idx:end_idx], start_byte, end_byte
 
     return None, -1, -1
 
