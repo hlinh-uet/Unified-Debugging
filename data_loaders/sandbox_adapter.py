@@ -655,7 +655,8 @@ class Defects4CAdapter(SandboxAdapter):
             ])
         script = "\n".join(lines)
         result = subprocess.run(
-            ["docker", "exec", container, "bash", "-lc", script],
+            ["docker", "exec", "-i", container, "bash", "-s"],
+            input=script,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
