@@ -164,22 +164,52 @@ def _evaluate_one_apr(label: str, apr_results_file: str, dataset: str):
 
 def _filter_apr_results_for_dataset(apr_results: dict, dataset: str) -> dict:
     dataset_key = (dataset or "").strip().lower()
-    try:
-        bug_ids = {record.bug_id for record in get_loader(dataset).load_all()}
-    except Exception:
-        bug_ids = set()
-
     filtered = {}
     for bug_id, result in apr_results.items():
-        if bug_ids and bug_id not in bug_ids:
-            continue
         result_dataset = ""
         if isinstance(result, dict):
             result_dataset = str(result.get("dataset") or "").strip().lower()
-        if dataset_key and result_dataset and result_dataset != dataset_key:
+        if dataset_key and result_dataset:
+            if result_dataset != dataset_key:
+                continue
+            filtered[bug_id] = result
             continue
+        if dataset_key:
+            record, _ = _load_bug_record(bug_id, dataset)
+            if not record:
+                continue
+            record_dataset = str(getattr(record, "dataset", "") or "").strip().lower()
+            raw_dataset = str((getattr(record, "raw", None) or {}).get("data_folder") or "").strip().lower()
+            if dataset_key not in {record_dataset, raw_dataset}:
+                continue
         filtered[bug_id] = result
     return filtered
+
+
+_BUG_RECORD_CACHE = {}
+
+
+def _load_bug_record(bug_id: str, dataset: str):
+    cache_key = ((dataset or "").strip().lower(), bug_id)
+    if cache_key in _BUG_RECORD_CACHE:
+        return _BUG_RECORD_CACHE[cache_key]
+    try:
+        record = get_loader(dataset).load_one(bug_id)
+    except Exception as exc:
+        result = (None, f"loader_error:{exc}")
+        _BUG_RECORD_CACHE[cache_key] = result
+        return result
+    if not record:
+        result = (None, "bug_record_missing")
+        _BUG_RECORD_CACHE[cache_key] = result
+        return result
+    if not record.raw:
+        result = (None, "bug_raw_missing")
+        _BUG_RECORD_CACHE[cache_key] = result
+        return result
+    result = (record, "")
+    _BUG_RECORD_CACHE[cache_key] = result
+    return result
 
 
 def _validation_error_from_result(result: dict) -> str:
@@ -540,18 +570,6 @@ def _get_accepted_bug_code_and_function(
             return f.read(), accepted_path, accepted_func_name, ""
     except Exception as exc:
         return "", accepted_path, "", f"accepted_file_read_error:{exc}"
-
-
-def _load_bug_record(bug_id: str, dataset: str):
-    try:
-        record = get_loader(dataset).load_one(bug_id)
-    except Exception as exc:
-        return None, f"loader_error:{exc}"
-    if not record:
-        return None, "bug_record_missing"
-    if not record.raw:
-        return None, "bug_raw_missing"
-    return record, ""
 
 
 def _accepted_ground_truth(record) -> Tuple[str, str, str]:

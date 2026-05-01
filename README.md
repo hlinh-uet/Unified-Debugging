@@ -98,6 +98,7 @@ cp .env.example .env
 #   LLM_PROVIDER=qwen
 #   QWEN_MODEL=openai/gpt-oss-120b
 #   LLM_MAX_OUTPUT_TOKENS=12000
+#   APR_SKIP_EXISTING=1       – mặc định skip mọi bug đã có trong apr_results.json
 ```
 
 Model OpenRouter có thể đổi bằng `QWEN_MODEL`. Một số lựa chọn:

@@ -54,20 +54,42 @@ class Defects4CLoader(BugLoader):
         return records
 
     def load_one(self, bug_id: str) -> Optional[BugRecord]:
-        for record in self.load_all():
-            raw = record.raw or {}
+        # Avoid load_all() here. APR/evaluation commonly need only a few bugs;
+        # scanning every metadata file would also create/reset every cached
+        # worktree and can fail because of unrelated stale worktrees.
+        requested = str(bug_id or "").strip()
+        if not requested:
+            return None
+
+        metadata_files = []
+        for folder, metadata_dir in self._metadata_dirs():
+            direct = os.path.join(metadata_dir, f"{requested}_meta.json")
+            if os.path.isfile(direct):
+                return self._record_from_meta_file(direct, data_folder=folder)
+            for filename in sorted(os.listdir(metadata_dir)):
+                if filename.endswith("_meta.json"):
+                    metadata_files.append((folder, os.path.join(metadata_dir, filename)))
+
+        for folder, path in metadata_files:
+            try:
+                with open(path, "r") as f:
+                    raw = json.load(f)
+            except Exception:
+                continue
+
+            metadata_stem = os.path.basename(path).replace("_meta.json", "")
             candidates = {
-                record.bug_id,
-                raw.get("original_bug_id", ""),
-                raw.get("metadata_stem", ""),
-                raw.get("commit_after", ""),
+                metadata_stem,
+                str(raw.get("bug_id") or ""),
+                str(raw.get("original_bug_id") or ""),
+                str(raw.get("commit_after") or ""),
             }
-            project = raw.get("project", "")
-            commit_after = raw.get("commit_after", "")
+            project = str(raw.get("project") or "")
+            commit_after = str(raw.get("commit_after") or "")
             if project and commit_after:
                 candidates.add(f"{project}@{commit_after}")
-            if bug_id in candidates:
-                return record
+            if requested in candidates:
+                return self._record_from_meta_file(path, data_folder=folder)
         return None
 
     def _resolve_data_folder(self, requested: Optional[str]) -> Optional[str]:

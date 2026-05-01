@@ -3,6 +3,7 @@ import json
 import re
 import shutil
 import subprocess
+import time
 from typing import Optional
 import requests
 from dotenv import load_dotenv
@@ -32,6 +33,8 @@ APR_TOP_K = int(os.getenv("APR_TOP_K", "3"))
 APR_MAX_SOURCE_CHARS = int(os.getenv("APR_MAX_SOURCE_CHARS", "30000"))
 # Với Defects4C, một bug có hàng trăm test pass – lưu hết vào JSON gây bloat.
 APR_MAX_TEST_ID_STORE = int(os.getenv("APR_MAX_TEST_ID_STORE", "50"))
+# Mặc định resume APR theo kiểu append-only: bug nào đã có record thì bỏ qua.
+APR_SKIP_EXISTING = os.getenv("APR_SKIP_EXISTING", "1").strip().lower() not in ("0", "false", "no")
 
 
 def _is_defects4c_dataset(dataset: str) -> bool:
@@ -268,8 +271,25 @@ def _call_qwen(prompt: str, model: str = "qwen/qwen3-coder-30b-a3b-instruct") ->
             "max_tokens": int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "12000")),
         }
 
-        # 3. Gọi API với timeout để tránh treo máy như lúc nãy
-        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
+        timeout = int(os.getenv("LLM_REQUEST_TIMEOUT", "120"))
+        retries = int(os.getenv("LLM_RETRIES", "3"))
+        response = None
+        for attempt in range(1, retries + 1):
+            try:
+                response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=timeout)
+                break
+            except requests.exceptions.RequestException as exc:
+                if attempt >= retries:
+                    raise
+                sleep_s = min(2 ** attempt, 15)
+                print(
+                    f"[LLM] OpenRouter lỗi kết nối lần {attempt}/{retries}: {exc}. "
+                    f"Thử lại sau {sleep_s}s..."
+                )
+                time.sleep(sleep_s)
+
+        if response is None:
+            return None
         
         if response.status_code != 200:
             print(f"[LLM] Error {response.status_code}: {response.text}")
@@ -577,8 +597,13 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
     print("[APR] Đang chạy Automated Program Repair (LLM)...")
 
     for bug_id, result_data in fl_results.items():
-        if bug_id in apr_results and apr_results[bug_id].get("status") == "success":
-            continue
+        if bug_id in apr_results:
+            if APR_SKIP_EXISTING:
+                print(f"[APR] Bỏ qua bug {bug_id} vì đã có record trong apr_results.json.")
+                continue
+            if apr_results[bug_id].get("status") == "success":
+                print(f"[APR] Bỏ qua bug {bug_id} vì đã có status=success.")
+                continue
 
         scores = result_data.get("scores", result_data) if isinstance(result_data, dict) else result_data
         if not scores:

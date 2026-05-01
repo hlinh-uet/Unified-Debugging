@@ -26,6 +26,7 @@ def evaluate_fl(dataset: str = ""):
     top_1_hit = 0
     top_3_hit = 0
     top_5_hit = 0
+    top_10_hit = 0
 
     all_first_ranks = []
     all_avg_ranks   = []
@@ -90,6 +91,8 @@ def evaluate_fl(dataset: str = ""):
             top_3_hit += 1
         if first_rank <= 5:
             top_5_hit += 1
+        if first_rank <= 10:
+            top_10_hit += 1
 
     print(f"Tổng số bugs: {total_bugs}")
     print(f"  Đánh giá được (có GT + scores): {evaluated_bugs}")
@@ -100,9 +103,10 @@ def evaluate_fl(dataset: str = ""):
     print()
 
     if evaluated_bugs > 0:
-        print(f"Top-1 Accuracy: {top_1_hit}/{evaluated_bugs} ({top_1_hit/evaluated_bugs*100:.2f}%)")
-        print(f"Top-3 Accuracy: {top_3_hit}/{evaluated_bugs} ({top_3_hit/evaluated_bugs*100:.2f}%)")
-        print(f"Top-5 Accuracy: {top_5_hit}/{evaluated_bugs} ({top_5_hit/evaluated_bugs*100:.2f}%)")
+        print(f"Top-1  Accuracy: {top_1_hit}/{evaluated_bugs} ({top_1_hit/evaluated_bugs*100:.2f}%)")
+        print(f"Top-3  Accuracy: {top_3_hit}/{evaluated_bugs} ({top_3_hit/evaluated_bugs*100:.2f}%)")
+        print(f"Top-5  Accuracy: {top_5_hit}/{evaluated_bugs} ({top_5_hit/evaluated_bugs*100:.2f}%)")
+        print(f"Top-10 Accuracy: {top_10_hit}/{evaluated_bugs} ({top_10_hit/evaluated_bugs*100:.2f}%)")
         print()
 
         mfr = sum(all_first_ranks) / len(all_first_ranks)
