@@ -5,10 +5,11 @@ import shlex
 import subprocess
 import time
 import textwrap
+import ast
 from typing import Optional, Tuple
 import glob
 import hashlib
-from configs.path import CODEFLAWS_SOURCE_DIR, DEFECTS4C_OUT_DIR, DEFECTS4C_PATCHES_DIR
+from configs.path import CODEFLAWS_SOURCE_DIR, DEFECTS4C_OUT_DIR, DEFECTS4C_PATCHES_DIR, DEFECTS4C_TPL_DIR
 from core.utils import get_codeflaws_buggy_cfile
 from data_loaders.defects4c_loader import (
     get_defects4c_raw_record,
@@ -621,6 +622,13 @@ class Defects4CAdapter(SandboxAdapter):
             return False, [], [], "metadata_suite_config_missing"
 
         helper_path = self._extract_metadata_helper_path(template)
+        if helper_path:
+            self._ensure_metadata_test_helper(
+                container=container,
+                container_repo=container_repo,
+                bug_meta=bug_meta,
+                helper_path=helper_path,
+            )
         lines = [
             "set +e",
             f"cd {shlex.quote(container_repo)} || exit 2",
@@ -681,6 +689,89 @@ class Defects4CAdapter(SandboxAdapter):
             if part.endswith(".sh") and "{test_id}" not in part:
                 return part
         return None
+
+    def _ensure_metadata_test_helper(
+        self,
+        container: str,
+        container_repo: str,
+        bug_meta: dict,
+        helper_path: str,
+    ) -> bool:
+        helper = (helper_path or "").strip()
+        repo = (container_repo or "").rstrip("/")
+        if not helper or not repo:
+            return False
+        if os.path.basename(helper) != "run_one_test.sh":
+            return False
+        if not helper.startswith(repo + "/"):
+            return False
+
+        script = self._metadata_run_one_test_script(bug_meta)
+        if not script:
+            return False
+        cmd = (
+            f"helper={shlex.quote(helper)}; "
+            "if [ ! -f \"$helper\" ]; then "
+            "mkdir -p \"$(dirname \"$helper\")\" && "
+            f"printf %s {shlex.quote(script)} > \"$helper\" && "
+            "chmod +x \"$helper\"; "
+            "fi"
+        )
+        result = subprocess.run(
+            ["docker", "exec", container, "bash", "-lc", cmd],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return result.returncode == 0
+
+    def _metadata_run_one_test_script(self, bug_meta: dict) -> str:
+        project = str((bug_meta or {}).get("project") or "").strip()
+        if not project:
+            return ""
+
+        project_dir = os.path.join(DEFECTS4C_TPL_DIR, "projects_v1", project)
+        if not os.path.isdir(project_dir):
+            return ""
+
+        for path in sorted(glob.glob(os.path.join(project_dir, "build_meta*.py"))):
+            script, build_dir = self._read_run_one_test_from_build_meta(path)
+            if script:
+                return script.replace("__BUILD_DIR_NAME__", build_dir or "build_meta")
+        return ""
+
+    def _read_run_one_test_from_build_meta(self, path: str) -> Tuple[str, str]:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                tree = ast.parse(f.read(), filename=path)
+        except Exception:
+            return "", ""
+
+        script = ""
+        build_dir = ""
+        for node in tree.body:
+            if not isinstance(node, ast.Assign):
+                continue
+            names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+            if "BUILD_DIR_NAME" in names:
+                value = self._literal_string_from_ast(node.value)
+                if value:
+                    build_dir = value
+            if "RUN_ONE_TEST_SH" in names:
+                value = self._literal_string_from_ast(node.value)
+                if value:
+                    script = textwrap.dedent(value).lstrip()
+        return script, build_dir
+
+    def _literal_string_from_ast(self, node) -> str:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.Call):
+            # Handles textwrap.dedent("...").lstrip() and textwrap.dedent("...").
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "lstrip":
+                return self._literal_string_from_ast(node.func.value)
+            if node.args:
+                return self._literal_string_from_ast(node.args[0])
+        return ""
 
     def _collect_defects4c_test_ids(self, project: str, sha: str, bug_meta: Optional[dict] = None) -> list:
         metadata_ids = self._metadata_test_ids_from_bug_meta(bug_meta or {})
