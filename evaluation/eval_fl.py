@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from configs.path import EXPERIMENTS_DIR
 
 
@@ -160,9 +161,27 @@ def _normalize_ground_truth_for_score_keys(ground_truth, scores):
     for item in ground_truth:
         if not isinstance(item, str):
             continue
-        if "::" in item:
-            src_path, func = item.rsplit("::", 1)
-            normalized.append(f"{os.path.basename(src_path)}:{func}")
-        else:
-            normalized.append(item)
+        normalized.append(_normalize_gt_key(item))
     return normalized
+
+
+def _normalize_gt_key(value: str) -> str:
+    value = value.strip()
+    path_func = re.match(
+        r"^(?P<file>.+\.(?:c|cc|cpp|cxx|h|hh|hpp))::(?P<func>.+)$",
+        value,
+    )
+    if path_func:
+        return f"{os.path.basename(path_func.group('file'))}:{path_func.group('func')}"
+
+    first_colon = value.find(":")
+    if first_colon >= 0 and not value.startswith("::", first_colon):
+        file_hint = value[:first_colon]
+        func = value[first_colon + 1:]
+        if file_hint and func:
+            return f"{os.path.basename(file_hint)}:{func}"
+
+    if "::" in value:
+        src_path, func = value.rsplit("::", 1)
+        return f"{os.path.basename(src_path)}:{func}"
+    return value

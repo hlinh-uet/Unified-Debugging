@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from typing import Dict, List, Optional, Tuple
@@ -386,9 +387,22 @@ def _normalize_path_list(values) -> List[str]:
 def _normalize_coverage_key(value: str) -> str:
     if not value:
         return ""
-    if "::" in value:
-        file_hint, func = value.rsplit("::", 1)
-        return f"{os.path.basename(file_hint)}:{func}"
+    value = value.strip()
+
+    path_func = re.match(
+        r"^(?P<file>.+\.(?:c|cc|cpp|cxx|h|hh|hpp))::(?P<func>.+)$",
+        value,
+    )
+    if path_func:
+        return f"{os.path.basename(path_func.group('file'))}:{path_func.group('func')}"
+
+    first_colon = value.find(":")
+    if first_colon >= 0 and not value.startswith("::", first_colon):
+        file_hint = value[:first_colon]
+        func = value[first_colon + 1:]
+        if file_hint and func:
+            return f"{os.path.basename(file_hint)}:{func}"
+
     file_hint, func = parse_sbfl_qualified_name(value)
     if file_hint and func:
         return f"{os.path.basename(file_hint)}:{func}"

@@ -146,6 +146,17 @@ def parse_sbfl_qualified_name(qualified: str) -> Tuple[str, str]:
     """
     if not qualified:
         return "", ""
+
+    # Defects4C coverage keys use "file:function".  For C++ the function part
+    # may itself contain scopes/operators, e.g. "format.h:foo::operator+=".
+    # Parse this form before the legacy "::" separator.
+    path_func = re.match(
+        r"^(?P<file>.+\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx|inl|inc)):(?!:)(?P<func>.+)$",
+        qualified,
+    )
+    if path_func:
+        return path_func.group("file"), path_func.group("func")
+
     sep = "::"
     if sep in qualified:
         idx = qualified.rfind(sep)
@@ -335,7 +346,13 @@ def extract_function_code(
     ts_result = _extract_function_code_tree_sitter(source_code, func_name, language)
     if ts_result[0] is not None:
         return ts_result
-    return _extract_function_code_regex(source_code, func_name)
+    regex_result = _extract_function_code_regex(source_code, func_name)
+    if regex_result[0] is not None:
+        return regex_result
+    leaf_name = _function_name_leaf(func_name)
+    if leaf_name != func_name:
+        return _extract_function_code_regex(source_code, leaf_name)
+    return regex_result
 
 
 def replace_source_range_bytes(
@@ -410,7 +427,7 @@ def _extract_function_code_tree_sitter(
         if declarator is None:
             continue
         name = _tree_sitter_function_name(declarator, source_bytes)
-        if name != func_name:
+        if not _function_name_matches(name, func_name):
             continue
         code = source_bytes[node.start_byte:node.end_byte].decode(
             "utf-8",
@@ -419,6 +436,18 @@ def _extract_function_code_tree_sitter(
         return code, node.start_byte, node.end_byte
 
     return None, -1, -1
+
+
+def _function_name_leaf(func_name: str) -> str:
+    if not func_name:
+        return ""
+    return func_name.rsplit("::", 1)[-1].split("<", 1)[0].strip()
+
+
+def _function_name_matches(actual: str, requested: str) -> bool:
+    if actual == requested:
+        return True
+    return actual == _function_name_leaf(requested)
 
 
 def _tree_sitter_language(language: str):
@@ -550,6 +579,11 @@ def _extract_function_code_regex(
                     continue
                 i = j
                 continue
+            if c == ':':
+                body_open = _find_cpp_ctor_body_open(source_code, i)
+                if body_open >= 0:
+                    i = body_open
+                break
             break
 
         if i >= n or source_code[i] != '{':
@@ -565,6 +599,49 @@ def _extract_function_code_regex(
         return source_code[start_idx:end_idx], start_byte, end_byte
 
     return None, -1, -1
+
+
+def _find_cpp_ctor_body_open(source: str, colon_pos: int) -> int:
+    """Find the body ``{`` after a C++ constructor initializer list."""
+    i = colon_pos + 1
+    n = len(source)
+    while i < n:
+        c = source[i]
+        if c == '/' and i + 1 < n and source[i + 1] == '/':
+            nl = source.find('\n', i)
+            if nl < 0:
+                return -1
+            i = nl + 1
+            continue
+        if c == '/' and i + 1 < n and source[i + 1] == '*':
+            end = source.find('*/', i + 2)
+            if end < 0:
+                return -1
+            i = end + 2
+            continue
+        if c == '(':
+            end = _find_matching_paren(source, i)
+            if end < 0:
+                return -1
+            i = end + 1
+            continue
+        if c == '{':
+            end = _find_matching_brace(source, i)
+            if end < 0:
+                return -1
+            j = end
+            while j < n and source[j].isspace():
+                j += 1
+            if j >= n or source[j] not in (',', '{'):
+                return i
+            if source[j] == '{':
+                return j
+            i = j + 1
+            continue
+        if c == ';':
+            return -1
+        i += 1
+    return -1
 
 
 def _find_function_def_start(source: str, name_pos: int) -> int:
