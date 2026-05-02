@@ -443,6 +443,36 @@ def _compact_test_list(test_ids):
     return list(test_ids[:APR_MAX_TEST_ID_STORE]) + [f"...(+{extra} more)"]
 
 
+def _dedup_initial_test_ids(tests):
+    """
+    Return unique initial passed/failed test IDs.
+
+    Metadata can contain duplicate rows for the same test case when a project
+    runner reports parameterized/typed cases under the same external test ID.
+    Treat a duplicated ID as failed if any row failed; otherwise passed once.
+    """
+    status_by_id = {}
+    order = []
+    for test in tests or []:
+        if not isinstance(test, dict):
+            continue
+        tid = str(test.get("test_id") or "").strip()
+        if not tid:
+            continue
+        if tid not in status_by_id:
+            status_by_id[tid] = "PASS"
+            order.append(tid)
+        outcome = str(test.get("outcome") or "").upper()
+        if outcome in ("FAIL", "FAILED"):
+            status_by_id[tid] = "FAIL"
+        elif outcome in ("PASS", "PASSED") and status_by_id.get(tid) != "FAIL":
+            status_by_id[tid] = "PASS"
+
+    failed = [tid for tid in order if status_by_id.get(tid) == "FAIL"]
+    passed = [tid for tid in order if status_by_id.get(tid) == "PASS"]
+    return passed, failed
+
+
 def _copy_accepted_patch(dataset: str, bug_id: str, bug_source_path: str,
                         bug_record: BugRecord) -> str:
     """
@@ -487,7 +517,15 @@ def _copy_accepted_patch(dataset: str, bug_id: str, bug_source_path: str,
 
 def _build_failed_test_context(bug: BugRecord) -> str:
     """Tóm tắt toàn bộ failed tests từ BugRecord (không đọc lại disk)."""
-    failed_tests = [t for t in bug.tests if t.get("outcome") in ("FAIL", "FAILED")]
+    seen = set()
+    failed_tests = []
+    for test in bug.tests:
+        tid = str(test.get("test_id") or "").strip()
+        if not tid or tid in seen:
+            continue
+        if str(test.get("outcome") or "").upper() in ("FAIL", "FAILED"):
+            failed_tests.append(test)
+            seen.add(tid)
     if not failed_tests:
         return ""
 
@@ -634,8 +672,9 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
         # Context test từ BugRecord đã load sẵn (không đọc thêm file)
         bug_record = bug_map.get(bug_id)
         failed_tests_context = _build_failed_test_context(bug_record) if bug_record else ""
-        init_passed_all = [t.get("test_id") for t in (bug_record.tests if bug_record else []) if t.get("outcome") in ("PASS", "PASSED")]
-        init_failed_all = [t.get("test_id") for t in (bug_record.tests if bug_record else []) if t.get("outcome") in ("FAIL", "FAILED")]
+        init_passed_all, init_failed_all = _dedup_initial_test_ids(
+            bug_record.tests if bug_record else []
+        )
         init_passed = _compact_test_list(init_passed_all)
         init_failed = _compact_test_list(init_failed_all)
 
