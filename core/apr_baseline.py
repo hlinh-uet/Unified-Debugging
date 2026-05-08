@@ -9,7 +9,7 @@ import requests
 from dotenv import load_dotenv
 from pathlib import Path
 
-from configs.path import EXPERIMENTS_DIR, PATCHES_DIR
+from configs.path import EXPERIMENTS_DIR, PATCHES_DIR, LLM_PATCHES_DIR
 from data_loaders.base_loader import get_loader, BugRecord
 from data_loaders.sandbox_adapter import get_sandbox_adapter, defects4c_docker_ready
 from core.utils import (
@@ -558,6 +558,77 @@ def _clean_llm_patch(patched_func: str) -> str:
     return patched_func.strip()
 
 
+def _safe_artifact_part(value: object, max_len: int = 120) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"[^A-Za-z0-9._-]+", "_", text)
+    text = text.strip("._-")
+    return (text or "unknown")[:max_len]
+
+
+def _rel_experiment_path(path: str) -> str:
+    try:
+        return os.path.relpath(path, EXPERIMENTS_DIR)
+    except ValueError:
+        return path
+
+
+def _write_llm_patch_artifact(
+    *,
+    bug_id: str,
+    attempt_index: int,
+    qualified_name: str,
+    candidate_relpath: str,
+    llm_provider: Optional[str],
+    raw_patch: str,
+    patched_function: str,
+    patched_file: Optional[str] = None,
+    status: str = "generated",
+    validation_error: str = "",
+) -> dict:
+    """Luu patch LLM sinh ra de trace/debug, ke ca khi validate fail."""
+    bug_part = _safe_artifact_part(bug_id, 80)
+    bug_dir = os.path.join(LLM_PATCHES_DIR, bug_part)
+    os.makedirs(bug_dir, exist_ok=True)
+    func_part = _safe_artifact_part(qualified_name, 140)
+    base_name = f"{attempt_index:02d}__{func_part}"
+
+    response_path = os.path.join(bug_dir, f"{base_name}.response.txt")
+    function_path = os.path.join(bug_dir, f"{base_name}.function.c")
+    patched_file_path = os.path.join(bug_dir, f"{base_name}.patched.c")
+    metadata_path = os.path.join(bug_dir, f"{base_name}.json")
+
+    with open(response_path, "w") as f:
+        f.write(raw_patch or "")
+    with open(function_path, "w") as f:
+        f.write(patched_function or "")
+
+    artifact = {
+        "bug_id": bug_id,
+        "attempt_index": attempt_index,
+        "function": qualified_name,
+        "repair_target_relpath": candidate_relpath,
+        "llm_provider": llm_provider or _DEFAULT_LLM_PROVIDER,
+        "status": status,
+        "validation_error": validation_error,
+        "artifact_dir": _rel_experiment_path(bug_dir),
+        "llm_response_path": _rel_experiment_path(response_path),
+        "raw_patch_path": _rel_experiment_path(response_path),
+        "patched_function_path": _rel_experiment_path(function_path),
+        "patched_file_path": "",
+        "metadata_path": _rel_experiment_path(metadata_path),
+    }
+
+    if patched_file:
+        with open(patched_file_path, "w") as f:
+            f.write(patched_file)
+        artifact["patched_file_path"] = _rel_experiment_path(patched_file_path)
+
+    with open(metadata_path, "w") as f:
+        json.dump(artifact, f, indent=4)
+
+    return artifact
+
+
 def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = None):
     """
     Pipeline APR (LLM-based).
@@ -688,6 +759,7 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
         validation_details = {}
         attempted     = False   # đã thử ít nhất 1 hàm
         llm_attempted = False   # LLM đã thực sự sinh patch ít nhất 1 lần
+        llm_patch_attempt_index = 0
         candidate_results = []
         best_candidate = None
 
@@ -765,9 +837,21 @@ The defect may be a crash, memory-safety issue, bounds-checking error, parser ed
 
             llm_attempted = True
             candidate_patched_func = _clean_llm_patch(raw_patch)
+            llm_patch_attempt_index += 1
             reparsed_func, _, _ = extract_function_code(candidate_patched_func, func_name)
             if not reparsed_func:
                 print("    [ERROR] LLM trả về function không hoàn chỉnh/không parse được. Bỏ qua validate.")
+                llm_patch_artifact = _write_llm_patch_artifact(
+                    bug_id=bug_id,
+                    attempt_index=llm_patch_attempt_index,
+                    qualified_name=qualified_name,
+                    candidate_relpath=candidate_relpath,
+                    llm_provider=llm_provider,
+                    raw_patch=raw_patch,
+                    patched_function=candidate_patched_func,
+                    status="malformed_function",
+                    validation_error="malformed_function",
+                )
                 candidate_results.append({
                     "function": qualified_name,
                     "score": score,
@@ -780,6 +864,7 @@ The defect may be a crash, memory-safety issue, bounds-checking error, parser ed
                     "repair_target_relpath": candidate_relpath,
                     "patched_function": candidate_patched_func,
                     "patched_file": "",
+                    "llm_patch_artifact": llm_patch_artifact,
                     "post_scope": "full_suite",
                     "post_passed_count": 0,
                     "post_failed_count": 0,
@@ -819,6 +904,18 @@ The defect may be a crash, memory-safety issue, bounds-checking error, parser ed
             patched_norm = normalize_code_for_edit_distance(candidate_patched_func)
             if not patched_norm or candidate_patched_source == source_code:
                 print("    [NO-OP] Patch không thay đổi hàm nguồn, bỏ qua candidate này.")
+                _write_llm_patch_artifact(
+                    bug_id=bug_id,
+                    attempt_index=llm_patch_attempt_index,
+                    qualified_name=qualified_name,
+                    candidate_relpath=candidate_relpath,
+                    llm_provider=llm_provider,
+                    raw_patch=raw_patch,
+                    patched_function=candidate_patched_func,
+                    patched_file=candidate_patched_source,
+                    status="no_op",
+                    validation_error="no_op",
+                )
                 continue
             if patched_norm == orig_norm:
                 print("    [WARN] Patch chỉ khác theo normalized diff; vẫn validate để tránh bỏ nhầm.")
@@ -879,6 +976,18 @@ The defect may be a crash, memory-safety issue, bounds-checking error, parser ed
                 "fixed_fail_excluded_tests": list(fixed_fail_excluded),
                 "validation_details": validation_details,
             }
+            candidate_result["llm_patch_artifact"] = _write_llm_patch_artifact(
+                bug_id=bug_id,
+                attempt_index=llm_patch_attempt_index,
+                qualified_name=qualified_name,
+                candidate_relpath=candidate_relpath,
+                llm_provider=llm_provider,
+                raw_patch=raw_patch,
+                patched_function=candidate_patched_func,
+                patched_file=candidate_patched_source,
+                status=candidate_result["status"],
+                validation_error=validation_error,
+            )
             candidate_results.append(candidate_result)
 
             if is_valid:
@@ -950,6 +1059,7 @@ The defect may be a crash, memory-safety issue, bounds-checking error, parser ed
             "real_status":         real_status,
             "patched_function":   patched_func,
             "patched_file":       patched_source,  # toàn bộ nội dung file đã vá (có thể khác file bug chính)
+            "llm_patch_artifact": best_candidate.get("llm_patch_artifact") if best_candidate else {},
             "repair_target_file": repair_target_file,
             "repair_target_relpath": _candidate_relpath_from_buggy_tree(repair_target_file or "", raw_meta),
             "selected_function":  target_func,

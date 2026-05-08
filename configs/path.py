@@ -29,6 +29,7 @@ DEFECTS4C_CACHE_DIR = os.path.join(EXPERIMENTS_DIR, "defects4c_cache")
 
 # Đường dẫn để lưu các bản vá lỗi (patches)
 PATCHES_DIR = os.path.join(EXPERIMENTS_DIR, "patches")
+LLM_PATCHES_DIR = os.path.join(EXPERIMENTS_DIR, "llm_patches")
 
 # 5. Đảm bảo thư mục experiments tồn tại
 if not os.path.exists(EXPERIMENTS_DIR):

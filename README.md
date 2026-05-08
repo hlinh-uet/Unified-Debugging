@@ -181,11 +181,21 @@ Các field chính:
 | `selected_function` | Function best candidate được chọn |
 | `patched_function` | Function LLM sinh ra |
 | `patched_file` | Toàn bộ source file sau khi byte-range replace function |
+| `llm_patch_artifact` | Đường dẫn artifact của best candidate trong `experiments/llm_patches/` |
 | `repair_target_relpath` | File relative path trong buggy tree/container |
 | `post_passed_tests`, `post_failed_tests` | Full-suite test IDs thật sau validate (`post_scope = full_suite`) |
 | `patch_comparison_post_passed_tests`, `patch_comparison_post_failed_tests` | Test IDs dùng cho patch-comparison, đã loại các fixed-fail nền |
 | `status_scope`, `patch_comparison_status`, `real_status` | Phân biệt status dùng để chọn patch với status full-suite |
 | `validation_error` | Lỗi validate/build nếu không chạy được test suite; không phải test id |
+
+Ngoài JSON tổng hợp, mọi output mà LLM sinh ra được lưu theo từng bug trong `experiments/llm_patches/<bug-id>/`, kể cả patch malformed, no-op hoặc fail test:
+
+| File | Ý nghĩa |
+|---|---|
+| `*.response.txt` | Raw response từ LLM trước khi clean markdown |
+| `*.function.c` | Function sau `_clean_llm_patch()` |
+| `*.patched.c` | Toàn bộ source file sau khi ghép function, nếu ghép được |
+| `*.json` | Metadata: bug id, attempt index, function, target file, provider, status |
 
 Nếu `apr_results.json` được sinh từ code cũ, có thể còn `candidate_results` hoặc `compile_failed` trong `post_failed_tests`. Hãy chạy lại APR để sinh format mới.
 

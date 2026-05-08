@@ -270,4 +270,5 @@ CODEFLAWS_RESULTS_DIR  # Thư mục chứa file JSON kết quả test (all_resul
 CODEFLAWS_SOURCE_DIR   # Thư mục chứa mã nguồn C của benchmark (benchmark/)
 EXPERIMENTS_DIR        # Thư mục lưu kết quả pipeline (experiments/)
 PATCHES_DIR            # Thư mục lưu các bản vá thành công (experiments/patches/)
+LLM_PATCHES_DIR        # Thư mục lưu mọi patch LLM sinh ra (experiments/llm_patches/)
 ```

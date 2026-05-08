@@ -84,6 +84,7 @@ LLM APR lưu kết quả theo schema dưới đây để `eval_apr.py` đọc th
 | `patched_function` | Mã nguồn của **hàm** được sửa — dùng tính **Edit Distance function-level** |
 | `patched_file` | Toàn bộ nội dung **file** sau khi vá — dùng tính **Edit Distance file-level** |
 | `selected_function` | Qualified name dạng `<path>::<func_name>` — dùng để trích hàm tương ứng từ accepted file |
+| `llm_patch_artifact` | Artifact của best candidate trong `experiments/llm_patches/` |
 
 > **Quan trọng:** Cả `patched_function` và `patched_file` được lưu **kể cả khi status ≠ success**. Điều này để `eval_apr.py` tính Edit Distance ngay cả với bản vá không thành công hoặc khi FL xác định sai function.
 
