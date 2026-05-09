@@ -641,12 +641,12 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
     """
     os.makedirs(EXPERIMENTS_DIR, exist_ok=True)
 
-    tarantula_results_file = os.path.join(EXPERIMENTS_DIR, "tarantula_results.json")
-    if not os.path.exists(tarantula_results_file):
-        print(f"[APR] Lỗi: {tarantula_results_file} chưa tồn tại. Hãy chạy FL trước.")
+    fl_results_file = os.path.join(EXPERIMENTS_DIR, "fault_localization_results.json")
+    if not os.path.exists(fl_results_file):
+        print(f"[APR] Lỗi: {fl_results_file} chưa tồn tại. Hãy chạy FL trước.")
         return
 
-    with open(tarantula_results_file, "r") as f:
+    with open(fl_results_file, "r") as f:
         fl_results = json.load(f)
 
     ds_lc = (dataset or "").lower()

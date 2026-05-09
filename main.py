@@ -3,7 +3,11 @@ import json
 import argparse
 
 from data_loaders.base_loader import get_loader
-from core.fl_tarantula import calculate_tarantula, calculate_tarantula_file_level, _extract_file_from_key
+from core.fault_localization import (
+    calculate_fault_localization,
+    calculate_fault_localization_file_level,
+    _extract_file_from_key,
+)
 from core.apr_baseline import run_apr_pipeline
 from evaluation.eval_fl import evaluate_fl
 from evaluation.eval_apr import evaluate_apr
@@ -36,10 +40,10 @@ def run_fl(dataset: str = "codeflaws"):
     """
     Bước 1 – Fault Localization (Tarantula).
     Tính điểm Tarantula ở 2 mức:
-      - Function-level → tarantula_function_results.json
-      - File-level     → tarantula_file_results.json
+      - Function-level → fault_localization_function_results.json
+      - File-level     → fault_localization_file_results.json
     Sau đó tổng hợp: combined_score = function_score*0.5 + file_score*0.5
-      → tarantula_results.json
+      → fault_localization_results.json
     """
     print(f"[FL] Đang load bugs từ dataset '{dataset}'...")
     loader = get_loader(dataset)
@@ -60,10 +64,10 @@ def run_fl(dataset: str = "codeflaws"):
         print(f"[FL] Tính điểm Tarantula cho {bug.bug_id}...")
 
         # --- Function-level ---
-        func_scores = calculate_tarantula(bug.tests)
+        func_scores = calculate_fault_localization(bug.tests)
 
         # --- File-level ---
-        file_scores = calculate_tarantula_file_level(bug.tests)
+        file_scores = calculate_fault_localization_file_level(bug.tests)
 
         # --- Ground truth cho file-level ---
         gt_functions = bug.ground_truth  # list[str], ví dụ: ["file.c:func"]
@@ -72,6 +76,7 @@ def run_fl(dataset: str = "codeflaws"):
         # Lưu function-level
         func_results[bug.bug_id] = {
             "dataset":      dataset,
+            "formula":      "tarantula",
             "scores":       func_scores,
             "ground_truth": gt_functions,
         }
@@ -79,6 +84,7 @@ def run_fl(dataset: str = "codeflaws"):
         # Lưu file-level
         file_results[bug.bug_id] = {
             "dataset":      dataset,
+            "formula":      "tarantula",
             "scores":       file_scores,
             "ground_truth": gt_files,
         }
@@ -99,27 +105,28 @@ def run_fl(dataset: str = "codeflaws"):
 
         combined_results[bug.bug_id] = {
             "dataset":      dataset,
+            "formula":      "tarantula",
             "scores":       combined_scores,
             "ground_truth": gt_functions,
         }
 
     # --- Ghi file function-level ---
-    func_file = os.path.join(EXPERIMENTS_DIR, "tarantula_function_results.json")
+    func_file = os.path.join(EXPERIMENTS_DIR, "fault_localization_function_results.json")
     with open(func_file, "w") as f:
         json.dump(func_results, f, indent=4)
     print(f"[FL] Function-level scores → {func_file}")
 
     # --- Ghi file file-level ---
-    file_file = os.path.join(EXPERIMENTS_DIR, "tarantula_file_results.json")
+    file_file = os.path.join(EXPERIMENTS_DIR, "fault_localization_file_results.json")
     with open(file_file, "w") as f:
         json.dump(file_results, f, indent=4)
     print(f"[FL] File-level scores     → {file_file}")
 
     # --- Ghi file combined ---
-    combined_file = os.path.join(EXPERIMENTS_DIR, "tarantula_results.json")
+    combined_file = os.path.join(EXPERIMENTS_DIR, "fault_localization_results.json")
     with open(combined_file, "w") as f:
         json.dump(combined_results, f, indent=4)
-    print(f"[FL] Combined scores (0.5*func + 0.5*file) → {combined_file}")
+    print(f"[FL] Combined Tarantula scores (0.5*func + 0.5*file) → {combined_file}")
 
 
 def main():

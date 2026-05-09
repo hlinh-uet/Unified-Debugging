@@ -1,6 +1,26 @@
-def calculate_tarantula(test_data):
+def _calculate_tarantula_score(covered_failed, covered_passed, total_failed, total_passed):
+    """
+    Tarantula suspiciousness:
+        (failed(e) / total_failed) /
+        ((failed(e) / total_failed) + (passed(e) / total_passed))
+    """
+    if total_failed <= 0:
+        return 0.0
+
+    if total_passed <= 0:
+        return 1.0 if covered_failed > 0 else 0.0
+
+    fail_ratio = covered_failed / total_failed
+    pass_ratio = covered_passed / total_passed
+    if fail_ratio + pass_ratio == 0:
+        return 0.0
+    return fail_ratio / (fail_ratio + pass_ratio)
+
+
+def calculate_fault_localization(test_data):
     """
     Computes Tarantula score for each covered function using the test results.
+
     test_data: list of dicts with 'outcome' ('PASSED', 'FAILED') and 'covered_methods' (list)
     Returns: dict { 'method_name': score }
     """
@@ -31,19 +51,7 @@ def calculate_tarantula(test_data):
         p_m = method_passed.get(m, 0)
         f_m = method_failed.get(m, 0)
         
-        if total_failed == 0:
-            score = 0.0
-        elif total_passed == 0:
-            score = 1.0 if f_m > 0 else 0.0
-        else:
-            fail_ratio = f_m / total_failed
-            pass_ratio = p_m / total_passed
-            if fail_ratio + pass_ratio == 0:
-                score = 0.0
-            else:
-                score = fail_ratio / (fail_ratio + pass_ratio)
-                
-        scores[m] = score
+        scores[m] = _calculate_tarantula_score(f_m, p_m, total_failed, total_passed)
 
     # Sort descending by score
     return dict(sorted(scores.items(), key=lambda item: item[1], reverse=True))
@@ -82,7 +90,7 @@ def _extract_file_from_key(method_key):
     return method_key
 
 
-def calculate_tarantula_file_level(test_data):
+def calculate_fault_localization_file_level(test_data):
     """
     Computes Tarantula score at the FILE level.
     Aggregates coverage from covered_methods to file granularity.
@@ -121,19 +129,7 @@ def calculate_tarantula_file_level(test_data):
         p_f = file_passed.get(f, 0)
         f_f = file_failed.get(f, 0)
 
-        if total_failed == 0:
-            score = 0.0
-        elif total_passed == 0:
-            score = 1.0 if f_f > 0 else 0.0
-        else:
-            fail_ratio = f_f / total_failed
-            pass_ratio = p_f / total_passed
-            if fail_ratio + pass_ratio == 0:
-                score = 0.0
-            else:
-                score = fail_ratio / (fail_ratio + pass_ratio)
-
-        scores[f] = score
+        scores[f] = _calculate_tarantula_score(f_f, p_f, total_failed, total_passed)
 
     # Sort descending by score
     return dict(sorted(scores.items(), key=lambda item: item[1], reverse=True))

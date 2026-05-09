@@ -19,7 +19,7 @@
         │                             │
 ┌───────▼──────┐        ┌─────────────▼──────────────────────────┐
 │  core/        │        │  core/                                 │
-│  fl_tarantula │        │  apr_baseline.py  (LLM – Gemini)       │
+│ fault_localization │    │  apr_baseline.py  (LLM – Gemini)       │
 │  .py          │        │                                      │
 └───────┬──────┘        │                                      │
         │                └─────────────┬──────────────────────────┘
@@ -32,7 +32,7 @@
         │
 ┌───────▼──────────────────────────────┐
 │  experiments/                         │
-│  tarantula_results.json               │
+│  fault_localization_results.json      │
 │  apr_results.json                     │
 │  patches/  correct_patches/           │
 └───────┬──────────────────────────────┘
@@ -134,9 +134,9 @@ if dataset_name.lower() == "defects4c":
 
 ## 3. Fault Localization (FL)
 
-**File:** `core/fl_tarantula.py`  
+**File:** `core/fault_localization.py`  
 **Input:** `List[BugRecord]` từ `get_loader()`  
-**Output:** `experiments/tarantula_results.json`
+**Output:** `experiments/fault_localization_results.json`
 
 ### Thuật toán Tarantula
 
@@ -154,6 +154,7 @@ Trong đó:
 ```json
 {
   "476-A-bug-16608008-16608059": {
+    "formula": "tarantula",
     "scores": {
       "solve": 1.0,
       "main": 0.5
@@ -167,7 +168,7 @@ Trong đó:
 
 ## 4. Automated Program Repair (APR)
 
-APR đọc `tarantula_results.json` để lấy thứ tự ưu tiên hàm, đồng thời nạp lại `BugRecord` (qua `get_loader()`) để lấy thông tin test context mà **không cần đọc file disk thêm lần nào**.
+APR đọc `fault_localization_results.json` để lấy thứ tự ưu tiên hàm, đồng thời nạp lại `BugRecord` (qua `get_loader()`) để lấy thông tin test context mà **không cần đọc file disk thêm lần nào**.
 
 Ba APR engine đều lưu vào JSON kết quả các trường:
 - `patched_function` – mã nguồn hàm được sửa (function-level)
@@ -178,7 +179,7 @@ Ba APR engine đều lưu vào JSON kết quả các trường:
 
 ```
 Với mỗi bug:
-  1. Lấy danh sách hàm nghi ngờ từ tarantula_results.json (sắp xếp giảm dần)
+  1. Lấy danh sách hàm nghi ngờ từ fault_localization_results.json (sắp xếp giảm dần)
  2. extract_function_code() → trích xuất mã nguồn hàm (từ core/utils.py)
   3. Xây dựng prompt với context test FAIL từ BugRecord.tests
   4. Gọi call_llm() → Gemini sinh bản vá
@@ -239,7 +240,7 @@ APR luôn extract và ghép patch trên `buggy_ver/<relpath>`. Evaluation đọc
 
 ### FL – `evaluation/eval_fl.py`
 
-Đọc `tarantula_results.json`, so ground truth với Top-K hàm nghi ngờ:
+Đọc `fault_localization_results.json`, so ground truth với Top-K hàm nghi ngờ:
 
 - **Top-1 Hit Rate**: hàm lỗi thực sự nằm ở vị trí #1
 - **Top-3 Hit Rate**: nằm trong Top 3

@@ -1,6 +1,6 @@
 import json
 
-with open('experiments/tarantula_results.json', 'r') as f:
+with open('experiments/fault_localization_results.json', 'r') as f:
     data = json.load(f)
 
 for bug, meta in data.items():

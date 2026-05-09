@@ -6,7 +6,7 @@ from configs.path import EXPERIMENTS_DIR
 
 def evaluate_fl(dataset: str = ""):
     """
-    Đánh giá Fault Localization (Tarantula) với các metrics chuẩn:
+    Đánh giá Fault Localization với các metrics chuẩn:
       - Top-K accuracy (K=1, 3, 5): GT function xuất hiện trong top K?
       - MFR (Mean First Rank): trung bình rank đầu tiên của GT function
       - MAR (Mean Average Rank): trung bình rank của tất cả GT functions
@@ -16,13 +16,13 @@ def evaluate_fl(dataset: str = ""):
     (tất cả hàm cùng điểm được gán rank = vị trí cuối cùng trong nhóm).
     """
     print("\n--- Báo cáo Đánh giá Fault Localization (FL) ---")
-    tarantula_file = os.path.join(EXPERIMENTS_DIR, "tarantula_results.json")
-    if not os.path.exists(tarantula_file):
-        print(f"Không tìm thấy file kết quả định vị lỗi {tarantula_file}")
+    fl_results_file = os.path.join(EXPERIMENTS_DIR, "fault_localization_results.json")
+    if not os.path.exists(fl_results_file):
+        print(f"Không tìm thấy file kết quả định vị lỗi {fl_results_file}")
         return
 
-    with open(tarantula_file, 'r') as f:
-        tarantula_results = json.load(f)
+    with open(fl_results_file, 'r') as f:
+        fl_results = json.load(f)
 
     top_1_hit = 0
     top_3_hit = 0
@@ -41,7 +41,7 @@ def evaluate_fl(dataset: str = ""):
 
     dataset_key = (dataset or "").strip().lower()
 
-    for bug_id, result_data in tarantula_results.items():
+    for bug_id, result_data in fl_results.items():
         if not isinstance(result_data, dict) or 'scores' not in result_data:
             skipped_no_scores += 1
             continue

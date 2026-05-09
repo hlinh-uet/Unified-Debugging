@@ -23,7 +23,7 @@ Unified-Debugging/
 │
 ├── core/                      # Logic nghiệp vụ chính
 │   ├── utils.py               # Tiện ích dùng chung (extract_function_code, qualify_func, ...)
-│   ├── fl_tarantula.py        # Thuật toán Fault Localization – Tarantula
+│   ├── fault_localization.py  # Thuật toán Fault Localization – Tarantula
 │   └── apr_baseline.py        # APR với LLM
 │
 ├── evaluation/                # Đánh giá và báo cáo
@@ -31,7 +31,7 @@ Unified-Debugging/
 │   └── eval_apr.py            # Đánh giá APR: Fix Rate, Regression, Edit Distance
 │
 ├── experiments/               # Sinh ra sau khi chạy – chứa kết quả
-│   ├── tarantula_results.json          # Kết quả FL; mỗi record có dataset + scores
+│   ├── fault_localization_results.json # Kết quả FL; mỗi record có dataset + formula + scores
 │   ├── apr_results.json                # Kết quả APR – chỉ lưu best candidate mỗi bug
 │   ├── patches/                        # Bản vá thành công (status=success)
 │   │   └── <bug_id>_patch.c            #   – từ LLM baseline
@@ -52,7 +52,7 @@ get_loader(dataset)
       ▼
  [BugRecord list]
       │
-      ├──► FL (Tarantula) ──────────────────────► tarantula_results.json
+      ├──► FL (Tarantula) ──────────────────────► fault_localization_results.json
       │
       └──► APR ───► LLM                 ──────► apr_results.json
                          │
@@ -67,7 +67,7 @@ get_loader(dataset)
                    (Fix Rate, Regression, ED func + file)
 ```
 
-> **Điểm quan trọng:** APR đọc `tarantula_results.json`, nên cần chạy FL cho đúng dataset trước khi chạy APR. Kết quả FL/APR hiện có trường `dataset` và evaluation sẽ tự lọc theo dataset đang chạy.
+> **Điểm quan trọng:** APR đọc `fault_localization_results.json`, nên cần chạy FL cho đúng dataset trước khi chạy APR. Kết quả FL hiện dùng công thức Tarantula; mỗi record có trường `formula`.
 
 ---
 
@@ -132,11 +132,11 @@ python3 main.py --all --dataset tcpdump --llm qwen
 
 ```bash
 # Bước 1 – Fault Localization.
-# Lệnh này ghi experiments/tarantula_results.json cho dataset đang chọn.
+# Lệnh này ghi experiments/fault_localization_results.json cho dataset đang chọn.
 python3 main.py --fl --dataset tcpdump
 
 # Bước 2 – APR bằng LLM.
-# Cần có tarantula_results.json từ bước FL cùng dataset.
+# Cần có fault_localization_results.json từ bước FL cùng dataset.
 python3 main.py --apr --dataset tcpdump --llm qwen
 python3 main.py --apr --dataset defects4c --llm gemini
 python3 main.py --apr --dataset defects4c --llm openai
@@ -146,7 +146,7 @@ python3 main.py --apr --dataset tcpdump           # dùng LLM_PROVIDER trong .en
 python3 main.py --eval --dataset tcpdump
 ```
 
-Nếu đổi dataset, hãy chạy lại `--fl` trước. Ví dụ không nên dùng `tarantula_results.json` sinh từ `tcpdump` để chạy APR cho `php`. Code hiện tại có filter bảo vệ, nhưng lệnh đúng vẫn là:
+Nếu đổi dataset, hãy chạy lại `--fl` trước. Ví dụ không nên dùng `fault_localization_results.json` sinh từ `tcpdump` để chạy APR cho `php`. Code hiện tại có filter bảo vệ, nhưng lệnh đúng vẫn là:
 
 ```bash
 python3 main.py --fl  --dataset php
