@@ -17,6 +17,10 @@ def _calculate_tarantula_score(covered_failed, covered_passed, total_failed, tot
     return fail_ratio / (fail_ratio + pass_ratio)
 
 
+def _sort_scores(scores):
+    return dict(sorted(scores.items(), key=lambda item: (-item[1], item[0])))
+
+
 def calculate_fault_localization(test_data):
     """
     Computes Tarantula score for each covered function using the test results.
@@ -54,7 +58,7 @@ def calculate_fault_localization(test_data):
         scores[m] = _calculate_tarantula_score(f_m, p_m, total_failed, total_passed)
 
     # Sort descending by score
-    return dict(sorted(scores.items(), key=lambda item: item[1], reverse=True))
+    return _sort_scores(scores)
 
 
 def _extract_file_from_key(method_key):
@@ -88,6 +92,33 @@ def _extract_file_from_key(method_key):
         return os.path.basename(src_path)
 
     return method_key
+
+
+def _extract_class_from_key(method_key):
+    """
+    Trích xuất class/scope key từ coverage key C++ dạng:
+      file.h:class::method
+      file.h:namespace::class::method
+
+    Returns:
+      "file.h:class" hoặc "file.h:namespace::class" nếu có scope,
+      None nếu function không có phần class/scope.
+    """
+    import re
+
+    match = re.search(r'(?<!:):(?!:)', method_key)
+    if not match:
+        return None
+
+    file_key = _extract_file_from_key(method_key)
+    func_part = method_key[match.end():]
+    if "::" not in func_part:
+        return None
+
+    class_part = func_part.rsplit("::", 1)[0]
+    if not class_part:
+        return None
+    return f"{file_key}:{class_part}"
 
 
 def calculate_fault_localization_file_level(test_data):
@@ -132,4 +163,47 @@ def calculate_fault_localization_file_level(test_data):
         scores[f] = _calculate_tarantula_score(f_f, p_f, total_failed, total_passed)
 
     # Sort descending by score
-    return dict(sorted(scores.items(), key=lambda item: item[1], reverse=True))
+    return _sort_scores(scores)
+
+
+def calculate_fault_localization_class_level(test_data):
+    """
+    Computes Tarantula score at the CLASS/SCOPE level for C++ coverage keys.
+    Only keys containing a C++ scope separator after the file separator are used.
+
+    test_data: list of dicts with 'outcome' ('PASSED', 'FAILED') and 'covered_methods' (list)
+    Returns: dict { 'file_name:class_or_scope': score }
+    """
+    total_passed = 0
+    total_failed = 0
+    class_passed = {}
+    class_failed = {}
+
+    for test in test_data:
+        outcome = test.get('outcome', '').upper()
+        covered = test.get('covered_methods', [])
+
+        covered_classes = set()
+        for m in covered:
+            class_key = _extract_class_from_key(m)
+            if class_key:
+                covered_classes.add(class_key)
+
+        if outcome in ['PASSED', 'PASS']:
+            total_passed += 1
+            for c in covered_classes:
+                class_passed[c] = class_passed.get(c, 0) + 1
+        elif outcome in ['FAILED', 'FAIL']:
+            total_failed += 1
+            for c in covered_classes:
+                class_failed[c] = class_failed.get(c, 0) + 1
+
+    scores = {}
+    all_classes = set(class_passed.keys()).union(class_failed.keys())
+
+    for c in all_classes:
+        p_c = class_passed.get(c, 0)
+        f_c = class_failed.get(c, 0)
+        scores[c] = _calculate_tarantula_score(f_c, p_c, total_failed, total_passed)
+
+    return _sort_scores(scores)

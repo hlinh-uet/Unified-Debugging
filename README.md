@@ -31,7 +31,10 @@ Unified-Debugging/
 │   └── eval_apr.py            # Đánh giá APR: Fix Rate, Regression, Edit Distance
 │
 ├── experiments/               # Sinh ra sau khi chạy – chứa kết quả
-│   ├── fault_localization_results.json # Kết quả FL; mỗi record có dataset + formula + scores
+│   ├── fault_localization_results.json          # Kết quả FL combined
+│   ├── fault_localization_function_results.json # Kết quả FL function-level
+│   ├── fault_localization_file_results.json     # Kết quả FL file-level
+│   ├── fault_localization_class_results.json    # Kết quả FL class-level cho C++ keys
 │   ├── apr_results.json                # Kết quả APR – chỉ lưu best candidate mỗi bug
 │   ├── patches/                        # Bản vá thành công (status=success)
 │   │   └── <bug_id>_patch.c            #   – từ LLM baseline
@@ -144,6 +147,10 @@ python3 main.py --apr --dataset tcpdump           # dùng LLM_PROVIDER trong .en
 
 # Bước 3 – Evaluation (FL + APR), lọc theo dataset.
 python3 main.py --eval --dataset tcpdump
+python3 main.py --eval --dataset tcpdump --fl-eval-level function
+python3 main.py --eval --dataset tcpdump --fl-eval-level file
+python3 main.py --eval --dataset tcpdump --fl-eval-level class
+python3 main.py --eval --dataset tcpdump --fl-eval-level all
 ```
 
 Nếu đổi dataset, hãy chạy lại `--fl` trước. Ví dụ không nên dùng `fault_localization_results.json` sinh từ `tcpdump` để chạy APR cho `php`. Code hiện tại có filter bảo vệ, nhưng lệnh đúng vẫn là:
@@ -163,6 +170,7 @@ python3 main.py --eval --dataset php
 | `--apr`         | Chỉ chạy APR với LLM; cần kết quả FL trước đó      |
 | `--eval`        | Chỉ chạy Evaluation (FL + APR), lọc theo dataset   |
 | `--all`         | Chạy FL → APR LLM → Evaluation                     |
+| `--fl-eval-level` | Chọn file FL để tính Top-K: `combined`, `function`, `file`, `class`, hoặc `all` |
 | `--llm`         | Provider APR: `qwen`/`openrouter`, `gemini`, `openai`, `claude` |
 
 ### Kết quả APR

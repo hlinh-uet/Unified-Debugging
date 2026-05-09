@@ -5,7 +5,9 @@ import argparse
 from data_loaders.base_loader import get_loader
 from core.fault_localization import (
     calculate_fault_localization,
+    calculate_fault_localization_class_level,
     calculate_fault_localization_file_level,
+    _extract_class_from_key,
     _extract_file_from_key,
 )
 from core.apr_baseline import run_apr_pipeline
@@ -36,13 +38,18 @@ def _extract_file_from_gt(gt_key):
     return gt_key
 
 
+def _extract_class_from_gt(gt_key):
+    return _extract_class_from_key(gt_key)
+
+
 def run_fl(dataset: str = "codeflaws"):
     """
     Bước 1 – Fault Localization (Tarantula).
-    Tính điểm Tarantula ở 2 mức:
+    Tính điểm Tarantula ở 3 mức:
       - Function-level → fault_localization_function_results.json
       - File-level     → fault_localization_file_results.json
-    Sau đó tổng hợp: combined_score = function_score*0.5 + file_score*0.5
+      - Class-level    → fault_localization_class_results.json
+    Sau đó tổng hợp: combined_score = function_score + file_score + class_score(nếu có)
       → fault_localization_results.json
     """
     print(f"[FL] Đang load bugs từ dataset '{dataset}'...")
@@ -58,6 +65,7 @@ def run_fl(dataset: str = "codeflaws"):
 
     func_results = {}
     file_results = {}
+    class_results = {}
     combined_results = {}
 
     for bug in bugs:
@@ -69,9 +77,15 @@ def run_fl(dataset: str = "codeflaws"):
         # --- File-level ---
         file_scores = calculate_fault_localization_file_level(bug.tests)
 
-        # --- Ground truth cho file-level ---
+        # --- Class-level (C++ keys like file:class::function) ---
+        class_scores = calculate_fault_localization_class_level(bug.tests)
+
+        # --- Ground truth cho file-level / class-level ---
         gt_functions = bug.ground_truth  # list[str], ví dụ: ["file.c:func"]
         gt_files = list(set(_extract_file_from_gt(g) for g in gt_functions))
+        gt_classes = sorted(
+            set(c for g in gt_functions for c in [_extract_class_from_gt(g)] if c)
+        )
 
         # Lưu function-level
         func_results[bug.bug_id] = {
@@ -89,18 +103,26 @@ def run_fl(dataset: str = "codeflaws"):
             "ground_truth": gt_files,
         }
 
-        # --- Combined: function_score*0.5 + file_score*0.5 ---
-        # Với mỗi function key, lấy file_score tương ứng rồi tính trung bình
+        # Lưu class-level
+        class_results[bug.bug_id] = {
+            "dataset":      dataset,
+            "formula":      "tarantula",
+            "scores":       class_scores,
+            "ground_truth": gt_classes,
+        }
+
+        # --- Combined: function_score + file_score + class_score nếu có ---
         combined_scores = {}
         for func_key, f_score in func_scores.items():
-            # Trích file từ function key
             file_key = _extract_file_from_key(func_key)
+            class_key = _extract_class_from_key(func_key)
             fi_score = file_scores.get(file_key, 0.0)
-            combined_scores[func_key] = f_score * 0.5 + fi_score * 0.5
+            cl_score = class_scores.get(class_key, 0.0) if class_key else 0.0
+            combined_scores[func_key] = f_score + fi_score + cl_score
 
         # Sort descending
         combined_scores = dict(
-            sorted(combined_scores.items(), key=lambda item: item[1], reverse=True)
+            sorted(combined_scores.items(), key=lambda item: (-item[1], item[0]))
         )
 
         combined_results[bug.bug_id] = {
@@ -122,11 +144,17 @@ def run_fl(dataset: str = "codeflaws"):
         json.dump(file_results, f, indent=4)
     print(f"[FL] File-level scores     → {file_file}")
 
+    # --- Ghi file class-level ---
+    class_file = os.path.join(EXPERIMENTS_DIR, "fault_localization_class_results.json")
+    with open(class_file, "w") as f:
+        json.dump(class_results, f, indent=4)
+    print(f"[FL] Class-level scores    → {class_file}")
+
     # --- Ghi file combined ---
     combined_file = os.path.join(EXPERIMENTS_DIR, "fault_localization_results.json")
     with open(combined_file, "w") as f:
         json.dump(combined_results, f, indent=4)
-    print(f"[FL] Combined Tarantula scores (0.5*func + 0.5*file) → {combined_file}")
+    print(f"[FL] Combined Tarantula scores (func + file + class-if-any) → {combined_file}")
 
 
 def main():
@@ -140,6 +168,18 @@ def main():
     parser.add_argument("--eval",         action="store_true", help="Chỉ chạy Evaluation")
     parser.add_argument("--all",          action="store_true", help="Chạy toàn bộ: FL → APR → Evaluation")
     parser.add_argument(
+        "--fl-eval-level",
+        default="combined",
+        choices=["combined", "function", "file", "class", "all"],
+        help=(
+            "Mức kết quả FL dùng khi evaluation: combined "
+            "(fault_localization_results.json), function "
+            "(fault_localization_function_results.json), file "
+            "(fault_localization_file_results.json), class "
+            "(fault_localization_class_results.json), hoặc all."
+        ),
+    )
+    parser.add_argument(
         "--llm",
         default=None,
         choices=["gemini", "openai", "claude", "qwen", "openrouter"],
@@ -150,6 +190,7 @@ def main():
 
     dataset      = args.dataset
     llm_provider = args.llm   # None → đọc từ LLM_PROVIDER trong .env
+    fl_eval_level = args.fl_eval_level
 
     # Nếu không truyền flag nào thì mặc định chạy toàn bộ
     run_all = args.all or (not args.fl and not args.apr and not args.eval)
@@ -158,13 +199,13 @@ def main():
         print(f"[Pipeline] Chạy toàn bộ quy trình trên dataset '{dataset}' (FL → APR LLM → Evaluation)...")
         run_fl(dataset)
         run_apr_pipeline(dataset, llm_provider=llm_provider)
-        evaluate_fl(dataset)
+        evaluate_fl(dataset, level=fl_eval_level)
         evaluate_apr(dataset)
     else:
         if args.fl:
             print(f"[Pipeline] Chạy Fault Localization trên dataset '{dataset}'...")
             run_fl(dataset)
-            evaluate_fl(dataset)
+            evaluate_fl(dataset, level=fl_eval_level)
 
         if args.apr:
             print(f"[Pipeline] Chạy APR (LLM: {llm_provider or 'default'}) trên dataset '{dataset}'...")
@@ -173,7 +214,7 @@ def main():
 
         if args.eval:
             print("[Pipeline] Chạy Evaluation...")
-            evaluate_fl(dataset)
+            evaluate_fl(dataset, level=fl_eval_level)
             evaluate_apr(dataset)
 
 

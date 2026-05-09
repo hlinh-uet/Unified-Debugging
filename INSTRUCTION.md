@@ -136,7 +136,11 @@ if dataset_name.lower() == "defects4c":
 
 **File:** `core/fault_localization.py`  
 **Input:** `List[BugRecord]` từ `get_loader()`  
-**Output:** `experiments/fault_localization_results.json`
+**Output:**
+- `experiments/fault_localization_results.json` – combined score
+- `experiments/fault_localization_function_results.json` – function-level score
+- `experiments/fault_localization_file_results.json` – file-level score
+- `experiments/fault_localization_class_results.json` – class/scope-level score cho C++ keys dạng `file:class::function`
 
 ### Thuật toán Tarantula
 
@@ -240,7 +244,22 @@ APR luôn extract và ghép patch trên `buggy_ver/<relpath>`. Evaluation đọc
 
 ### FL – `evaluation/eval_fl.py`
 
-Đọc `fault_localization_results.json`, so ground truth với Top-K hàm nghi ngờ:
+Mặc định đọc `fault_localization_results.json`, so ground truth với Top-K hàm nghi ngờ:
+
+```bash
+python3 main.py --eval --dataset tcpdump --fl-eval-level combined
+python3 main.py --eval --dataset tcpdump --fl-eval-level function
+python3 main.py --eval --dataset tcpdump --fl-eval-level file
+python3 main.py --eval --dataset tcpdump --fl-eval-level class
+python3 main.py --eval --dataset tcpdump --fl-eval-level all
+```
+
+`--fl-eval-level` chọn file kết quả FL dùng để tính Top-K:
+- `combined` → `fault_localization_results.json`
+- `function` → `fault_localization_function_results.json`
+- `file` → `fault_localization_file_results.json`
+- `class` → `fault_localization_class_results.json`
+- `all` → chạy lần lượt tất cả các mức
 
 - **Top-1 Hit Rate**: hàm lỗi thực sự nằm ở vị trí #1
 - **Top-3 Hit Rate**: nằm trong Top 3
