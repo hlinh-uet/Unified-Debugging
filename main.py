@@ -7,6 +7,9 @@ from core.fault_localization import (
     calculate_fault_localization,
     calculate_fault_localization_class_level,
     calculate_fault_localization_file_level,
+    calculate_ir_reranked_class_scores,
+    calculate_ir_reranked_file_scores,
+    calculate_ir_reranked_function_scores,
     _extract_class_from_key,
     _extract_file_from_key,
 )
@@ -45,11 +48,14 @@ def _extract_class_from_gt(gt_key):
 def run_fl(dataset: str = "codeflaws"):
     """
     Bước 1 – Fault Localization (Tarantula).
-    Tính điểm Tarantula ở 3 mức:
+    Tính điểm Tarantula ở 3 mức rồi rerank bằng IR metadata:
       - Function-level → fault_localization_function_results.json
       - File-level     → fault_localization_file_results.json
       - Class-level    → fault_localization_class_results.json
-    Sau đó tổng hợp: combined_score = function_score + file_score + class_score(nếu có)
+    Pipeline:
+      1. Tarantula file → IR reranker → file_score
+      2. Tarantula class + file_score → IR reranker → class_score
+      3. Tarantula function + class/file_score → IR reranker → final function score
       → fault_localization_results.json
     """
     print(f"[FL] Đang load bugs từ dataset '{dataset}'...")
@@ -71,14 +77,43 @@ def run_fl(dataset: str = "codeflaws"):
     for bug in bugs:
         print(f"[FL] Tính điểm Tarantula cho {bug.bug_id}...")
 
-        # --- Function-level ---
-        func_scores = calculate_fault_localization(bug.tests)
+        # --- Raw Tarantula scores ---
+        tarantula_func_scores = calculate_fault_localization(bug.tests)
+        tarantula_file_scores = calculate_fault_localization_file_level(bug.tests)
+        tarantula_class_scores = calculate_fault_localization_class_level(bug.tests)
 
-        # --- File-level ---
-        file_scores = calculate_fault_localization_file_level(bug.tests)
+        functions_by_file = {}
+        functions_by_class = {}
+        for func_key in tarantula_func_scores:
+            file_key = _extract_file_from_key(func_key)
+            functions_by_file.setdefault(file_key, []).append(func_key)
 
-        # --- Class-level (C++ keys like file:class::function) ---
-        class_scores = calculate_fault_localization_class_level(bug.tests)
+            class_key = _extract_class_from_key(func_key)
+            if class_key:
+                functions_by_class.setdefault(class_key, []).append(func_key)
+
+        # --- 1. File-level: Tarantula file → IR reranker → file_score ---
+        file_scores = calculate_ir_reranked_file_scores(
+            bug.tests,
+            tarantula_file_scores,
+            functions_by_file=functions_by_file,
+        )
+
+        # --- 2. Class-level: Tarantula class + file_score → IR reranker → class_score ---
+        class_scores = calculate_ir_reranked_class_scores(
+            bug.tests,
+            tarantula_class_scores,
+            file_scores,
+            functions_by_class=functions_by_class,
+        )
+
+        # --- 3. Function-level: Tarantula function + class/file score → IR reranker ---
+        func_scores = calculate_ir_reranked_function_scores(
+            bug.tests,
+            tarantula_func_scores,
+            class_scores,
+            file_scores,
+        )
 
         # --- Ground truth cho file-level / class-level ---
         gt_functions = bug.ground_truth  # list[str], ví dụ: ["file.c:func"]
@@ -91,7 +126,9 @@ def run_fl(dataset: str = "codeflaws"):
         func_results[bug.bug_id] = {
             "dataset":      dataset,
             "formula":      "tarantula",
+            "reranker":     "ir",
             "scores":       func_scores,
+            "tarantula_scores": tarantula_func_scores,
             "ground_truth": gt_functions,
         }
 
@@ -99,7 +136,9 @@ def run_fl(dataset: str = "codeflaws"):
         file_results[bug.bug_id] = {
             "dataset":      dataset,
             "formula":      "tarantula",
+            "reranker":     "ir",
             "scores":       file_scores,
+            "tarantula_scores": tarantula_file_scores,
             "ground_truth": gt_files,
         }
 
@@ -107,28 +146,21 @@ def run_fl(dataset: str = "codeflaws"):
         class_results[bug.bug_id] = {
             "dataset":      dataset,
             "formula":      "tarantula",
+            "reranker":     "ir",
             "scores":       class_scores,
+            "tarantula_scores": tarantula_class_scores,
             "ground_truth": gt_classes,
         }
 
-        # --- Combined: function_score + file_score + class_score nếu có ---
-        combined_scores = {}
-        for func_key, f_score in func_scores.items():
-            file_key = _extract_file_from_key(func_key)
-            class_key = _extract_class_from_key(func_key)
-            fi_score = file_scores.get(file_key, 0.0)
-            cl_score = class_scores.get(class_key, 0.0) if class_key else 0.0
-            combined_scores[func_key] = f_score + fi_score + cl_score
-
-        # Sort descending
-        combined_scores = dict(
-            sorted(combined_scores.items(), key=lambda item: (-item[1], item[0]))
-        )
+        # Final FL score chính là function score sau pipeline 3 mức.
+        combined_scores = func_scores
 
         combined_results[bug.bug_id] = {
             "dataset":      dataset,
             "formula":      "tarantula",
+            "reranker":     "ir",
             "scores":       combined_scores,
+            "tarantula_scores": tarantula_func_scores,
             "ground_truth": gt_functions,
         }
 
@@ -154,7 +186,7 @@ def run_fl(dataset: str = "codeflaws"):
     combined_file = os.path.join(EXPERIMENTS_DIR, "fault_localization_results.json")
     with open(combined_file, "w") as f:
         json.dump(combined_results, f, indent=4)
-    print(f"[FL] Combined Tarantula scores (func + file + class-if-any) → {combined_file}")
+    print(f"[FL] Final FL scores (file→class→function IR rerank) → {combined_file}")
 
 
 def main():

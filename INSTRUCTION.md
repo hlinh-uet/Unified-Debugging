@@ -142,7 +142,7 @@ if dataset_name.lower() == "defects4c":
 - `experiments/fault_localization_file_results.json` – file-level score
 - `experiments/fault_localization_class_results.json` – class/scope-level score cho C++ keys dạng `file:class::function`
 
-### Thuật toán Tarantula
+### Thuật toán Tarantula + IR reranker
 
 Với mỗi hàm $m$, điểm số nghi ngờ được tính:
 
@@ -153,18 +153,30 @@ Trong đó:
 - $p_m$ = số test PASS có cover hàm $m$
 - $T_f$, $T_p$ = tổng số test FAIL / PASS
 
+Sau khi tính Tarantula raw, pipeline rerank theo 3 mức:
+1. `Tarantula file → IR reranker → file_score`
+2. `Tarantula class + file_score → IR reranker → class_score`
+3. `Tarantula function + class/file_score → IR reranker → final function score`
+
+IR reranker dùng `test_id`, `fail_reason`, và các dòng tín hiệu trong `actual_output`; không dùng `expected_output`.
+
 ### Output format
 
 ```json
 {
-  "476-A-bug-16608008-16608059": {
-    "formula": "tarantula",
-    "scores": {
-      "solve": 1.0,
-      "main": 0.5
-    },
-    "ground_truth": ["solve"]
-  }
+	  "476-A-bug-16608008-16608059": {
+	    "formula": "tarantula",
+	    "reranker": "ir",
+	    "scores": {
+	      "solve": 1.0,
+	      "main": 0.5
+	    },
+	    "tarantula_scores": {
+	      "solve": 1.0,
+	      "main": 0.5
+	    },
+	    "ground_truth": ["solve"]
+	  }
 }
 ```
 

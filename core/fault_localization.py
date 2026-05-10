@@ -1,3 +1,8 @@
+import math
+import re
+from collections import Counter
+
+
 def _calculate_tarantula_score(covered_failed, covered_passed, total_failed, total_passed):
     """
     Tarantula suspiciousness:
@@ -19,6 +24,248 @@ def _calculate_tarantula_score(covered_failed, covered_passed, total_failed, tot
 
 def _sort_scores(scores):
     return dict(sorted(scores.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _normalize_scores(scores):
+    if not scores:
+        return {}
+    values = list(scores.values())
+    min_score = min(values)
+    max_score = max(values)
+    if max_score == min_score:
+        return {key: (1.0 if max_score > 0 else 0.0) for key in scores}
+    return {key: (value - min_score) / (max_score - min_score) for key, value in scores.items()}
+
+
+def _outcome_is_pass(outcome):
+    return str(outcome or "").upper() in ("PASSED", "PASS")
+
+
+def _outcome_is_fail(outcome):
+    return str(outcome or "").upper() in ("FAILED", "FAIL")
+
+
+def _tokenize(text):
+    if not text:
+        return []
+
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(text))
+    text = text.replace("::", " ").replace("_", " ").replace("-", " ").replace("/", " ")
+    raw_tokens = re.findall(r"[A-Za-z][A-Za-z0-9]+|[0-9]+", text.lower())
+    stopwords = {
+        "test", "tests", "failed", "failure", "error", "running", "passed",
+        "expected", "actual", "line", "out", "git", "repo", "dir", "tmp",
+        "metadata", "php", "sapi", "linux", "total", "from", "case", "cases",
+    }
+    return [token for token in raw_tokens if len(token) > 1 and token not in stopwords]
+
+
+def _signal_lines(text):
+    if not text:
+        return []
+
+    signal = re.compile(
+        r"FAIL|FAILED|ERROR|Failure|Actual|Expected|AddressSanitizer|"
+        r"SUMMARY|Segmentation|Assertion|assert|overflow|underflow|invalid|"
+        r"not a directory|permission|crash|fatal|warning",
+        re.IGNORECASE,
+    )
+    lines = []
+    for line in str(text).splitlines():
+        line = line.strip()
+        if line and signal.search(line):
+            lines.append(line)
+    return lines[:40]
+
+
+def _build_ir_query(test_data):
+    parts = []
+    for test in test_data:
+        if not _outcome_is_fail(test.get("outcome")):
+            continue
+        parts.append(test.get("test_id", ""))
+        parts.append(test.get("fail_reason", ""))
+        parts.extend(_signal_lines(test.get("actual_output", "")))
+    return _tokenize(" ".join(str(part) for part in parts if part))
+
+
+def _coverage_counts(test_data, key_func):
+    total_passed = 0
+    total_failed = 0
+    passed = {}
+    failed = {}
+
+    for test in test_data:
+        outcome = test.get("outcome", "")
+        covered = test.get("covered_methods", [])
+        keys = set()
+        for method_key in covered:
+            key = key_func(method_key)
+            if key:
+                keys.add(key)
+
+        if _outcome_is_pass(outcome):
+            total_passed += 1
+            for key in keys:
+                passed[key] = passed.get(key, 0) + 1
+        elif _outcome_is_fail(outcome):
+            total_failed += 1
+            for key in keys:
+                failed[key] = failed.get(key, 0) + 1
+
+    return passed, failed, total_passed, total_failed
+
+
+def _bm25_like_scores(query_tokens, candidate_docs):
+    if not query_tokens or not candidate_docs:
+        return {key: 0.0 for key in candidate_docs}
+
+    query = Counter(query_tokens)
+    doc_tokens = {key: _tokenize(doc) for key, doc in candidate_docs.items()}
+    doc_freq = Counter()
+    for tokens in doc_tokens.values():
+        doc_freq.update(set(tokens))
+
+    total_docs = len(candidate_docs)
+    avg_len = sum(len(tokens) for tokens in doc_tokens.values()) / total_docs if total_docs else 0.0
+    k1 = 1.2
+    b = 0.75
+    raw_scores = {}
+
+    for key, tokens in doc_tokens.items():
+        if not tokens:
+            raw_scores[key] = 0.0
+            continue
+
+        tf = Counter(tokens)
+        doc_len = len(tokens)
+        score = 0.0
+        for token, qf in query.items():
+            if token not in tf:
+                continue
+            idf = math.log(1.0 + (total_docs - doc_freq[token] + 0.5) / (doc_freq[token] + 0.5))
+            denom = tf[token] + k1 * (1.0 - b + b * (doc_len / avg_len if avg_len else 1.0))
+            score += qf * idf * (tf[token] * (k1 + 1.0)) / denom
+        raw_scores[key] = score
+
+    return _normalize_scores(raw_scores)
+
+
+def _file_doc(file_key, functions_by_file):
+    funcs = functions_by_file.get(file_key, [])
+    return " ".join([file_key, *funcs])
+
+
+def _class_doc(class_key, functions_by_class):
+    funcs = functions_by_class.get(class_key, [])
+    return " ".join([class_key, *funcs])
+
+
+def _function_doc(function_key):
+    return function_key
+
+
+def _rerank_scores(base_scores, ir_scores, rarity_scores, parent_scores=None, weights=None):
+    weights = weights or {}
+    base_norm = _normalize_scores(base_scores)
+    parent_norm = _normalize_scores(parent_scores or {})
+    out = {}
+
+    for key, base_score in base_scores.items():
+        out[key] = (
+            weights.get("base", 1.0) * base_norm.get(key, 0.0)
+            + weights.get("ir", 0.0) * ir_scores.get(key, 0.0)
+            + weights.get("rarity", 0.0) * rarity_scores.get(key, 0.0)
+            + weights.get("parent", 0.0) * parent_norm.get(key, 0.0)
+        )
+
+    return _sort_scores(out)
+
+
+def _rarity_scores(base_scores, passed_counts, total_passed):
+    if total_passed <= 0:
+        return {key: 0.0 for key in base_scores}
+    return {
+        key: max(0.0, 1.0 - (passed_counts.get(key, 0) / total_passed))
+        for key in base_scores
+    }
+
+
+def _reranker_weights(level):
+    table = {
+        "file": {"base": 1.0, "ir": 0.7, "rarity": 0.3},
+        "class": {"base": 1.0, "ir": 0.5, "rarity": 0.3, "parent": 0.7},
+        "function": {"base": 1.0, "ir": 0.7, "rarity": 0.3, "parent": 0.7},
+    }
+    return table[level]
+
+
+def calculate_ir_reranked_file_scores(test_data, file_scores, functions_by_file=None):
+    query_tokens = _build_ir_query(test_data)
+    functions_by_file = functions_by_file or {}
+    candidate_docs = {
+        file_key: _file_doc(file_key, functions_by_file)
+        for file_key in file_scores
+    }
+    ir_scores = _bm25_like_scores(query_tokens, candidate_docs)
+    passed, _, total_passed, _ = _coverage_counts(test_data, _extract_file_from_key)
+    rarity = _rarity_scores(file_scores, passed, total_passed)
+    return _rerank_scores(
+        file_scores,
+        ir_scores,
+        rarity,
+        weights=_reranker_weights("file"),
+    )
+
+
+def calculate_ir_reranked_class_scores(test_data, class_scores, file_scores, functions_by_class=None):
+    if not class_scores:
+        return {}
+
+    query_tokens = _build_ir_query(test_data)
+    functions_by_class = functions_by_class or {}
+    candidate_docs = {
+        class_key: _class_doc(class_key, functions_by_class)
+        for class_key in class_scores
+    }
+    ir_scores = _bm25_like_scores(query_tokens, candidate_docs)
+    passed, _, total_passed, _ = _coverage_counts(test_data, _extract_class_from_key)
+    rarity = _rarity_scores(class_scores, passed, total_passed)
+    parent_scores = {
+        class_key: file_scores.get(_extract_file_from_key(class_key), 0.0)
+        for class_key in class_scores
+    }
+    return _rerank_scores(
+        class_scores,
+        ir_scores,
+        rarity,
+        parent_scores=parent_scores,
+        weights=_reranker_weights("class"),
+    )
+
+
+def calculate_ir_reranked_function_scores(test_data, function_scores, class_scores, file_scores):
+    query_tokens = _build_ir_query(test_data)
+    candidate_docs = {function_key: _function_doc(function_key) for function_key in function_scores}
+    ir_scores = _bm25_like_scores(query_tokens, candidate_docs)
+    passed, _, total_passed, _ = _coverage_counts(test_data, lambda key: key)
+    rarity = _rarity_scores(function_scores, passed, total_passed)
+
+    parent_scores = {}
+    for function_key in function_scores:
+        class_key = _extract_class_from_key(function_key)
+        if class_key:
+            parent_scores[function_key] = class_scores.get(class_key, file_scores.get(_extract_file_from_key(function_key), 0.0))
+        else:
+            parent_scores[function_key] = file_scores.get(_extract_file_from_key(function_key), 0.0)
+
+    return _rerank_scores(
+        function_scores,
+        ir_scores,
+        rarity,
+        parent_scores=parent_scores,
+        weights=_reranker_weights("function"),
+    )
 
 
 def calculate_fault_localization(test_data):

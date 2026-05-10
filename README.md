@@ -23,7 +23,7 @@ Unified-Debugging/
 │
 ├── core/                      # Logic nghiệp vụ chính
 │   ├── utils.py               # Tiện ích dùng chung (extract_function_code, qualify_func, ...)
-│   ├── fault_localization.py  # Thuật toán Fault Localization – Tarantula
+│   ├── fault_localization.py  # Fault Localization – Tarantula + IR reranker
 │   └── apr_baseline.py        # APR với LLM
 │
 ├── evaluation/                # Đánh giá và báo cáo
@@ -55,7 +55,7 @@ get_loader(dataset)
       ▼
  [BugRecord list]
       │
-      ├──► FL (Tarantula) ──────────────────────► fault_localization_results.json
+      ├──► FL (Tarantula + IR reranker) ────────► fault_localization_results.json
       │
       └──► APR ───► LLM                 ──────► apr_results.json
                          │
@@ -70,7 +70,7 @@ get_loader(dataset)
                    (Fix Rate, Regression, ED func + file)
 ```
 
-> **Điểm quan trọng:** APR đọc `fault_localization_results.json`, nên cần chạy FL cho đúng dataset trước khi chạy APR. Kết quả FL hiện dùng công thức Tarantula; mỗi record có trường `formula`.
+> **Điểm quan trọng:** APR đọc `fault_localization_results.json`, nên cần chạy FL cho đúng dataset trước khi chạy APR. Kết quả FL hiện dùng Tarantula làm base score và IR reranker làm score cuối; mỗi record có `formula`, `reranker`, `scores`, và `tarantula_scores`.
 
 ---
 
