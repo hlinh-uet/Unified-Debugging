@@ -343,6 +343,11 @@ def extract_function_code(
             - start_idx:  Vị trí byte bắt đầu (return type) trong source_code.
             - end_idx:    Vị trí ngay sau ``}`` đóng (exclusive).
     """
+    if _is_scoped_cpp_name(func_name):
+        scoped_result = _extract_scoped_function_code_regex(source_code, func_name)
+        if scoped_result[0] is not None:
+            return scoped_result
+
     ts_result = _extract_function_code_tree_sitter(source_code, func_name, language)
     if ts_result[0] is not None:
         return ts_result
@@ -350,7 +355,7 @@ def extract_function_code(
     if regex_result[0] is not None:
         return regex_result
     leaf_name = _function_name_leaf(func_name)
-    if leaf_name != func_name:
+    if leaf_name != func_name and _allow_unscoped_fallback(source_code, func_name):
         return _extract_function_code_regex(source_code, leaf_name)
     return regex_result
 
@@ -441,13 +446,49 @@ def _extract_function_code_tree_sitter(
 def _function_name_leaf(func_name: str) -> str:
     if not func_name:
         return ""
-    return func_name.rsplit("::", 1)[-1].split("<", 1)[0].strip()
+    return _normalize_function_symbol(func_name.rsplit("::", 1)[-1])
+
+
+def _normalize_function_symbol(value: str) -> str:
+    value = str(value or "").strip()
+    value = re.sub(r'\[[^\]]+\]', '', value)
+    value = value.split("<", 1)[0].strip()
+    value = value.lstrip("*&").strip()
+    return value
+
+
+def _function_scope_parts(func_name: str) -> list:
+    if not _is_scoped_cpp_name(func_name):
+        return []
+    return [
+        _normalize_function_symbol(part)
+        for part in func_name.split("::")[:-1]
+        if part.strip()
+    ]
+
+
+def _is_scoped_cpp_name(func_name: str) -> bool:
+    return bool(func_name and "::" in func_name)
 
 
 def _function_name_matches(actual: str, requested: str) -> bool:
     if actual == requested:
         return True
-    return actual == _function_name_leaf(requested)
+    return not _is_scoped_cpp_name(requested) and actual == _function_name_leaf(requested)
+
+
+def _allow_unscoped_fallback(source_code: str, func_name: str) -> bool:
+    """
+    Scoped FL keys must not silently bind to an unrelated free function in a full
+    C++ file. The fallback is still useful for validating LLM-returned snippets,
+    which normally no longer include the surrounding class body.
+    """
+    scopes = _function_scope_parts(func_name)
+    if not scopes:
+        return True
+    if _scoped_name_pattern(scopes, _function_name_leaf(func_name)).search(source_code):
+        return False
+    return not any(_class_body_ranges(source_code, scope) for scope in scopes)
 
 
 def _tree_sitter_language(language: str):
@@ -523,21 +564,93 @@ def _tree_sitter_function_name(declarator, source_bytes: bytes) -> str:
     return ""
 
 
+def _extract_scoped_function_code_regex(
+    source_code: str,
+    func_name: str,
+) -> Tuple[Optional[str], int, int]:
+    scopes = _function_scope_parts(func_name)
+    leaf_name = _function_name_leaf(func_name)
+    if not scopes or not leaf_name:
+        return None, -1, -1
+
+    out_of_class = _extract_function_code_regex(
+        source_code,
+        leaf_name,
+        name_pattern=_scoped_name_pattern(scopes, leaf_name),
+    )
+    if out_of_class[0] is not None:
+        return out_of_class
+
+    for scope in reversed(scopes):
+        for body_start, body_end in _class_body_ranges(source_code, scope):
+            inline_method = _extract_function_code_regex(
+                source_code,
+                leaf_name,
+                start=body_start,
+                end=body_end,
+            )
+            if inline_method[0] is not None:
+                return inline_method
+
+    return None, -1, -1
+
+
+def _scoped_name_pattern(scopes: list, leaf_name: str):
+    scoped = []
+    for scope in scopes:
+        scoped.append(re.escape(scope) + r'\s*(?:<[^;{}()]*>)?\s*::\s*')
+    return re.compile("".join(scoped) + _function_name_call_pattern(leaf_name))
+
+
+def _function_name_call_pattern(func_name: str) -> str:
+    if func_name.startswith("operator"):
+        op = func_name[len("operator"):].strip()
+        if op:
+            return r'operator\s*' + re.escape(op) + r'\s*\('
+        return r'operator\s*\('
+    return r'\b' + re.escape(func_name) + r'\s*\('
+
+
+def _class_body_ranges(source_code: str, class_name: str):
+    if not class_name:
+        return []
+
+    ranges = []
+    pattern = re.compile(r'\b(?:class|struct|union)\s+' + re.escape(class_name) + r'\b')
+    for m in pattern.finditer(source_code):
+        brace = source_code.find('{', m.end())
+        semi = source_code.find(';', m.end())
+        if brace < 0 or (semi >= 0 and semi < brace):
+            continue
+        end = _find_matching_brace(source_code, brace)
+        if end < 0:
+            continue
+        ranges.append((brace + 1, end - 1))
+    return ranges
+
+
 def _extract_function_code_regex(
     source_code: str,
-    func_name: str
+    func_name: str,
+    *,
+    start: int = 0,
+    end: Optional[int] = None,
+    name_pattern=None,
 ) -> Tuple[Optional[str], int, int]:
-    pattern = re.compile(r'\b' + re.escape(func_name) + r'\s*\(')
+    end = len(source_code) if end is None else min(end, len(source_code))
+    pattern = name_pattern or re.compile(_function_name_call_pattern(func_name))
 
-    for m in pattern.finditer(source_code):
+    for m in pattern.finditer(source_code, start, end):
         name_start  = m.start()
         open_paren  = m.end() - 1
+        if open_paren >= end:
+            continue
         close_paren = _find_matching_paren(source_code, open_paren)
-        if close_paren < 0:
+        if close_paren < 0 or close_paren >= end:
             continue
 
         i = close_paren + 1
-        n = len(source_code)
+        n = end
         # Bỏ qua whitespace, newline, comment, và attribute specifier
         # trước khi gặp '{' mở hàm (GCC: __attribute__((...)), const, throw(),...).
         while i < n:
@@ -584,6 +697,11 @@ def _extract_function_code_regex(
                 if body_open >= 0:
                     i = body_open
                 break
+            if c == '-' and i + 1 < n and source_code[i + 1] == '>':
+                body_open = _find_cpp_trailing_return_body_open(source_code, i + 2, n)
+                if body_open >= 0:
+                    i = body_open
+                break
             break
 
         if i >= n or source_code[i] != '{':
@@ -591,7 +709,7 @@ def _extract_function_code_regex(
 
         start_idx = _find_function_def_start(source_code, name_start)
         end_idx   = _find_matching_brace(source_code, i)
-        if end_idx < 0:
+        if end_idx < 0 or end_idx > end:
             continue
 
         start_byte = len(source_code[:start_idx].encode("utf-8"))
@@ -644,6 +762,38 @@ def _find_cpp_ctor_body_open(source: str, colon_pos: int) -> int:
     return -1
 
 
+def _find_cpp_trailing_return_body_open(source: str, start_pos: int, limit: int) -> int:
+    """Find the function body after a C++ trailing return type."""
+    i = start_pos
+    n = min(limit, len(source))
+    while i < n:
+        c = source[i]
+        if c == '/' and i + 1 < n and source[i + 1] == '/':
+            nl = source.find('\n', i)
+            if nl < 0 or nl >= n:
+                return -1
+            i = nl + 1
+            continue
+        if c == '/' and i + 1 < n and source[i + 1] == '*':
+            end = source.find('*/', i + 2)
+            if end < 0 or end >= n:
+                return -1
+            i = end + 2
+            continue
+        if c == '(':
+            end = _find_matching_paren(source, i)
+            if end < 0 or end >= n:
+                return -1
+            i = end + 1
+            continue
+        if c == '{':
+            return i
+        if c == ';':
+            return -1
+        i += 1
+    return -1
+
+
 def _find_function_def_start(source: str, name_pos: int) -> int:
     """
     Đi lùi theo từng dòng từ vị trí ``name_pos`` để tìm dòng đầu của
@@ -661,6 +811,8 @@ def _find_function_def_start(source: str, name_pos: int) -> int:
         if not stripped:
             break
         if stripped.startswith('#'):
+            break
+        if stripped in ("public:", "private:", "protected:"):
             break
         if stripped.endswith(';') or stripped.endswith('}'):
             break

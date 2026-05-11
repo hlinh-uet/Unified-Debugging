@@ -41,6 +41,11 @@ def _is_defects4c_dataset(dataset: str) -> bool:
     return (dataset or "").strip().lower() != "codeflaws"
 
 
+def _source_language_from_path(path: str) -> str:
+    ext = os.path.splitext(path or "")[1].lower()
+    return "cpp" if ext in (".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx", ".h") else "c"
+
+
 def _clean_code(raw_content: str) -> str:
     """
     Hàm làm sạch mã nguồn:
@@ -74,6 +79,45 @@ def _clean_code(raw_content: str) -> str:
     content = content.replace('```', '').strip()
     
     return content
+
+
+def _extract_openrouter_message_content(message) -> Optional[str]:
+    if not isinstance(message, dict):
+        return None
+
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        text_parts = []
+        for part in content:
+            if isinstance(part, str):
+                text_parts.append(part)
+            elif isinstance(part, dict):
+                part_text = part.get("text") or part.get("content")
+                if isinstance(part_text, str):
+                    text_parts.append(part_text)
+        if text_parts:
+            return "".join(text_parts)
+
+    return None
+
+
+def _is_transient_llm_error(code=None, metadata=None) -> bool:
+    if code in (408, 409, 425, 429, 500, 502, 503, 504):
+        return True
+    error_type = ""
+    if isinstance(metadata, dict):
+        error_type = str(metadata.get("error_type") or "").lower()
+    return error_type in {
+        "provider_unavailable",
+        "rate_limit_exceeded",
+        "timeout",
+        "server_error",
+        "overloaded",
+    }
+
 
 # ---------------------------------------------------------------------------
 # LLM – provider-specific helpers
@@ -273,11 +317,9 @@ def _call_qwen(prompt: str, model: str = "qwen/qwen3-coder-30b-a3b-instruct") ->
 
         timeout = int(os.getenv("LLM_REQUEST_TIMEOUT", "120"))
         retries = int(os.getenv("LLM_RETRIES", "3"))
-        response = None
         for attempt in range(1, retries + 1):
             try:
-                response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=timeout)
-                break
+                response = requests.post(url, headers=headers, json=payload, timeout=timeout)
             except requests.exceptions.RequestException as exc:
                 if attempt >= retries:
                     raise
@@ -287,27 +329,92 @@ def _call_qwen(prompt: str, model: str = "qwen/qwen3-coder-30b-a3b-instruct") ->
                     f"Thử lại sau {sleep_s}s..."
                 )
                 time.sleep(sleep_s)
+                continue
 
-        if response is None:
-            return None
-        
-        if response.status_code != 200:
-            print(f"[LLM] Error {response.status_code}: {response.text}")
-            return None
-        
-        raw_log_path = log_dir / "raw_response.txt"
-        raw_log_path.write_text(response.text, encoding="utf-8")
+            raw_log_path = log_dir / "raw_response.txt"
+            raw_log_path.write_text(response.text, encoding="utf-8")
 
-        result = response.json()
-        raw_content = result['choices'][0]['message']['content'].strip()
+            if response.status_code != 200:
+                if _is_transient_llm_error(response.status_code) and attempt < retries:
+                    sleep_s = min(2 ** attempt, 15)
+                    print(
+                        f"[LLM] OpenRouter HTTP {response.status_code} lần {attempt}/{retries}. "
+                        f"Thử lại sau {sleep_s}s..."
+                    )
+                    time.sleep(sleep_s)
+                    continue
+                print(f"[LLM] Error {response.status_code}: {response.text[:1000]}")
+                return None
 
-        # 4. HÀM QUAN TRỌNG: Xóa sạch Markdown (```c ... ```) 
-        # Nếu không có đoạn này, GCC sẽ báo lỗi cú pháp và gây ra 100% Regression như bạn vừa bị.
-        fixed_code = re.sub(r'^```[a-zA-Z]*\n', '', raw_content) # Xóa dòng mở đầu ```c
-        fixed_code = re.sub(r'\n```$', '', fixed_code)           # Xóa dòng kết thúc ```
-        fixed_code = fixed_code.replace('```', '').strip()
+            try:
+                result = response.json()
+            except ValueError as exc:
+                print(f"[LLM] OpenRouter trả về JSON không hợp lệ: {exc}")
+                return None
 
-        return fixed_code
+            choices = result.get("choices") or []
+            if not choices:
+                print(f"[LLM] OpenRouter response không có choices: {response.text[:1000]}")
+                return None
+
+            choice = choices[0] or {}
+            choice_error = choice.get("error") or result.get("error")
+            if choice_error:
+                error_code = choice_error.get("code") if isinstance(choice_error, dict) else None
+                try:
+                    transient_code = int(error_code)
+                except (TypeError, ValueError):
+                    transient_code = None
+                metadata = choice_error.get("metadata") if isinstance(choice_error, dict) else None
+                message = choice_error.get("message") if isinstance(choice_error, dict) else str(choice_error)
+                if _is_transient_llm_error(transient_code, metadata) and attempt < retries:
+                    sleep_s = min(2 ** attempt, 15)
+                    print(
+                        f"[LLM] OpenRouter provider lỗi {error_code} lần {attempt}/{retries}: {message}. "
+                        f"Thử lại sau {sleep_s}s..."
+                    )
+                    time.sleep(sleep_s)
+                    continue
+                print(f"[LLM] OpenRouter provider error {error_code}: {message}")
+                return None
+
+            message = choice.get("message") or {}
+            raw_content = _extract_openrouter_message_content(message)
+            if raw_content is None:
+                finish_reason = choice.get("finish_reason")
+                reasoning = message.get("reasoning")
+                reasoning_len = len(reasoning) if isinstance(reasoning, str) else 0
+                if attempt < retries:
+                    sleep_s = min(2 ** attempt, 15)
+                    print(
+                        f"[LLM] OpenRouter trả về content=null lần {attempt}/{retries} "
+                        f"(finish_reason={finish_reason}, reasoning_len={reasoning_len}). "
+                        f"Thử lại sau {sleep_s}s..."
+                    )
+                    time.sleep(sleep_s)
+                    continue
+                print(
+                    f"[LLM] OpenRouter không trả về code content "
+                    f"(finish_reason={finish_reason}, reasoning_len={reasoning_len})."
+                )
+                return None
+
+            fixed_code = _clean_code(raw_content)
+            if not fixed_code:
+                if attempt < retries:
+                    sleep_s = min(2 ** attempt, 15)
+                    print(
+                        f"[LLM] OpenRouter trả về content rỗng lần {attempt}/{retries}. "
+                        f"Thử lại sau {sleep_s}s..."
+                    )
+                    time.sleep(sleep_s)
+                    continue
+                print("[LLM] OpenRouter trả về content rỗng.")
+                return None
+
+            return fixed_code
+
+        return None
 
     except Exception as e:
         print(f"[LLM] Exception khi gọi OpenRouter: {e}")
@@ -376,6 +483,14 @@ def validate_patch(patched_file_path: str, bug_id: str, dataset: str = "codeflaw
         return result
     except Exception as e:
         print(f"    [Error] Không thể validate: {e}")
+        validate_patch.last_details = {
+            "validation_error": f"validate_exception:{e}",
+            "full_post_passed_tests": [],
+            "full_post_failed_tests": [],
+            "effective_post_passed_tests": [],
+            "effective_post_failed_tests": [],
+            "fixed_fail_excluded_tests": [],
+        }
         return False, [], []
 
 
@@ -545,6 +660,10 @@ def _build_failed_test_context(bug: BugRecord) -> str:
 def _clean_llm_patch(patched_func: str) -> str:
     """Loại bỏ markdown wrapper mà LLM thêm vào nếu có."""
     patched_func = patched_func.strip()
+
+    xml_match = re.search(r'<fixed_code>\s*([\s\S]*?)\s*</fixed_code>', patched_func)
+    if xml_match:
+        patched_func = xml_match.group(1)
 
     # Trường hợp LLM trả về text giải thích + code block
     code_block = re.search(r'```(?:c|cpp)?\s*\n([\s\S]*?)```', patched_func)
@@ -794,7 +913,12 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
             cand_label = candidate_relpath or cand_base
 
             print(f"  - Kiểm tra hàm '{func_name}' trong {cand_label} (Score: {score:.4f})")
-            func_code, start_idx, end_idx = extract_function_code(source_code, func_name)
+            source_language = _source_language_from_path(candidate_path)
+            func_code, start_idx, end_idx = extract_function_code(
+                source_code,
+                func_name,
+                language=source_language,
+            )
             if not func_code:
                 print(f"    WARNING: Không thể trích xuất hàm {func_name}")
                 continue
@@ -838,7 +962,11 @@ The defect may be a crash, memory-safety issue, bounds-checking error, parser ed
             llm_attempted = True
             candidate_patched_func = _clean_llm_patch(raw_patch)
             llm_patch_attempt_index += 1
-            reparsed_func, _, _ = extract_function_code(candidate_patched_func, func_name)
+            reparsed_func, _, _ = extract_function_code(
+                candidate_patched_func,
+                func_name,
+                language=source_language,
+            )
             if not reparsed_func:
                 print("    [ERROR] LLM trả về function không hoàn chỉnh/không parse được. Bỏ qua validate.")
                 llm_patch_artifact = _write_llm_patch_artifact(
@@ -890,6 +1018,7 @@ The defect may be a crash, memory-safety issue, bounds-checking error, parser ed
                     },
                 })
                 continue
+            candidate_patched_func = reparsed_func
 
             candidate_patched_source = replace_source_range_bytes(
                 source_code,
@@ -904,7 +1033,7 @@ The defect may be a crash, memory-safety issue, bounds-checking error, parser ed
             patched_norm = normalize_code_for_edit_distance(candidate_patched_func)
             if not patched_norm or candidate_patched_source == source_code:
                 print("    [NO-OP] Patch không thay đổi hàm nguồn, bỏ qua candidate này.")
-                _write_llm_patch_artifact(
+                llm_patch_artifact = _write_llm_patch_artifact(
                     bug_id=bug_id,
                     attempt_index=llm_patch_attempt_index,
                     qualified_name=qualified_name,
@@ -916,6 +1045,43 @@ The defect may be a crash, memory-safety issue, bounds-checking error, parser ed
                     status="no_op",
                     validation_error="no_op",
                 )
+                candidate_results.append({
+                    "function": qualified_name,
+                    "score": score,
+                    "status": "no_op",
+                    "status_scope": "patch_comparison_excluding_fixed_fail_tests",
+                    "patch_comparison_status": "failed",
+                    "real_status": "failed",
+                    "validation_error": "no_op",
+                    "repair_target_file": candidate_path,
+                    "repair_target_relpath": candidate_relpath,
+                    "patched_function": candidate_patched_func,
+                    "patched_file": candidate_patched_source,
+                    "llm_patch_artifact": llm_patch_artifact,
+                    "post_scope": "full_suite",
+                    "post_passed_count": 0,
+                    "post_failed_count": 0,
+                    "post_passed_tests": [],
+                    "post_failed_tests": [],
+                    "full_post_passed_count": 0,
+                    "full_post_failed_count": 0,
+                    "full_post_passed_tests": [],
+                    "full_post_failed_tests": [],
+                    "patch_comparison_post_passed_count": 0,
+                    "patch_comparison_post_failed_count": 0,
+                    "patch_comparison_post_passed_tests": [],
+                    "patch_comparison_post_failed_tests": [],
+                    "fixed_fail_excluded_count": 0,
+                    "fixed_fail_excluded_tests": [],
+                    "validation_details": {
+                        "validation_error": "no_op",
+                        "full_post_passed_tests": [],
+                        "full_post_failed_tests": [],
+                        "effective_post_passed_tests": [],
+                        "effective_post_failed_tests": [],
+                        "fixed_fail_excluded_tests": [],
+                    },
+                })
                 continue
             if patched_norm == orig_norm:
                 print("    [WARN] Patch chỉ khác theo normalized diff; vẫn validate để tránh bỏ nhầm.")
