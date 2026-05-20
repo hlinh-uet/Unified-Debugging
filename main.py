@@ -214,8 +214,8 @@ def main():
     parser.add_argument(
         "--llm",
         default=None,
-        choices=["gemini", "openai", "claude", "qwen", "openrouter"],
-        help="LLM provider cho APR: gemini, openai, claude, qwen/openrouter. "
+        choices=["openai", "openrouter"],
+        help="LLM provider cho APR: openai hoặc openrouter. "
              "Override biến môi trường LLM_PROVIDER.",
     )
     args = parser.parse_args()

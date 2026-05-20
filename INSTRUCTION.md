@@ -19,7 +19,7 @@
         │                             │
 ┌───────▼──────┐        ┌─────────────▼──────────────────────────┐
 │  core/        │        │  core/                                 │
-│ fault_localization │    │  apr_baseline.py  (LLM – Gemini)       │
+│ fault_localization │    │  apr_baseline.py  (OpenAI/OpenRouter)  │
 │  .py          │        │                                      │
 └───────┬──────┘        │                                      │
         │                └─────────────┬──────────────────────────┘
@@ -198,7 +198,7 @@ Với mỗi bug:
   1. Lấy danh sách hàm nghi ngờ từ fault_localization_results.json (sắp xếp giảm dần)
  2. extract_function_code() → trích xuất mã nguồn hàm (từ core/utils.py)
   3. Xây dựng prompt với context test FAIL từ BugRecord.tests
-  4. Gọi call_llm() → Gemini sinh bản vá
+  4. Gọi call_llm() → OpenAI/OpenRouter sinh bản vá
   5. Ghép patched_function vào source gốc → patched_source (= patched_file)
   6. SandboxAdapter.validate() → compile + chạy test
   7. Nếu pass 100%: lưu vào experiments/patches/<bug_id>_patch.c

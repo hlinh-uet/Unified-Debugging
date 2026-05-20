@@ -2,12 +2,10 @@ import os
 import json
 import re
 import shutil
-import subprocess
 import time
 from typing import Optional
 import requests
 from dotenv import load_dotenv
-from pathlib import Path
 
 from configs.path import EXPERIMENTS_DIR, PATCHES_DIR, LLM_PATCHES_DIR
 from data_loaders.base_loader import get_loader, BugRecord
@@ -19,22 +17,26 @@ from core.utils import (
     replace_source_range_bytes,
     resolve_fl_candidate_source_path,
     source_byte_range_to_char_range,
-    get_codeflaws_accepted_cfile,
 )
 
 load_dotenv()
 
 # Provider mặc định – đọc từ .env, có thể override qua CLI
-_DEFAULT_LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
+_DEFAULT_LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openrouter").strip().lower()
 APR_TOP_K = int(os.getenv("APR_TOP_K", "3"))
-# Giới hạn độ dài source đưa vào prompt. Một số Defects4C project có file lớn,
-# vượt context window của nhiều LLM và loãng tín hiệu. Nếu vượt mức này ta
-# cắt giữa, giữ phần đầu file (includes/typedef) + neighborhood của hàm lỗi.
+# Giới hạn độ dài source đưa vào prompt.
 APR_MAX_SOURCE_CHARS = int(os.getenv("APR_MAX_SOURCE_CHARS", "30000"))
-# Với Defects4C, một bug có hàng trăm test pass – lưu hết vào JSON gây bloat.
+# Giới hạn số test id được lưu vào apr_results.json.
 APR_MAX_TEST_ID_STORE = int(os.getenv("APR_MAX_TEST_ID_STORE", "50"))
+APR_MAX_FAILURE_SIGNAL_LINES = int(os.getenv("APR_MAX_FAILURE_SIGNAL_LINES", "20"))
+APR_MAX_FAILURE_SIGNAL_LINE_CHARS = int(os.getenv("APR_MAX_FAILURE_SIGNAL_LINE_CHARS", "300"))
 # Mặc định resume APR theo kiểu append-only: bug nào đã có record thì bỏ qua.
 APR_SKIP_EXISTING = os.getenv("APR_SKIP_EXISTING", "1").strip().lower() not in ("0", "false", "no")
+# Prompt
+APR_REPAIR_SYSTEM_PROMPT = (
+    "You are a professional C/C++ repair agent. Return ONLY the raw fixed C/C++ code. "
+    "No markdown, no explanation, no backticks."
+)
 
 
 def _is_defects4c_dataset(dataset: str) -> bool:
@@ -46,42 +48,7 @@ def _source_language_from_path(path: str) -> str:
     return "cpp" if ext in (".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx", ".h") else "c"
 
 
-def _clean_code(raw_content: str) -> str:
-    """
-    Hàm làm sạch mã nguồn:
-    1. Ưu tiên bóc tách nội dung trong thẻ <fixed_code>
-    2. Xóa bỏ các ký tự Markdown (```c, ```)
-    """
-    # ==========================================
-    # BƯỚC 1: TÌM VÀ CẮT THẺ XML
-    # ==========================================
-    # Lệnh re.search này sẽ tìm mọi thứ nằm giữa <fixed_code> và </fixed_code>
-    # Cờ `re.DOTALL` cực kỳ quan trọng: Nó cho phép dấu chấm (.) đại diện cho cả ký tự xuống dòng (\n)
-    # Nếu không có re.DOTALL, regex sẽ dừng lại ngay ở dòng code đầu tiên.
-    xml_match = re.search(r'<fixed_code>\s*(.*?)\s*</fixed_code>', raw_content, re.DOTALL)
-    
-    if xml_match:
-        # Nếu LLM dùng thẻ XML, ta lấy đúng phần ruột bên trong
-        content = xml_match.group(1).strip()
-    else:
-        # Nếu LLM quên dùng thẻ (Fallback), ta lấy toàn bộ chuỗi ban đầu
-        content = raw_content.strip()
-    
-    # ==========================================
-    # BƯỚC 2: CẠO SẠCH MARKDOWN CHỐNG GCC BÁO LỖI
-    # ==========================================
-    # Xóa dòng mở đầu dạng ```c hoặc ```cpp hoặc ``` nằm ở ngay đầu chuỗi
-    # Dấu ^ nghĩa là bắt đầu chuỗi.
-    content = re.sub(r'^```[a-zA-Z]*\n', '', content) 
-    
-    content = re.sub(r'\n```$', '', content)           
-    
-    content = content.replace('```', '').strip()
-    
-    return content
-
-
-def _extract_openrouter_message_content(message) -> Optional[str]:
+def _extract_chat_message_content(message) -> Optional[str]:
     if not isinstance(message, dict):
         return None
 
@@ -123,195 +90,66 @@ def _is_transient_llm_error(code=None, metadata=None) -> bool:
 # LLM – provider-specific helpers
 # ---------------------------------------------------------------------------
 
-def _call_gemini(prompt: str) -> Optional[str]:
-    """Gọi Google Gemini (gemini-2.5-flash) để sinh bản vá."""
-    try:
-        import google.generativeai as genai
-    except ImportError:
-        print("[LLM] Thiếu thư viện 'google-generativeai'. Cài bằng: pip install google-generativeai")
-        return None
-
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("[LLM] Warning: GEMINI_API_KEY chưa được đặt trong .env.")
-        return None
-
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("models/gemini-2.5-flash")
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        error_msg = str(e)
-        if "Quota" in error_msg or "quota" in error_msg or "limit" in error_msg:
-            print("[LLM] Warning: Gemini API quota limit đã đạt. Thử lại sau.")
-        else:
-            print(f"[LLM] Error calling Gemini: {error_msg}")
-        return None
-
-
 def _call_openai(prompt: str, model: str = "gpt-4o-mini") -> Optional[str]:
-    """Gọi OpenAI ChatCompletion để sinh bản vá."""
+    return _call_openai_compatible_chat(
+        prompt,
+        provider_label="OpenAI",
+        api_key=os.getenv("OPENAI_API_KEY"),
+        missing_key_message="OPENAI_API_KEY chưa được đặt trong .env.",
+        base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        model=model,
+    )
+
+
+def _call_openrouter(prompt: str, model: str = "qwen/qwen3-coder-30b-a3b-instruct") -> Optional[str]:
+    return _call_openai_compatible_chat(
+        prompt,
+        provider_label="OpenRouter",
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+        missing_key_message="Không tìm thấy OPENROUTER_API_KEY trong môi trường.",
+        base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        model=model,
+        extra_headers={
+            "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", "http://localhost:3000"),
+            "X-Title": os.getenv("OPENROUTER_APP_NAME", "UET_APR_Research"),
+        },
+    )
+
+
+def _call_openai_compatible_chat(
+    prompt: str,
+    *,
+    provider_label: str,
+    api_key: Optional[str],
+    missing_key_message: str,
+    base_url: str,
+    model: str,
+    extra_headers: Optional[dict] = None,
+) -> Optional[str]:
     try:
-        from openai import OpenAI
-    except ImportError:
-        print("[LLM] Thiếu thư viện 'openai'. Cài bằng: pip install openai")
-        return None
-
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        print("[LLM] Warning: OPENAI_API_KEY chưa được đặt trong .env.")
-        return None
-
-    try:
-        client = OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an expert in fixing C/C++ program bugs. "
-                        "Return ONLY the fixed C function source code, with no explanation."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.2,
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        error_msg = str(e)
-        if "quota" in error_msg.lower() or "rate_limit" in error_msg.lower():
-            print("[LLM] Warning: OpenAI API quota/rate limit đã đạt. Thử lại sau.")
-        else:
-            print(f"[LLM] Error calling OpenAI: {error_msg}")
-        return None
-
-
-def _call_claude(prompt: str, model: Optional[str] = None) -> Optional[str]:
-    """Gọi API Claude qua Proxy Zunef bằng cURL, xử lý chuẩn SSE Stream."""
-    try:
-        base_url = os.getenv("ANTHROPIC_BASE_URL", "https://claude.zunef.com/v1/ai").rstrip("/")
-        api_key = os.getenv("ANTHROPIC_AUTH_TOKEN") or os.getenv("ANTHROPIC_API_KEY")
-        target_model = model or os.getenv("ANTHROPIC_MODEL", "anthropic/claude-sonnet-4.6")
-
-        log_dir = Path(f"results/claude_logs/{target_model}")
-        log_dir.mkdir(parents=True, exist_ok=True)
-        
         if not api_key:
-            print("[LLM] LỖI: Thiếu API Key cho Claude")
+            print(f"[LLM] LỖI: {missing_key_message}")
             return None
 
-        payload = {
-            "model": target_model,
-            "max_tokens": 4096 * 10, # Bây giờ 4096 token sẽ chỉ dành cho kết quả
-            "temperature": 0.2, # Lưu ý: Nếu bật Thinking, temperature mặc định bị ép về 1. Nên nếu bạn đặt 0.2, lý tưởng nhất là nó đang ở Standard mode.
-            "stream": True,
-            # XÓA HẲN DÒNG "reasoning": False
-            "system": (
-                "You are an expert C/C++ program repair system. "
-                "CRITICAL RULE: You are strictly forbidden from outputting any reasoning, thinking process, or explanations. "
-                "Do NOT use <thinking> tags. Output ONLY the raw, fixed C code enclosed EXACTLY within <fixed_code> tags. "
-                "If you output anything other than the <fixed_code> block, the system will crash."
-            ),
-            "messages": [{"role": "user", "content": prompt}]
-        }
-
-        # SỬA LỖI 1: Bỏ .encode('utf-8') vì bạn đang dùng text=True trong subprocess
-        body = json.dumps(payload, ensure_ascii=False)
-
-        # Đổi tên biến thành 'process_result' cho đỡ nhầm lẫn với requests
-        process_result = subprocess.run(
-            [
-                "curl",
-                "-sS",
-                f"{base_url}/messages",
-                "-H", "Content-Type: application/json",
-                "-H", "Accept: application/json",
-                "-H", f"x-api-key: {api_key}",
-                "--data-binary", "@-",
-            ],
-            input=body,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            check=False,
-            timeout=300,
-        )
-        
-        # SỬA LỖI 2: Check returncode của process thay vì status_code của HTTP
-        if process_result.returncode != 0:
-            print(f"[LLM] Error cURL: {process_result.stderr.strip()}")
-            return None
-        
-        raw_log_path = log_dir / "raw_response.txt"
-        raw_log_path.write_text(process_result.stdout, encoding="utf-8")
-    
-        # SỬA LỖI 3: Duyệt qua từng dòng của stdout (không dùng iter_lines)
-        text_parts = []
-        for line in process_result.stdout.splitlines():
-            line = line.strip()
-            if line.startswith("data: "):
-                json_str = line[6:]
-                if json_str == "[DONE]":
-                    continue
-                try:
-                    data = json.loads(json_str)
-                    delta = data.get("delta", {})
-                    # Chỉ lấy text, lờ đi phần thinking nếu có
-                    if delta.get("type") == "text_delta":
-                        text_parts.append(delta.get("text", ""))
-                except json.JSONDecodeError:
-                    continue
-        
-        raw_text = "".join(text_parts)
-        
-        if not raw_text:
-            print("[LLM] LỖI: Không bóc tách được text từ Claude Stream.")
-            # In ra 200 ký tự đầu tiên để xem Zunef có chửi lỗi gì bằng JSON (ví dụ 400 Bad Request) không
-            print(f"[LLM DEBUG] Server trả về: {process_result.stdout[:200]}")
-            return None
-            
-        return _clean_code(raw_text)
-        
-    except Exception as e:
-        print(f"[LLM] Exception Claude: {e}")
-        return None
-    
-
-def _call_qwen(prompt: str, model: str = "qwen/qwen3-coder-30b-a3b-instruct") -> Optional[str]:
-    try:
-        # OpenRouter key is preferred; QWEN_API_KEY remains as a backward-compatible alias.
-        api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("QWEN_API_KEY")
-        base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
-        referer = os.getenv("OPENROUTER_SITE_URL", "http://localhost:3000")
-        app_title = os.getenv("OPENROUTER_APP_NAME", "UET_APR_Research")
-        log_dir = Path(f"results/qwen_logs/{model}")
-        log_dir.mkdir(parents=True, exist_ok=True)
-        if not api_key:
-            print("[LLM] LỖI: Không tìm thấy OPENROUTER_API_KEY trong môi trường.")
-            return None
-
-        url = f"{base_url}/chat/completions"
+        url = f"{base_url.rstrip('/')}/chat/completions"
         
         headers = {
             "Authorization": f"Bearer {api_key.strip()}",
             "Content-Type": "application/json",
-            "HTTP-Referer": referer,
-            "X-Title": app_title,
         }
+        if extra_headers:
+            headers.update(extra_headers)
 
         payload = {
             "model": model,
             "messages": [
                 {
                     "role": "system", 
-                    "content": "You are a professional C repair agent. Return ONLY the raw fixed C code. No markdown, no explanation, no backticks."
+                    "content": APR_REPAIR_SYSTEM_PROMPT
                 },
                 {"role": "user", "content": prompt}
             ],
-            "temperature": 0.1, # Để kết quả ổn định hơn (ít NoiseFix hơn)
+            "temperature": 0.1,
             "max_tokens": int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "12000")),
         }
 
@@ -325,20 +163,17 @@ def _call_qwen(prompt: str, model: str = "qwen/qwen3-coder-30b-a3b-instruct") ->
                     raise
                 sleep_s = min(2 ** attempt, 15)
                 print(
-                    f"[LLM] OpenRouter lỗi kết nối lần {attempt}/{retries}: {exc}. "
+                    f"[LLM] {provider_label} lỗi kết nối lần {attempt}/{retries}: {exc}. "
                     f"Thử lại sau {sleep_s}s..."
                 )
                 time.sleep(sleep_s)
                 continue
 
-            raw_log_path = log_dir / "raw_response.txt"
-            raw_log_path.write_text(response.text, encoding="utf-8")
-
             if response.status_code != 200:
                 if _is_transient_llm_error(response.status_code) and attempt < retries:
                     sleep_s = min(2 ** attempt, 15)
                     print(
-                        f"[LLM] OpenRouter HTTP {response.status_code} lần {attempt}/{retries}. "
+                        f"[LLM] {provider_label} HTTP {response.status_code} lần {attempt}/{retries}. "
                         f"Thử lại sau {sleep_s}s..."
                     )
                     time.sleep(sleep_s)
@@ -349,12 +184,12 @@ def _call_qwen(prompt: str, model: str = "qwen/qwen3-coder-30b-a3b-instruct") ->
             try:
                 result = response.json()
             except ValueError as exc:
-                print(f"[LLM] OpenRouter trả về JSON không hợp lệ: {exc}")
+                print(f"[LLM] {provider_label} trả về JSON không hợp lệ: {exc}")
                 return None
 
             choices = result.get("choices") or []
             if not choices:
-                print(f"[LLM] OpenRouter response không có choices: {response.text[:1000]}")
+                print(f"[LLM] {provider_label} response không có choices: {response.text[:1000]}")
                 return None
 
             choice = choices[0] or {}
@@ -370,16 +205,16 @@ def _call_qwen(prompt: str, model: str = "qwen/qwen3-coder-30b-a3b-instruct") ->
                 if _is_transient_llm_error(transient_code, metadata) and attempt < retries:
                     sleep_s = min(2 ** attempt, 15)
                     print(
-                        f"[LLM] OpenRouter provider lỗi {error_code} lần {attempt}/{retries}: {message}. "
+                        f"[LLM] {provider_label} provider lỗi {error_code} lần {attempt}/{retries}: {message}. "
                         f"Thử lại sau {sleep_s}s..."
                     )
                     time.sleep(sleep_s)
                     continue
-                print(f"[LLM] OpenRouter provider error {error_code}: {message}")
+                print(f"[LLM] {provider_label} provider error {error_code}: {message}")
                 return None
 
             message = choice.get("message") or {}
-            raw_content = _extract_openrouter_message_content(message)
+            raw_content = _extract_chat_message_content(message)
             if raw_content is None:
                 finish_reason = choice.get("finish_reason")
                 reasoning = message.get("reasoning")
@@ -387,37 +222,36 @@ def _call_qwen(prompt: str, model: str = "qwen/qwen3-coder-30b-a3b-instruct") ->
                 if attempt < retries:
                     sleep_s = min(2 ** attempt, 15)
                     print(
-                        f"[LLM] OpenRouter trả về content=null lần {attempt}/{retries} "
+                        f"[LLM] {provider_label} trả về content=null lần {attempt}/{retries} "
                         f"(finish_reason={finish_reason}, reasoning_len={reasoning_len}). "
                         f"Thử lại sau {sleep_s}s..."
                     )
                     time.sleep(sleep_s)
                     continue
                 print(
-                    f"[LLM] OpenRouter không trả về code content "
+                    f"[LLM] {provider_label} không trả về code content "
                     f"(finish_reason={finish_reason}, reasoning_len={reasoning_len})."
                 )
                 return None
 
-            fixed_code = _clean_code(raw_content)
-            if not fixed_code:
+            if not raw_content.strip():
                 if attempt < retries:
                     sleep_s = min(2 ** attempt, 15)
                     print(
-                        f"[LLM] OpenRouter trả về content rỗng lần {attempt}/{retries}. "
+                        f"[LLM] {provider_label} trả về content rỗng lần {attempt}/{retries}. "
                         f"Thử lại sau {sleep_s}s..."
                     )
                     time.sleep(sleep_s)
                     continue
-                print("[LLM] OpenRouter trả về content rỗng.")
+                print(f"[LLM] {provider_label} trả về content rỗng.")
                 return None
 
-            return fixed_code
+            return raw_content
 
         return None
 
     except Exception as e:
-        print(f"[LLM] Exception khi gọi OpenRouter: {e}")
+        print(f"[LLM] Exception khi gọi {provider_label}: {e}")
         return None
 
 
@@ -427,7 +261,7 @@ def call_llm(prompt: str, provider: Optional[str] = None) -> Optional[str]:
 
     Args:
         prompt:   Nội dung prompt gửi đến LLM.
-        provider: 'gemini' | 'openai' | 'claude' | 'qwen' | 'openrouter'.
+        provider: 'openai' | 'openrouter'.
                   Nếu None, đọc từ biến môi trường LLM_PROVIDER.
 
     Returns:
@@ -440,21 +274,12 @@ def call_llm(prompt: str, provider: Optional[str] = None) -> Optional[str]:
         print(f"[LLM] Provider: OpenAI ({openai_model})")
         return _call_openai(prompt, model=openai_model)
 
-    if chosen == "gemini":
-        print("[LLM] Provider: Gemini (gemini-2.5-flash)")
-        return _call_gemini(prompt)
-    
-    if chosen == "claude":
-        claude_model = os.getenv("ANTHROPIC_MODEL", "anthropic/claude-sonnet-4.6")
-        print(f"[LLM] Provider: Claude ({claude_model})")
-        return _call_claude(prompt, model=claude_model)
+    if chosen == "openrouter":
+        openrouter_model = os.getenv("OPENROUTER_MODEL", "qwen/qwen3-coder-30b-a3b-instruct")
+        print(f"[LLM] Provider: OpenRouter ({openrouter_model})")
+        return _call_openrouter(prompt, model=openrouter_model)
 
-    if chosen in ("qwen", "openrouter"):
-        qwen_model = os.getenv("QWEN_MODEL", "qwen/qwen3-coder-30b-a3b-instruct")
-        print(f"[LLM] Provider: Qwen ({qwen_model})")
-        return _call_qwen(prompt, model=qwen_model)
-
-    print(f"[LLM] Warning: Provider không hỗ trợ '{chosen}'. Chọn 'gemini', 'openai', 'claude', hoặc 'qwen'.")
+    print(f"[LLM] Warning: Provider không hỗ trợ '{chosen}'. Chọn 'openai' hoặc 'openrouter'.")
     return None
 
 
@@ -468,7 +293,7 @@ def validate_patch(patched_file_path: str, bug_id: str, dataset: str = "codeflaw
     """Sử dụng Sandbox Adapter để kiểm chứng bản vá.
 
     ``src_relpath`` cho Defects4C biết chính xác file nào trong buggy version
-    cần thay thế. ``src_basename`` chỉ còn là fallback/tên hiển thị.
+    cần thay thế. ``src_basename`` chỉ còn dùng cho adapter cũ/tên hiển thị.
     """
     print(f"[APR] Validating patch cho {bug_id} với adapter '{dataset}'...")
     validate_patch.last_details = {}
@@ -518,9 +343,9 @@ def _candidate_relpath_from_buggy_tree(candidate_path: str, raw_meta: Optional[d
 
 def _trim_source_for_prompt(source_code: str, start_idx: int, end_idx: int) -> str:
     """
-    Rút gọn source đưa vào prompt khi file quá dài (thường gặp ở Defects4C).
+    Rút gọn source đưa vào prompt khi file quá dài.
 
-    Chiến lược: giữ phần đầu file (includes, typedef, hằng số) + neighborhood
+    Giữ phần đầu file (includes, typedef, hằng số) + neighborhood
     quanh hàm lỗi (để LLM thấy struct & macro liên quan). Đệm bằng comment
     "... [source truncated] ..." để LLM biết có cắt bỏ.
     """
@@ -588,46 +413,29 @@ def _dedup_initial_test_ids(tests):
     return passed, failed
 
 
-def _copy_accepted_patch(dataset: str, bug_id: str, bug_source_path: str,
-                        bug_record: BugRecord) -> str:
-    """
-    Sao lưu accepted/ground-truth patch để evaluation so sánh về sau.
+def _failure_signal_lines(text: object) -> list:
+    """Extract concise failure lines from actual output for APR prompt context."""
+    if not text:
+        return []
 
-    - Codeflaws: đường dẫn được tính từ ``bug_id`` (``<prefix>-<accepted>.c``).
-    - Defects4C: chỉ dùng ``bug_record.raw['accepted_file']`` do loader sinh
-      từ đúng ``commit_after``. Không fallback sang thư mục khác.
-
-    Returns:
-        Chuỗi rỗng nếu thành công, hoặc mã lỗi rõ ràng nếu không copy được.
-    """
-    out_dir = os.path.join(EXPERIMENTS_DIR, "correct_patches")
-    ds = (dataset or "").lower()
-    accepted_src = None
-
-    if ds == "codeflaws":
-        accepted_cfile = get_codeflaws_accepted_cfile(bug_id)
-        if accepted_cfile:
-            accepted_src = os.path.join(os.path.dirname(bug_source_path), accepted_cfile)
-        else:
-            return "accepted_name_missing"
-
-    elif _is_defects4c_dataset(ds):
-        raw = bug_record.raw if bug_record else None
-        if not raw:
-            return "bug_record_missing"
-        accepted_src = raw.get("accepted_file")
-    else:
-        return f"unsupported_dataset:{dataset}"
-
-    if not accepted_src or not os.path.exists(accepted_src):
-        return f"accepted_file_not_found:{accepted_src or '<empty>'}"
-    os.makedirs(out_dir, exist_ok=True)
-    safe_id = bug_id.replace("@", "__").replace("/", "__")
-    try:
-        shutil.copy2(accepted_src, os.path.join(out_dir, f"{safe_id}_accepted.c"))
-    except Exception as exc:
-        return f"accepted_copy_failed:{exc}"
-    return ""
+    signal = re.compile(
+        r"FAIL|FAILED|ERROR|Failure|Actual|Expected|AddressSanitizer|"
+        r"SUMMARY|Segmentation|Assertion|assert|overflow|underflow|invalid|"
+        r"not a directory|permission|crash|fatal|warning|SEGV|SIGSEGV|"
+        r"NULL|null|heap|stack|use-after-free|buffer",
+        re.IGNORECASE,
+    )
+    lines = []
+    for line in str(text).splitlines():
+        line = line.strip()
+        if not line or not signal.search(line):
+            continue
+        if len(line) > APR_MAX_FAILURE_SIGNAL_LINE_CHARS:
+            line = line[:APR_MAX_FAILURE_SIGNAL_LINE_CHARS].rstrip() + "..."
+        lines.append(line)
+        if len(lines) >= APR_MAX_FAILURE_SIGNAL_LINES:
+            break
+    return lines
 
 
 def _build_failed_test_context(bug: BugRecord) -> str:
@@ -642,39 +450,23 @@ def _build_failed_test_context(bug: BugRecord) -> str:
             failed_tests.append(test)
             seen.add(tid)
     if not failed_tests:
-        return ""
+        return "FAILED TESTS AND RUNTIME SIGNALS\nNo failed test details are available in metadata.\n"
 
     lines = [
-        "### Failed test summary",
-        "The following tests fail on the buggy version:",
+        "FAILED TESTS AND RUNTIME SIGNALS",
     ]
     for idx, tc in enumerate(failed_tests, start=1):
         tc_name = str(tc.get("test_id") or "Unknown").strip()
         tc_reason = str(tc.get("fail_reason") or "Unknown").strip()
         lines.append(f"{idx}. test_id: {tc_name}")
         lines.append(f"   fail_reason: {tc_reason}")
+        signal_lines = _failure_signal_lines(tc.get("actual_output", ""))
+        if signal_lines:
+            lines.append("   actual_output_signal_lines:")
+            for signal_line in signal_lines:
+                lines.append(f"   - {signal_line}")
 
     return "\n".join(lines) + "\n"
-
-
-def _clean_llm_patch(patched_func: str) -> str:
-    """Loại bỏ markdown wrapper mà LLM thêm vào nếu có."""
-    patched_func = patched_func.strip()
-
-    xml_match = re.search(r'<fixed_code>\s*([\s\S]*?)\s*</fixed_code>', patched_func)
-    if xml_match:
-        patched_func = xml_match.group(1)
-
-    # Trường hợp LLM trả về text giải thích + code block
-    code_block = re.search(r'```(?:c|cpp)?\s*\n([\s\S]*?)```', patched_func)
-    if code_block:
-        patched_func = code_block.group(1)
-
-    lines = patched_func.split("\n")
-    if lines and lines[0].strip().startswith("// Bắt đầu"):
-        patched_func = "\n".join(lines[1:])
-
-    return patched_func.strip()
 
 
 def _safe_artifact_part(value: object, max_len: int = 120) -> str:
@@ -755,7 +547,7 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
 
     Args:
         dataset:      Tên dataset (mặc định 'codeflaws').
-        llm_provider: 'gemini' | 'openai' | 'claude' | 'qwen' | 'openrouter'.
+        llm_provider: 'openai' | 'openrouter'.
                       Nếu None, đọc từ LLM_PROVIDER trong .env.
     """
     os.makedirs(EXPERIMENTS_DIR, exist_ok=True)
@@ -853,7 +645,6 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
             print(f"    [Skip] File nguồn không tồn tại: {bug_source_path}")
             continue
 
-        defects4c_like = _is_defects4c_dataset(ds_lc)
         primary_base = os.path.basename(bug_source_path)
         _br = bug_map.get(bug_id)
         raw_meta = _br.raw if _br else None
@@ -882,18 +673,15 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
         candidate_results = []
         best_candidate = None
 
-        # Sao lưu accepted patch một lần (cho evaluation sau này).
-        # Logic tách theo dataset — tránh áp sai hàm codeflaws cho defects4c.
-        accepted_patch_error = _copy_accepted_patch(dataset, bug_id, bug_source_path, bug_record)
-        if accepted_patch_error:
-            print(f"    [ERROR] Không copy được accepted patch: {accepted_patch_error}")
-
         for qualified_name, score in top_funcs:
             if score == 0.0:
                 continue
 
             file_hint, func_name = parse_sbfl_qualified_name(qualified_name)
             if not func_name:
+                continue
+            if _is_defects4c_dataset(ds_lc) and not file_hint:
+                print(f"  - [Skip] FL key thiếu file hint cho dataset nhiều file: {qualified_name}")
                 continue
 
             candidate_path = resolve_fl_candidate_source_path(
@@ -927,31 +715,35 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
             attempted = True
 
             prompt_source = _trim_source_for_prompt(source_code, start_idx, end_idx)
-            prompt = f"""You are an expert C/C++ maintenance engineer.
-Your task is to repair the likely defect in function `{func_name}` from the code below (Bug ID: {bug_id}).
-The defect may be a crash, memory-safety issue, bounds-checking error, parser edge case, undefined behavior, or incorrect error handling.
+            prompt = f"""REPAIR TASK
+Bug ID: {bug_id}
+Repair only the target C/C++ function below. The defect may be a vulnerability or a general correctness bug.
+The target function is the only code that will be replaced by your answer.
 
+TARGET FUNCTION TO FIX
+Function name: {func_name}
+Source file: {cand_label}
+BEGIN TARGET FUNCTION
+{func_code}
+END TARGET FUNCTION
+
+FAILURE EVIDENCE
+The next block may contain failed test IDs, fail reasons. It is observational evidence only and may be incomplete or unavailable.
 {failed_tests_context}
 
-### Current source file (for scope, libraries, and struct context):
-```c
+SOURCE FILE CONTEXT
+BEGIN SOURCE CONTEXT
 {prompt_source}
-```
+END SOURCE CONTEXT
 
-### The buggy function to repair (`{func_name}` in `{cand_label}`):
-```c
-{func_code}
-```
+OUTPUT CONTRACT
+1. Output exactly one complete fixed C/C++ definition of function {func_name}.
+2. Preserve the existing function signature, coding style, macros, and helper APIs unless the bug fix strictly requires otherwise.
+3. Keep the patch minimal and localized to function {func_name}.
+4. Do not add includes, new global helpers, main functions, unrelated refactors, or changes outside the target function.
+5. Do not include explanations, preface text, markdown, code fences, or backticks.
 
-### Requirements:
-1. Find and fix the bug inside function `{func_name}`.
-2. Keep the patch minimal and preserve existing coding style, signatures, macros, and helper APIs.
-3. Do not invent new global helpers, includes, or unrelated refactors.
-4. RETURN ONLY the complete fixed C source code of function `{func_name}`.
-5. Do NOT include any explanation or preface text, do NOT rewrite `#include` lines, and do NOT add `main()`.
-
-```c
-// Start rewriting function {func_name} here:
+FIXED FUNCTION
 """
 
             raw_patch = call_llm(prompt, provider=llm_provider)
@@ -960,7 +752,10 @@ The defect may be a crash, memory-safety issue, bounds-checking error, parser ed
                 continue
 
             llm_attempted = True
-            candidate_patched_func = _clean_llm_patch(raw_patch)
+            candidate_patched_func = raw_patch.strip()
+            if "```" in candidate_patched_func or "<fixed_code" in candidate_patched_func.lower():
+                print("    [ERROR] LLM trả về markdown/XML wrapper thay vì raw function.")
+                candidate_patched_func = ""
             llm_patch_attempt_index += 1
             reparsed_func, _, _ = extract_function_code(
                 candidate_patched_func,
@@ -1249,7 +1044,6 @@ The defect may be a crash, memory-safety issue, bounds-checking error, parser ed
             "fixed_fail_excluded_count": len(fixed_fail_excluded),
             "fixed_fail_excluded_tests": list(fixed_fail_excluded),
             "validation_error": validation_error,
-            "accepted_patch_error": accepted_patch_error,
         }
 
         with open(apr_results_file, "w") as f:
