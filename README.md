@@ -24,7 +24,8 @@ Unified-Debugging/
 ├── core/                      # Logic nghiệp vụ chính
 │   ├── utils.py               # Tiện ích dùng chung (extract_function_code, qualify_func, ...)
 │   ├── fault_localization.py  # Fault Localization – Tarantula + IR reranker
-│   └── apr_baseline.py        # APR với LLM
+│   ├── apr/                   # APR với LLM (agents, pipeline, artifacts, validation)
+│   └── apr_baseline.py        # Wrapper tương thích cho APR
 │
 ├── evaluation/                # Đánh giá và báo cáo
 │   ├── eval_fl.py             # Đánh giá FL: Top-1/3/5 Hit Rate
@@ -102,6 +103,7 @@ cp .env.example .env
 #   OPENROUTER_MODEL=openai/gpt-oss-120b
 #   LLM_MAX_OUTPUT_TOKENS=12000
 #   APR_SKIP_EXISTING=1       – mặc định skip mọi bug đã có trong apr_results.json
+#   APR_MAX_LOCAL_HEADER_CONTEXT_CHARS=12000
 ```
 
 Model OpenRouter có thể đổi bằng `OPENROUTER_MODEL`. Một số lựa chọn:
@@ -142,7 +144,7 @@ python3 main.py --fl --dataset tcpdump
 # Cần có fault_localization_results.json từ bước FL cùng dataset.
 python3 main.py --apr --dataset tcpdump --llm openrouter
 python3 main.py --apr --dataset defects4c --llm openai
-python3 main.py --apr --dataset tcpdump           # dùng LLM_PROVIDER trong .env
+python3 main.py --apr --dataset tcpdump    # dùng LLM_PROVIDER trong .env
 
 # Bước 3 – Evaluation (FL + APR), lọc theo dataset.
 python3 main.py --eval --dataset tcpdump
