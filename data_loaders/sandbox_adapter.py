@@ -358,27 +358,36 @@ class Defects4CAdapter(SandboxAdapter):
         ):
             return self._validation_error_result("phase_a_prepare_failed")
 
-        target_relpath = self._resolve_source_relpath(
-            bug_meta=bug_meta,
-            src_basename=src_basename,
-            src_relpath=src_relpath,
-            src_files=src_files,
-        )
-        if not target_relpath:
-            self._reset_generic_workspace(container, container_repo)
-            return self._validation_error_result(f"source_not_found:{src_relpath or src_basename}")
+        build_compat_patches = []
+        try:
+            build_compat_patches = self._apply_known_build_compatibility_patches(
+                container=container,
+                container_repo=container_repo,
+                bug_meta=bug_meta,
+            )
+            if build_compat_patches is None:
+                return self._validation_error_result("build_compat_patch_failed")
 
-        if not self._apply_generic_patch(container, patched_file_path, container_repo, target_relpath):
-            self._reset_generic_workspace(container, container_repo)
-            return self._validation_error_result(f"patch_copy_failed:{target_relpath}")
+            target_relpath = self._resolve_source_relpath(
+                bug_meta=bug_meta,
+                src_basename=src_basename,
+                src_relpath=src_relpath,
+                src_files=src_files,
+            )
+            if not target_relpath:
+                return self._validation_error_result(f"source_not_found:{src_relpath or src_basename}")
 
-        suite_ok, full_passed, full_failed, validation_error = self._run_metadata_test_suite(
-            container=container,
-            container_repo=container_repo,
-            bug_meta=bug_meta,
-            test_ids=test_ids,
-        )
-        self._reset_generic_workspace(container, container_repo)
+            if not self._apply_generic_patch(container, patched_file_path, container_repo, target_relpath):
+                return self._validation_error_result(f"patch_copy_failed:{target_relpath}")
+
+            suite_ok, full_passed, full_failed, validation_error = self._run_metadata_test_suite(
+                container=container,
+                container_repo=container_repo,
+                bug_meta=bug_meta,
+                test_ids=test_ids,
+            )
+        finally:
+            self._reset_generic_workspace(container, container_repo)
 
         if validation_error:
             self.last_validation_details = {
@@ -389,6 +398,8 @@ class Defects4CAdapter(SandboxAdapter):
                 "phase_a_base_commit": commit_after,
                 "phase_a_buggy_overlay_commit": commit_before,
                 "phase_a_buggy_overlay_files": list(src_files),
+                "build_compat_patches": list(build_compat_patches),
+                "validation_log_tail": getattr(self, "_last_validation_log_tail", ""),
             }
             return False, [], []
 
@@ -401,6 +412,8 @@ class Defects4CAdapter(SandboxAdapter):
                 "phase_a_base_commit": commit_after,
                 "phase_a_buggy_overlay_commit": commit_before,
                 "phase_a_buggy_overlay_files": list(src_files),
+                "build_compat_patches": list(build_compat_patches),
+                "validation_log_tail": getattr(self, "_last_validation_log_tail", ""),
             }
             return False, [], []
 
@@ -423,6 +436,8 @@ class Defects4CAdapter(SandboxAdapter):
             "phase_a_base_commit": commit_after,
             "phase_a_buggy_overlay_commit": commit_before,
             "phase_a_buggy_overlay_files": list(src_files),
+            "build_compat_patches": list(build_compat_patches),
+            "validation_log_tail": getattr(self, "_last_validation_log_tail", ""),
         }
         print(
             f"    [Defects4C:{bug_meta.get('data_folder', 'metadata')}] full_scope_tests={len(test_ids)} "
@@ -553,6 +568,43 @@ class Defects4CAdapter(SandboxAdapter):
         )
         return result.returncode == 0
 
+    def _apply_known_build_compatibility_patches(
+        self,
+        container: str,
+        container_repo: str,
+        bug_meta: dict,
+    ) -> Optional[list]:
+        """Apply narrow environment fixes needed to build old projects on newer toolchains."""
+        folder = str(bug_meta.get("data_folder") or bug_meta.get("metadata_slug") or "").lower()
+        project = str(bug_meta.get("project") or "").lower()
+        if folder != "php" and "php-src" not in project:
+            return []
+
+        cmd = (
+            f"repo={shlex.quote(container_repo)}; "
+            "if [ \"$(uname -m)\" != \"aarch64\" ]; then exit 0; fi; "
+            "file=\"$repo/Zend/zend_multiply.h\"; "
+            "if [ ! -f \"$file\" ]; then exit 0; fi; "
+            "if grep -q '\"=X\"(__tmpvar), \"=X\"(usedval)' \"$file\" "
+            "&& grep -q '\"X\"(a), \"X\"(b)' \"$file\"; then "
+            "sed -i 's/\"=X\"(__tmpvar), \"=X\"(usedval)/\"=r\"(__tmpvar), \"=r\"(usedval)/; "
+            "s/\"X\"(a), \"X\"(b)/\"r\"(a), \"r\"(b)/' \"$file\"; "
+            "echo php_aarch64_zend_multiply_register_constraints; "
+            "fi"
+        )
+        result = subprocess.run(
+            ["docker", "exec", container, "bash", "-lc", cmd],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode != 0:
+            self._last_validation_log_tail = (result.stderr or result.stdout or "")[-4000:]
+            return None
+        return [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+
     def _restore_known_test_helpers_cmd(self) -> str:
         tcpdump_runner = shlex.quote(TCPDUMP_RUN_ONE_TEST_SH)
         return (
@@ -651,7 +703,7 @@ class Defects4CAdapter(SandboxAdapter):
             lines.extend([
                 f"({test_cmd}) >/tmp/udbg_test.log 2>&1",
                 "rc=$?",
-                f"if [ $rc -eq 0 ]; then echo __UD_PASS__ {marker}; else echo __UD_FAIL__ {marker}; fi",
+                f"if [ $rc -eq 0 ]; then echo __UD_PASS__ {marker}; else echo __UD_FAIL__ {marker}; tail -40 /tmp/udbg_test.log; fi",
             ])
         script = "\n".join(lines)
         result = subprocess.run(
@@ -663,6 +715,9 @@ class Defects4CAdapter(SandboxAdapter):
             encoding="utf-8",
             errors="replace",
             timeout=60 * 40,
+        )
+        self._last_validation_log_tail = "\n".join(
+            (result.stdout or result.stderr or "").splitlines()[-120:]
         )
         passed, failed = [], []
         for line in (result.stdout or "").splitlines():
@@ -677,6 +732,9 @@ class Defects4CAdapter(SandboxAdapter):
             return False, [], [], "compile_failed"
         if result.returncode == 98:
             return False, [], [], "test_helper_missing"
+        completed = len(passed) + len(failed)
+        if completed < len(test_ids):
+            return False, passed, failed, f"metadata_suite_incomplete:{completed}/{len(test_ids)}"
         if result.returncode != 0 and not failed and not passed:
             return False, [], [], "metadata_suite_failed"
         return not failed, passed, failed, ""
@@ -712,11 +770,9 @@ class Defects4CAdapter(SandboxAdapter):
             return False
         cmd = (
             f"helper={shlex.quote(helper)}; "
-            "if [ ! -f \"$helper\" ]; then "
             "mkdir -p \"$(dirname \"$helper\")\" && "
             f"printf %s {shlex.quote(script)} > \"$helper\" && "
-            "chmod +x \"$helper\"; "
-            "fi"
+            "chmod +x \"$helper\""
         )
         result = subprocess.run(
             ["docker", "exec", container, "bash", "-lc", cmd],
@@ -795,7 +851,25 @@ class Defects4CAdapter(SandboxAdapter):
               exit 2
             fi
             cd "$ROOT"
-            exec sapi/cli/php run-tests.php -q -p sapi/cli/php -g FAIL,XFAIL,BORK,WARN,LEAK,SKIP "$TEST_REL"
+            set +e
+            output=$(sapi/cli/php run-tests.php -q -p sapi/cli/php -g FAIL,XFAIL,BORK,WARN,LEAK,SKIP "$TEST_REL" 2>&1)
+            rc=$?
+            set -e
+            printf '%s\n' "$output"
+
+            if printf '%s\n' "$output" | grep -Eq '^(FAIL|BORK|WARN|LEAK)[[:space:]]'; then
+              exit 1
+            fi
+            if printf '%s\n' "$output" | grep -Eq 'Tests failed[[:space:]]*:[[:space:]]*[1-9]'; then
+              exit 1
+            fi
+            if printf '%s\n' "$output" | grep -Eq 'Tests borked[[:space:]]*:[[:space:]]*[1-9]'; then
+              exit 1
+            fi
+            if printf '%s\n' "$output" | grep -Eq 'Tests warned[[:space:]]*:[[:space:]]*[1-9]'; then
+              exit 1
+            fi
+            exit "$rc"
         """).lstrip()
 
     def _collect_defects4c_test_ids(self, project: str, sha: str, bug_meta: Optional[dict] = None) -> list:
@@ -852,12 +926,16 @@ class Defects4CAdapter(SandboxAdapter):
         return out
 
     def _docker_container_running(self, container):
-        result = subprocess.run(
-            ["docker", "inspect", "-f", "{{.State.Running}}", container],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        return result.returncode == 0 and result.stdout.decode().strip() == "true"
+        try:
+            result = subprocess.run(
+                ["docker", "inspect", "-f", "{{.State.Running}}", container],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return False
+        return result.returncode == 0 and result.stdout.decode(errors="replace").strip() == "true"
 
 
 def _compare_output(actual: str, expected: str) -> bool:

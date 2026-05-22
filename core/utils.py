@@ -7,6 +7,7 @@ Tránh duplicate code giữa các module.
 
 import os
 import re
+from functools import lru_cache
 from typing import Any, Dict, Optional, Tuple
 
 try:
@@ -174,6 +175,7 @@ def resolve_fl_candidate_source_path(
     bug_source_path: str,
     file_hint: str,
     raw_meta: Optional[Dict[str, Any]] = None,
+    func_name: str = "",
 ) -> str:
     """
     Map FL key (file phần) sang đường dẫn .c thật để đọc/vá.
@@ -196,8 +198,17 @@ def resolve_fl_candidate_source_path(
     ))
     if defects4c_like:
         relpath = _resolve_defects4c_relpath_from_meta(fh, raw_meta)
+        repo_dir = raw_meta.get("buggy_tree_dir") or raw_meta.get("source_repo_dir") or ""
+        if relpath and func_name and repo_dir and not _relpath_defines_function(repo_dir, relpath, func_name):
+            repo_relpath = _resolve_defects4c_relpath_from_repo(
+                fh,
+                raw_meta,
+                func_name=func_name,
+            )
+            if repo_relpath:
+                relpath = repo_relpath
         if not relpath:
-            relpath = _resolve_defects4c_relpath_from_repo(fh, raw_meta)
+            relpath = _resolve_defects4c_relpath_from_repo(fh, raw_meta, func_name=func_name)
         if not relpath:
             return ""
         cached = _resolve_defects4c_cached_source(bug_source_path, relpath, raw_meta)
@@ -216,6 +227,70 @@ def resolve_fl_candidate_source_path(
     if os.path.isfile(cand):
         return cand
     return bug_source_path
+
+
+def source_function_name_for_extraction(
+    func_name: str,
+    candidate_path: str = "",
+    raw_meta: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Convert a build/coverage symbol to the spelling used in source, when the
+    project has an explicit compatibility macro for that conversion.
+
+    PHP's bundled GD is compiled with symbol-renaming macros from
+    ``main/php_compat.h`` such as:
+
+        #define gdAlphaBlend php_gd_gdAlphaBlend
+
+    gcov reports the preprocessed symbol (right hand side), while source files
+    define the left hand side.  This helper maps only those exact macro pairs.
+    """
+    repo_dir = _source_repo_dir_for_symbol_map(candidate_path, raw_meta)
+    if repo_dir:
+        mapped = _php_compat_compiled_to_source_map(repo_dir).get(func_name)
+        if mapped:
+            return mapped
+    return func_name
+
+
+def _source_repo_dir_for_symbol_map(
+    candidate_path: str = "",
+    raw_meta: Optional[Dict[str, Any]] = None,
+) -> str:
+    if isinstance(raw_meta, dict):
+        for key in ("buggy_tree_dir", "source_repo_dir"):
+            value = raw_meta.get(key)
+            if value and os.path.isdir(value):
+                return value
+    path = candidate_path or ""
+    while path and path != os.path.dirname(path):
+        compat = os.path.join(path, "main", "php_compat.h")
+        if os.path.isfile(compat):
+            return path
+        path = os.path.dirname(path)
+    return ""
+
+
+@lru_cache(maxsize=64)
+def _php_compat_compiled_to_source_map(repo_dir: str) -> Dict[str, str]:
+    compat_path = os.path.join(repo_dir, "main", "php_compat.h")
+    if not os.path.isfile(compat_path):
+        return {}
+    try:
+        with open(compat_path, "r", errors="ignore") as f:
+            text = f.read()
+    except Exception:
+        return {}
+
+    out: Dict[str, str] = {}
+    for match in re.finditer(
+        r'^\s*#\s*define\s+(?P<source>gd[A-Za-z_]\w*)\s+(?P<compiled>php_gd_[A-Za-z_]\w*)\b',
+        text,
+        re.MULTILINE,
+    ):
+        out[match.group("compiled")] = match.group("source")
+    return out
 
 
 def _resolve_defects4c_relpath_from_meta(file_hint: str, raw_meta: Dict[str, Any]) -> str:
@@ -246,7 +321,11 @@ def _resolve_defects4c_relpath_from_meta(file_hint: str, raw_meta: Dict[str, Any
     return candidates[0] if len(candidates) == 1 else ""
 
 
-def _resolve_defects4c_relpath_from_repo(file_hint: str, raw_meta: Dict[str, Any]) -> str:
+def _resolve_defects4c_relpath_from_repo(
+    file_hint: str,
+    raw_meta: Dict[str, Any],
+    func_name: str = "",
+) -> str:
     """Resolve a non-ground-truth Defects4C FL file hint without fallback."""
     if not file_hint or not isinstance(raw_meta, dict):
         return ""
@@ -260,9 +339,20 @@ def _resolve_defects4c_relpath_from_repo(file_hint: str, raw_meta: Dict[str, Any
 
     direct = os.path.join(repo_dir, normalized_hint)
     if "/" in normalized_hint and os.path.isfile(direct):
-        return normalized_hint
+        if not func_name or _relpath_defines_function(repo_dir, normalized_hint, func_name):
+            return normalized_hint
+        relpath = _find_unique_relpath_by_basename(
+            repo_dir,
+            os.path.basename(normalized_hint),
+            func_name=func_name,
+        )
+        return relpath or normalized_hint
 
-    return _find_unique_relpath_by_basename(repo_dir, os.path.basename(normalized_hint))
+    return _find_unique_relpath_by_basename(
+        repo_dir,
+        os.path.basename(normalized_hint),
+        func_name=func_name,
+    )
 
 
 def _resolve_defects4c_cached_source(
@@ -292,7 +382,7 @@ def _resolve_defects4c_cached_source(
     return ""
 
 
-def _find_unique_relpath_by_basename(repo_dir: str, basename: str) -> str:
+def _find_unique_relpath_by_basename(repo_dir: str, basename: str, func_name: str = "") -> str:
     matches = []
     for root, dirs, files in os.walk(repo_dir):
         dirs[:] = [
@@ -305,7 +395,39 @@ def _find_unique_relpath_by_basename(repo_dir: str, basename: str) -> str:
             matches.append(rel)
     if not matches:
         return ""
-    return matches[0] if len(matches) == 1 else ""
+    if len(matches) == 1:
+        return matches[0]
+    if func_name:
+        matches_with_func = [
+            rel for rel in matches
+            if _relpath_defines_function(repo_dir, rel, func_name)
+        ]
+        if len(matches_with_func) == 1:
+            return matches_with_func[0]
+    return ""
+
+
+def _relpath_defines_function(repo_dir: str, relpath: str, func_name: str) -> bool:
+    if not repo_dir or not relpath or not func_name:
+        return False
+    full_path = os.path.join(repo_dir, relpath)
+    if not os.path.isfile(full_path):
+        return False
+    try:
+        with open(full_path, "r", errors="ignore") as f:
+            source = f.read()
+    except Exception:
+        return False
+    language = "cpp" if os.path.splitext(relpath)[1].lower() in {
+        ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"
+    } else "c"
+    source_func_name = source_function_name_for_extraction(
+        func_name,
+        full_path,
+        {"buggy_tree_dir": repo_dir},
+    )
+    func_code, _, _ = extract_function_code(source, source_func_name, language=language)
+    return bool(func_code)
 
 
 def extract_function_code(
@@ -611,6 +733,76 @@ def _function_name_call_pattern(func_name: str) -> str:
     return r'\b' + re.escape(func_name) + r'\s*\('
 
 
+def _php_macro_name_call_patterns(func_name: str):
+    """Return source-level PHP extension macro spellings for generated symbols."""
+    name = _normalize_function_symbol(func_name)
+    patterns = []
+
+    if name.startswith("zif_") and len(name) > 4:
+        php_name = name[4:]
+        macro_names = (
+            "PHP_FUNCTION",
+            "ZEND_FUNCTION",
+            "ZEND_NAMED_FUNCTION",
+            "PHP_NAMED_FUNCTION",
+        )
+        patterns.extend(
+            r'\b' + macro + r'\s*\(\s*' + re.escape(php_name) + r'\s*\)'
+            for macro in macro_names
+        )
+
+    if name.startswith("zim_") and len(name) > 4:
+        rest = name[4:]
+        parts = rest.split("_")
+        for split_at in range(1, len(parts)):
+            class_name = "_".join(parts[:split_at])
+            method_name = "_".join(parts[split_at:])
+            if not class_name or not method_name:
+                continue
+            macro_names = ("PHP_METHOD", "ZEND_METHOD", "SPL_METHOD")
+            patterns.extend(
+                r'\b' + macro + r'\s*\(\s*'
+                + re.escape(class_name)
+                + r'\s*,\s*'
+                + re.escape(method_name)
+                + r'\s*\)'
+                for macro in macro_names
+            )
+
+    if name.startswith("zim_spl_") and len(name) > 8:
+        rest = name[8:]
+        parts = rest.split("_")
+        for split_at in range(1, len(parts)):
+            class_name = "_".join(parts[:split_at])
+            method_name = "_".join(parts[split_at:])
+            if not class_name or not method_name:
+                continue
+            patterns.append(
+                r'\bSPL_METHOD\s*\(\s*'
+                + re.escape(class_name)
+                + r'\s*,\s*'
+                + re.escape(method_name)
+                + r'\s*\)'
+            )
+
+    return [re.compile(pattern) for pattern in patterns]
+
+
+def _looks_like_php_extension_source(source_code: str) -> bool:
+    return any(
+        marker in source_code
+        for marker in (
+            "PHP_FUNCTION",
+            "ZEND_FUNCTION",
+            "PHP_METHOD",
+            "ZEND_METHOD",
+            "SPL_METHOD",
+            "TSRMLS",
+            "zend_",
+        )
+    )
+
+
 def _class_body_ranges(source_code: str, class_name: str):
     if not class_name:
         return []
@@ -638,85 +830,110 @@ def _extract_function_code_regex(
     name_pattern=None,
 ) -> Tuple[Optional[str], int, int]:
     end = len(source_code) if end is None else min(end, len(source_code))
-    pattern = name_pattern or re.compile(_function_name_call_pattern(func_name))
+    if name_pattern is not None:
+        patterns = [name_pattern]
+    else:
+        patterns = [re.compile(_function_name_call_pattern(func_name))]
+        if _looks_like_php_extension_source(source_code):
+            patterns.extend(_php_macro_name_call_patterns(func_name))
 
-    for m in pattern.finditer(source_code, start, end):
-        name_start  = m.start()
-        open_paren  = m.end() - 1
-        if open_paren >= end:
-            continue
-        close_paren = _find_matching_paren(source_code, open_paren)
-        if close_paren < 0 or close_paren >= end:
-            continue
+    for pattern in patterns:
+        for m in pattern.finditer(source_code, start, end):
+            name_start = m.start()
+            open_paren = source_code.find('(', m.start(), m.end())
+            if open_paren < 0:
+                continue
+            if open_paren >= end:
+                continue
+            close_paren = _find_matching_paren(source_code, open_paren)
+            if close_paren < 0 or close_paren >= end:
+                continue
 
-        i = close_paren + 1
-        n = end
-        # Bỏ qua whitespace, newline, comment, và attribute specifier
-        # trước khi gặp '{' mở hàm (GCC: __attribute__((...)), const, throw(),...).
-        while i < n:
-            c = source_code[i]
-            if c.isspace():
-                i += 1
-                continue
-            if c == '/' and i + 1 < n and source_code[i + 1] == '/':
-                nl = source_code.find('\n', i)
-                if nl < 0:
-                    i = n
-                    break
-                i = nl + 1
-                continue
-            if c == '/' and i + 1 < n and source_code[i + 1] == '*':
-                end = source_code.find('*/', i + 2)
-                if end < 0:
-                    i = n
-                    break
-                i = end + 2
-                continue
-            # __attribute__((...)) hoặc const/throw()... – nhảy qua token + paren
-            if c.isalpha() or c == '_':
-                j = i
-                while j < n and (source_code[j].isalnum() or source_code[j] == '_'):
-                    j += 1
-                # Nếu token này là 'return' hoặc keyword khác, có nghĩa không phải def
-                if source_code[i:j] in ("return", "sizeof", "if", "while", "for", "switch"):
-                    break
-                # Nhảy qua whitespace, nếu có '(' kế tiếp thì skip paren group
-                k = j
-                while k < n and source_code[k].isspace():
-                    k += 1
-                if k < n and source_code[k] == '(':
-                    end_paren = _find_matching_paren(source_code, k)
-                    if end_paren < 0:
-                        break
-                    i = end_paren + 1
+            i = close_paren + 1
+            n = end
+            # Bỏ qua whitespace, newline, comment, và attribute specifier
+            # trước khi gặp '{' mở hàm (GCC: __attribute__((...)), const, throw(),...).
+            while i < n:
+                c = source_code[i]
+                if c.isspace():
+                    i += 1
                     continue
-                i = j
+                if c == '/' and i + 1 < n and source_code[i + 1] == '/':
+                    nl = source_code.find('\n', i)
+                    if nl < 0:
+                        i = n
+                        break
+                    i = nl + 1
+                    continue
+                if c == '/' and i + 1 < n and source_code[i + 1] == '*':
+                    comment_end = source_code.find('*/', i + 2)
+                    if comment_end < 0:
+                        i = n
+                        break
+                    i = comment_end + 2
+                    continue
+                if c == '#' and _at_line_start_after_ws(source_code, i):
+                    nl = source_code.find('\n', i)
+                    if nl < 0:
+                        i = n
+                        break
+                    i = nl + 1
+                    continue
+                # __attribute__((...)) hoặc const/throw()... – nhảy qua token + paren
+                if c.isalpha() or c == '_':
+                    j = i
+                    while j < n and (source_code[j].isalnum() or source_code[j] == '_'):
+                        j += 1
+                    # Nếu token này là 'return' hoặc keyword khác, có nghĩa không phải def
+                    if source_code[i:j] in ("return", "sizeof", "if", "while", "for", "switch"):
+                        break
+                    # Nhảy qua whitespace, nếu có '(' kế tiếp thì skip paren group
+                    k = j
+                    while k < n and source_code[k].isspace():
+                        k += 1
+                    if k < n and source_code[k] == '(':
+                        end_paren = _find_matching_paren(source_code, k)
+                        if end_paren < 0:
+                            break
+                        i = end_paren + 1
+                        continue
+                    i = j
+                    continue
+                if c == ':':
+                    body_open = _find_cpp_ctor_body_open(source_code, i)
+                    if body_open >= 0:
+                        i = body_open
+                    break
+                if c == '-' and i + 1 < n and source_code[i + 1] == '>':
+                    body_open = _find_cpp_trailing_return_body_open(source_code, i + 2, n)
+                    if body_open >= 0:
+                        i = body_open
+                    break
+                break
+
+            if i >= n or source_code[i] != '{':
                 continue
-            if c == ':':
-                body_open = _find_cpp_ctor_body_open(source_code, i)
-                if body_open >= 0:
-                    i = body_open
-                break
-            if c == '-' and i + 1 < n and source_code[i + 1] == '>':
-                body_open = _find_cpp_trailing_return_body_open(source_code, i + 2, n)
-                if body_open >= 0:
-                    i = body_open
-                break
-            break
 
-        if i >= n or source_code[i] != '{':
-            continue
+            start_idx = _find_function_def_start(source_code, name_start)
+            end_idx = _find_matching_brace(source_code, i)
+            if end_idx < 0 or end_idx > end:
+                end_idx = _find_php_fold_marker_function_end(source_code, i, end)
+            if end_idx < 0 or end_idx > end:
+                continue
 
-        start_idx = _find_function_def_start(source_code, name_start)
-        end_idx   = _find_matching_brace(source_code, i)
-        if end_idx < 0 or end_idx > end:
-            continue
-
-        start_byte = len(source_code[:start_idx].encode("utf-8"))
-        end_byte = len(source_code[:end_idx].encode("utf-8"))
-        return source_code[start_idx:end_idx], start_byte, end_byte
+            start_byte = len(source_code[:start_idx].encode("utf-8"))
+            end_byte = len(source_code[:end_idx].encode("utf-8"))
+            return source_code[start_idx:end_idx], start_byte, end_byte
 
     return None, -1, -1
+
+
+def _find_php_fold_marker_function_end(source_code: str, body_open: int, end: int) -> int:
+    """Fallback for PHP extension files where preprocessor branches confuse braces."""
+    match = re.search(r'\n}\s*/\*\s*}}}', source_code[body_open:end])
+    if not match:
+        return -1
+    return body_open + match.start() + 2
 
 
 def _find_cpp_ctor_body_open(source: str, colon_pos: int) -> int:
@@ -810,7 +1027,7 @@ def _find_function_def_start(source: str, name_pos: int) -> int:
         stripped = source[prev_line_start:prev_line_end].strip()
         if not stripped:
             break
-        if stripped.startswith('#'):
+        if stripped.startswith('#') and not _is_signature_preprocessor_line(stripped):
             break
         if stripped in ("public:", "private:", "protected:"):
             break
@@ -818,6 +1035,15 @@ def _find_function_def_start(source: str, name_pos: int) -> int:
             break
         line_start = prev_line_start
     return line_start
+
+
+def _is_signature_preprocessor_line(stripped_line: str) -> bool:
+    return bool(re.match(r'^#\s*(if|ifdef|ifndef|elif|else|endif)\b', stripped_line))
+
+
+def _at_line_start_after_ws(source: str, pos: int) -> bool:
+    line_start = source.rfind('\n', 0, pos) + 1
+    return not source[line_start:pos].strip()
 
 
 def _find_matching_paren(source: str, open_pos: int) -> int:

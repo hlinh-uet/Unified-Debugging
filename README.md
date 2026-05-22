@@ -169,10 +169,19 @@ python3 main.py --eval --dataset php
 | `--dataset`     | Tên dataset: `codeflaws`, `defects4c`, hoặc folder Defects4C như `tcpdump`, `php`, `cjson` |
 | `--fl`          | Chỉ chạy Fault Localization                        |
 | `--apr`         | Chỉ chạy APR với LLM; cần kết quả FL trước đó      |
+| `--apr-validate` | Chỉ validate lại patch artifact đã lưu, không gọi LLM |
+| `--bug-id`      | Giới hạn một bug khi dùng `--apr-validate`, ví dụ `CVE-2018-7584` |
 | `--eval`        | Chỉ chạy Evaluation (FL + APR), lọc theo dataset   |
 | `--all`         | Chạy FL → APR LLM → Evaluation                     |
 | `--fl-eval-level` | Chọn file FL để tính Top-K: `combined`, `function`, `file`, `class`, hoặc `all` |
 | `--llm`         | Provider APR: `openai` hoặc `openrouter` |
+
+Ví dụ validate lại patch đã sinh mà không tốn LLM:
+
+```bash
+python3 main.py --apr-validate --dataset php
+python3 main.py --apr-validate --dataset php --bug-id CVE-2018-7584
+```
 
 ### Kết quả APR
 

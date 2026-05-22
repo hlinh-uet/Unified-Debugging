@@ -14,6 +14,7 @@ from core.fault_localization import (
     _extract_file_from_key,
 )
 from core.apr_baseline import run_apr_pipeline
+from core.apr.revalidate import run_apr_validation_only
 from evaluation.eval_fl import evaluate_fl
 from evaluation.eval_apr import evaluate_apr
 from configs.path import EXPERIMENTS_DIR
@@ -197,8 +198,10 @@ def main():
     )
     parser.add_argument("--fl",           action="store_true", help="Chỉ chạy Fault Localization (Tarantula)")
     parser.add_argument("--apr",          action="store_true", help="Chỉ chạy APR với LLM")
+    parser.add_argument("--apr-validate", action="store_true", help="Chỉ validate lại các patch LLM đã lưu, không gọi LLM")
     parser.add_argument("--eval",         action="store_true", help="Chỉ chạy Evaluation")
     parser.add_argument("--all",          action="store_true", help="Chạy toàn bộ: FL → APR → Evaluation")
+    parser.add_argument("--bug-id",       default=None, help="Chỉ chạy trên một bug cụ thể, ví dụ CVE-2018-7584")
     parser.add_argument(
         "--fl-eval-level",
         default="combined",
@@ -225,7 +228,7 @@ def main():
     fl_eval_level = args.fl_eval_level
 
     # Nếu không truyền flag nào thì mặc định chạy toàn bộ
-    run_all = args.all or (not args.fl and not args.apr and not args.eval)
+    run_all = args.all or (not args.fl and not args.apr and not args.apr_validate and not args.eval)
 
     if run_all:
         print(f"[Pipeline] Chạy toàn bộ quy trình trên dataset '{dataset}' (FL → APR LLM → Evaluation)...")
@@ -242,6 +245,11 @@ def main():
         if args.apr:
             print(f"[Pipeline] Chạy APR (LLM: {llm_provider or 'default'}) trên dataset '{dataset}'...")
             run_apr_pipeline(dataset, llm_provider=llm_provider)
+            evaluate_apr(dataset)
+
+        if args.apr_validate:
+            print(f"[Pipeline] Validate lại APR artifacts trên dataset '{dataset}'...")
+            run_apr_validation_only(dataset, bug_id=args.bug_id)
             evaluate_apr(dataset)
 
         if args.eval:

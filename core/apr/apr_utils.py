@@ -2,11 +2,7 @@ import os
 import re
 from typing import Optional
 
-from data_loaders.base_loader import BugRecord
-
 from core.apr.config import (
-    APR_MAX_FAILURE_SIGNAL_LINE_CHARS,
-    APR_MAX_FAILURE_SIGNAL_LINES,
     APR_MAX_LOCAL_HEADER_CONTEXT_CHARS,
     APR_MAX_SOURCE_CHARS,
     APR_MAX_TEST_ID_STORE,
@@ -144,62 +140,6 @@ def dedup_initial_test_ids(tests):
     failed = [tid for tid in order if status_by_id.get(tid) == "FAIL"]
     passed = [tid for tid in order if status_by_id.get(tid) == "PASS"]
     return passed, failed
-
-
-def failure_signal_lines(text: object) -> list:
-    """Extract concise failure lines from actual output for APR prompt evidence."""
-    if not text:
-        return []
-
-    signal = re.compile(
-        r"FAIL|FAILED|ERROR|Failure|Actual|Expected|AddressSanitizer|"
-        r"SUMMARY|Segmentation|Assertion|assert|overflow|underflow|invalid|"
-        r"not a directory|permission|crash|fatal|warning|SEGV|SIGSEGV|"
-        r"NULL|null|heap|stack|use-after-free|buffer",
-        re.IGNORECASE,
-    )
-    lines = []
-    for line in str(text).splitlines():
-        line = line.strip()
-        if not line or not signal.search(line):
-            continue
-        if len(line) > APR_MAX_FAILURE_SIGNAL_LINE_CHARS:
-            line = line[:APR_MAX_FAILURE_SIGNAL_LINE_CHARS].rstrip() + "..."
-        lines.append(line)
-        if len(lines) >= APR_MAX_FAILURE_SIGNAL_LINES:
-            break
-    return lines
-
-
-def build_failed_test_context(bug: BugRecord) -> str:
-    """Summarize failed tests from BugRecord without reading extra metadata files."""
-    seen = set()
-    failed_tests = []
-    for test in bug.tests:
-        tid = str(test.get("test_id") or "").strip()
-        if not tid or tid in seen:
-            continue
-        if str(test.get("outcome") or "").upper() in ("FAIL", "FAILED"):
-            failed_tests.append(test)
-            seen.add(tid)
-    if not failed_tests:
-        return "FAILED TESTS AND RUNTIME SIGNALS\nNo failed test details are available in metadata.\n"
-
-    lines = [
-        "FAILED TESTS AND RUNTIME SIGNALS",
-    ]
-    for idx, tc in enumerate(failed_tests, start=1):
-        tc_name = str(tc.get("test_id") or "Unknown").strip()
-        tc_reason = str(tc.get("fail_reason") or "Unknown").strip()
-        lines.append(f"{idx}. test_id: {tc_name}")
-        lines.append(f"   fail_reason: {tc_reason}")
-        signal_lines = failure_signal_lines(tc.get("actual_output", ""))
-        if signal_lines:
-            lines.append("   actual_output_signal_lines:")
-            for signal_line in signal_lines:
-                lines.append(f"   - {signal_line}")
-
-    return "\n".join(lines) + "\n"
 
 
 def failed_candidate_result(

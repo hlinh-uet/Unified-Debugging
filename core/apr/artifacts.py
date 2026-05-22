@@ -96,6 +96,7 @@ def write_llm_patch_artifact(
     patched_file: Optional[str] = None,
     status: str = "generated",
     validation_error: str = "",
+    fail_context_agent_artifact: Optional[dict] = None,
     retrieval_context_agent_artifact: Optional[dict] = None,
     fix_agent_artifact: Optional[dict] = None,
 ) -> dict:
@@ -127,6 +128,7 @@ def write_llm_patch_artifact(
         "patched_function_path": rel_experiment_path(function_path),
         "patched_file_path": "",
         "metadata_path": rel_experiment_path(metadata_path),
+        "fail_context_agent_artifact": fail_context_agent_artifact or {},
         "retrieval_context_agent_artifact": retrieval_context_agent_artifact or {},
         "fix_agent_artifact": fix_agent_artifact or {},
     }

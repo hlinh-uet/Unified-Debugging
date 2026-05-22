@@ -4,9 +4,8 @@ import shutil
 from typing import Optional
 
 from configs.path import EXPERIMENTS_DIR, PATCHES_DIR
-from core.apr.agent import run_fix_agent, run_retrieval_context_agent
+from core.apr.agent import run_fail_context_agent, run_fix_agent, run_retrieval_context_agent
 from core.apr.apr_utils import (
-    build_failed_test_context,
     build_local_header_context,
     candidate_relpath_from_buggy_tree,
     compact_test_list,
@@ -25,6 +24,7 @@ from core.utils import (
     parse_sbfl_qualified_name,
     replace_source_range_bytes,
     resolve_fl_candidate_source_path,
+    source_function_name_for_extraction,
 )
 from data_loaders.base_loader import get_loader
 from data_loaders.sandbox_adapter import defects4c_docker_ready, get_sandbox_adapter
@@ -138,7 +138,14 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
         raw_meta = bug_record.raw if bug_record else None
         source_cache: dict = {}
 
-        failed_tests_context = build_failed_test_context(bug_record) if bug_record else ""
+        failed_tests_context, fail_context_agent_artifact = run_fail_context_agent(
+            bug=bug_record,
+            bug_id=bug_id,
+            llm_provider=llm_provider,
+        )
+        if not failed_tests_context:
+            print(f"    [ERROR] FailContextAgent trả về None. Bỏ qua bug {bug_id}.")
+            continue
         init_passed_all, init_failed_all = dedup_initial_test_ids(
             bug_record.tests if bug_record else []
         )
@@ -171,7 +178,7 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
                 continue
 
             candidate_path = resolve_fl_candidate_source_path(
-                dataset, bug_source_path, file_hint or "", raw_meta
+                dataset, bug_source_path, file_hint or "", raw_meta, func_name=func_name
             )
             if not os.path.isfile(candidate_path):
                 print(
@@ -188,9 +195,16 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
 
             print(f"  - Kiểm tra hàm '{func_name}' trong {cand_label} (Score: {score:.4f})")
             source_language = source_language_from_path(candidate_path)
+            source_func_name = source_function_name_for_extraction(
+                func_name,
+                candidate_path,
+                raw_meta,
+            )
+            if source_func_name != func_name:
+                print(f"    [MAP] Symbol build '{func_name}' -> source '{source_func_name}'")
             func_code, start_idx, end_idx = extract_function_code(
                 source_code,
-                func_name,
+                source_func_name,
                 language=source_language,
             )
             if not func_code:
@@ -209,7 +223,7 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
                 qualified_name=qualified_name,
                 candidate_relpath=candidate_relpath,
                 llm_provider=llm_provider,
-                func_name=func_name,
+                func_name=source_func_name,
                 cand_label=cand_label,
                 func_code=func_code,
                 local_header_context=local_header_context,
@@ -225,7 +239,7 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
                 qualified_name=qualified_name,
                 candidate_relpath=candidate_relpath,
                 llm_provider=llm_provider,
-                func_name=func_name,
+                func_name=source_func_name,
                 cand_label=cand_label,
                 func_code=func_code,
                 retrieval_context=retrieval_context,
@@ -242,7 +256,7 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
                 candidate_patched_func = ""
             reparsed_func, _, _ = extract_function_code(
                 candidate_patched_func,
-                func_name,
+                source_func_name,
                 language=source_language,
             )
             if not reparsed_func:
@@ -257,6 +271,7 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
                     patched_function=candidate_patched_func,
                     status="malformed_function",
                     validation_error="malformed_function",
+                    fail_context_agent_artifact=fail_context_agent_artifact,
                     retrieval_context_agent_artifact=retrieval_context_agent_artifact,
                     fix_agent_artifact=fix_agent_artifact,
                 )
@@ -296,6 +311,7 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
                     patched_file=candidate_patched_source,
                     status="no_op",
                     validation_error="no_op",
+                    fail_context_agent_artifact=fail_context_agent_artifact,
                     retrieval_context_agent_artifact=retrieval_context_agent_artifact,
                     fix_agent_artifact=fix_agent_artifact,
                 )
@@ -379,6 +395,7 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
                 patched_file=candidate_patched_source,
                 status=candidate_result["status"],
                 validation_error=validation_error,
+                fail_context_agent_artifact=fail_context_agent_artifact,
                 retrieval_context_agent_artifact=retrieval_context_agent_artifact,
                 fix_agent_artifact=fix_agent_artifact,
             )
@@ -476,6 +493,7 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
             "fixed_fail_excluded_count": len(fixed_fail_excluded),
             "fixed_fail_excluded_tests": list(fixed_fail_excluded),
             "validation_error": validation_error,
+            "validation_details": validation_details,
         }
 
         with open(apr_results_file, "w") as f:
