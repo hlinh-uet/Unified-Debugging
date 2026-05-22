@@ -19,7 +19,7 @@
         │                             │
 ┌───────▼──────┐        ┌─────────────▼──────────────────────────┐
 │  core/        │        │  core/                                 │
-│ fault_localization │    │  apr_baseline.py  (LLM – Gemini)       │
+│ fault_localization │    │  apr/ + apr_baseline.py wrapper        │
 │  .py          │        │                                      │
 └───────┬──────┘        │                                      │
         │                └─────────────┬──────────────────────────┘
@@ -191,14 +191,14 @@ Ba APR engine đều lưu vào JSON kết quả các trường:
 - `patched_file` – toàn bộ nội dung file sau khi vá (file-level)
 - Cả hai trường được lưu **kể cả khi không thành công** (status ≠ success), để evaluation file-level luôn có dữ liệu.
 
-### 4.1 APR bằng LLM (`core/apr_baseline.py`)
+### 4.1 APR bằng LLM (`core/apr/`, wrapper `core/apr_baseline.py`)
 
 ```
 Với mỗi bug:
   1. Lấy danh sách hàm nghi ngờ từ fault_localization_results.json (sắp xếp giảm dần)
- 2. extract_function_code() → trích xuất mã nguồn hàm (từ core/utils.py)
-  3. Xây dựng prompt với context test FAIL từ BugRecord.tests
-  4. Gọi call_llm() → Gemini sinh bản vá
+  2. extract_function_code() → trích xuất mã nguồn hàm (từ core/utils.py)
+  3. RetrievalContextAgent đọc target function + failure evidence + source context để sinh retrieval context ngắn gọn
+  4. FixAgent dùng target function + failure evidence + retrieval context để sinh đúng một fixed C/C++ function
   5. Ghép patched_function vào source gốc → patched_source (= patched_file)
   6. SandboxAdapter.validate() → compile + chạy test
   7. Nếu pass 100%: lưu vào experiments/patches/<bug_id>_patch.c
