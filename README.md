@@ -128,10 +128,17 @@ Tất cả lệnh chạy từ thư mục `Unified-Debugging/`.
 ### Chạy toàn bộ pipeline
 
 ```bash
-python3 main.py                          # mặc định: dataset=codeflaws
 python3 main.py --all --dataset codeflaws
 python3 main.py --all --dataset tcpdump --llm openrouter
 ```
+
+Không truyền mode sẽ không tự chạy pipeline. Hãy chọn rõ một trong các mode
+`--fl`, `--apr`, `--apr-validate`, `--eval`, hoặc `--all`.
+
+Mặc định, các mode FL/APR/APR-validate/all đều loại khỏi quy trình những test có
+`outcome=FAIL` và `outcome_fixed=FAIL`, vì đây là các test mà bản fixed nền cũng
+không pass. Nếu cần chạy theo hành vi cũ để so sánh, thêm
+`--include-fixed-fail-tests`.
 
 ### Chạy từng bước
 
@@ -173,6 +180,7 @@ python3 main.py --eval --dataset php
 | `--bug-id`      | Giới hạn một bug khi dùng `--apr-validate`, ví dụ `CVE-2018-7584` |
 | `--eval`        | Chỉ chạy Evaluation (FL + APR), lọc theo dataset   |
 | `--all`         | Chạy FL → APR LLM → Evaluation                     |
+| `--include-fixed-fail-tests` | Không loại test có `outcome=FAIL` và `outcome_fixed=FAIL`; mặc định các test này bị loại khỏi FL/APR/validation |
 | `--fl-eval-level` | Chọn file FL để tính Top-K: `combined`, `function`, `file`, `class`, hoặc `all` |
 | `--llm`         | Provider APR: `openai` hoặc `openrouter` |
 

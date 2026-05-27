@@ -58,7 +58,8 @@ class SandboxAdapter:
         """Trả về đường dẫn tuyệt đối đến file mã nguồn đang chứa lỗi"""
         raise NotImplementedError("Phải trả về đường dẫn tuyệt đối đến file mã nguồn cần sửa")
 
-    def validate(self, patched_file_path, src_basename=None, src_relpath=None):
+    def validate(self, patched_file_path, src_basename=None, src_relpath=None,
+                 exclude_fixed_fail_tests=True):
         """
         Nhận vào đường dẫn file tạm đã được vá:
         1. Backup file gốc.
@@ -124,7 +125,8 @@ class CodeflawsAdapter(SandboxAdapter):
 
         return test_cases
 
-    def validate(self, patched_file_path, src_basename=None, src_relpath=None):
+    def validate(self, patched_file_path, src_basename=None, src_relpath=None,
+                 exclude_fixed_fail_tests=True):
         self.last_validation_details = {}
         # Codeflaws chỉ có 1 file .c cho mỗi bug → bỏ qua src_basename.
         bug_dir = os.path.join(CODEFLAWS_SOURCE_DIR, self.bug_id)
@@ -280,7 +282,8 @@ class Defects4CAdapter(SandboxAdapter):
     def get_source_path(self):
         return get_defects4c_source_path(self.bug_id, data_folder=self.data_folder)
 
-    def validate(self, patched_file_path, src_basename=None, src_relpath=None):
+    def validate(self, patched_file_path, src_basename=None, src_relpath=None,
+                 exclude_fixed_fail_tests=True):
         self.last_validation_details = {}
         raw = get_defects4c_raw_record(self.bug_id, data_folder=self.data_folder)
         if not raw:
@@ -298,7 +301,12 @@ class Defects4CAdapter(SandboxAdapter):
         if not sha:
             return self._validation_error_result("missing_commit_after")
 
-        test_ids = self._collect_defects4c_test_ids(project, sha, bug_meta)
+        test_ids = self._collect_defects4c_test_ids(
+            project,
+            sha,
+            bug_meta,
+            exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+        )
         try:
             with open(patched_file_path, "rb") as f:
                 content = f.read()
@@ -323,6 +331,7 @@ class Defects4CAdapter(SandboxAdapter):
             commit_after=sha,
             commit_before=commit_before,
             test_ids=test_ids,
+            exclude_fixed_fail_tests=exclude_fixed_fail_tests,
         )
 
     def _validate_metadata_patch(
@@ -335,6 +344,7 @@ class Defects4CAdapter(SandboxAdapter):
         commit_after: str,
         commit_before: str,
         test_ids: list,
+        exclude_fixed_fail_tests: bool = True,
     ):
         host_repo = bug_meta.get("source_repo_dir") or ""
         container_repo = bug_meta.get("container_repo_dir") or ""
@@ -432,6 +442,8 @@ class Defects4CAdapter(SandboxAdapter):
             "patch_comparison_post_passed_tests": list(effective_passed),
             "patch_comparison_post_failed_tests": list(effective_failed),
             "fixed_fail_excluded_tests": sorted(fixed_fail_excluded),
+            "exclude_fixed_fail_tests_from_run": exclude_fixed_fail_tests,
+            "validation_test_count": len(test_ids),
             "phase_a_suite_ok": suite_ok,
             "phase_a_base_commit": commit_after,
             "phase_a_buggy_overlay_commit": commit_before,
@@ -872,8 +884,17 @@ class Defects4CAdapter(SandboxAdapter):
             exit "$rc"
         """).lstrip()
 
-    def _collect_defects4c_test_ids(self, project: str, sha: str, bug_meta: Optional[dict] = None) -> list:
-        metadata_ids = self._metadata_test_ids_from_bug_meta(bug_meta or {})
+    def _collect_defects4c_test_ids(
+        self,
+        project: str,
+        sha: str,
+        bug_meta: Optional[dict] = None,
+        exclude_fixed_fail_tests: bool = True,
+    ) -> list:
+        metadata_ids = self._metadata_test_ids_from_bug_meta(
+            bug_meta or {},
+            exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+        )
         if metadata_ids:
             return metadata_ids
 
@@ -903,12 +924,21 @@ class Defects4CAdapter(SandboxAdapter):
             return []
         return ids
 
-    def _metadata_test_ids_from_bug_meta(self, bug_meta: dict) -> list:
+    def _metadata_test_ids_from_bug_meta(
+        self,
+        bug_meta: dict,
+        exclude_fixed_fail_tests: bool = True,
+    ) -> list:
         tests = bug_meta.get("tests", []) if isinstance(bug_meta, dict) else []
         out = []
         for test in tests:
             if not isinstance(test, dict):
                 continue
+            if exclude_fixed_fail_tests:
+                outcome = str(test.get("outcome") or "").upper()
+                outcome_fixed = str(test.get("outcome_fixed") or "").upper()
+                if outcome in ("FAIL", "FAILED") and outcome_fixed in ("FAIL", "FAILED"):
+                    continue
             tid = str(test.get("test_id", "")).strip()
             if tid:
                 out.append(tid)

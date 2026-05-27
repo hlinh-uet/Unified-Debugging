@@ -15,6 +15,10 @@ from core.fault_localization import (
 )
 from core.apr_baseline import run_apr_pipeline
 from core.apr.revalidate import run_apr_validation_only
+from core.test_filtering import (
+    filtered_bug_record_for_pipeline,
+    has_failed_tests,
+)
 from evaluation.eval_fl import evaluate_fl
 from evaluation.eval_apr import evaluate_apr
 from configs.path import EXPERIMENTS_DIR
@@ -46,7 +50,7 @@ def _extract_class_from_gt(gt_key):
     return _extract_class_from_key(gt_key)
 
 
-def run_fl(dataset: str = "codeflaws"):
+def run_fl(dataset: str = "codeflaws", exclude_fixed_fail_tests: bool = True):
     """
     Bước 1 – Fault Localization (Tarantula).
     Tính điểm Tarantula ở 3 mức rồi rerank bằng IR metadata:
@@ -75,46 +79,68 @@ def run_fl(dataset: str = "codeflaws"):
     class_results = {}
     combined_results = {}
 
+    total_excluded_fixed_fail = 0
+
     for bug in bugs:
         print(f"[FL] Tính điểm Tarantula cho {bug.bug_id}...")
-
-        # --- Raw Tarantula scores ---
-        tarantula_func_scores = calculate_fault_localization(bug.tests)
-        tarantula_file_scores = calculate_fault_localization_file_level(bug.tests)
-        tarantula_class_scores = calculate_fault_localization_class_level(bug.tests)
-
-        functions_by_file = {}
-        functions_by_class = {}
-        for func_key in tarantula_func_scores:
-            file_key = _extract_file_from_key(func_key)
-            functions_by_file.setdefault(file_key, []).append(func_key)
-
-            class_key = _extract_class_from_key(func_key)
-            if class_key:
-                functions_by_class.setdefault(class_key, []).append(func_key)
-
-        # --- 1. File-level: Tarantula file → IR reranker → file_score ---
-        file_scores = calculate_ir_reranked_file_scores(
-            bug.tests,
-            tarantula_file_scores,
-            functions_by_file=functions_by_file,
+        bug_for_fl, excluded_fixed_fail = filtered_bug_record_for_pipeline(
+            bug,
+            exclude_fixed_fail_tests=exclude_fixed_fail_tests,
         )
+        total_excluded_fixed_fail += len(excluded_fixed_fail)
+        if excluded_fixed_fail:
+            print(
+                f"    [FL] Loại {len(excluded_fixed_fail)} test buggy+fixed đều FAIL "
+                "khỏi FL."
+            )
 
-        # --- 2. Class-level: Tarantula class + file_score → IR reranker → class_score ---
-        class_scores = calculate_ir_reranked_class_scores(
-            bug.tests,
-            tarantula_class_scores,
-            file_scores,
-            functions_by_class=functions_by_class,
-        )
+        tests_for_fl = bug_for_fl.tests
+        if exclude_fixed_fail_tests and not has_failed_tests(tests_for_fl):
+            print("    [FL] Không còn failed test actionable sau khi lọc; ghi score rỗng.")
+            tarantula_func_scores = {}
+            tarantula_file_scores = {}
+            tarantula_class_scores = {}
+            file_scores = {}
+            class_scores = {}
+            func_scores = {}
+        else:
+            # --- Raw Tarantula scores ---
+            tarantula_func_scores = calculate_fault_localization(tests_for_fl)
+            tarantula_file_scores = calculate_fault_localization_file_level(tests_for_fl)
+            tarantula_class_scores = calculate_fault_localization_class_level(tests_for_fl)
 
-        # --- 3. Function-level: Tarantula function + class/file score → IR reranker ---
-        func_scores = calculate_ir_reranked_function_scores(
-            bug.tests,
-            tarantula_func_scores,
-            class_scores,
-            file_scores,
-        )
+            functions_by_file = {}
+            functions_by_class = {}
+            for func_key in tarantula_func_scores:
+                file_key = _extract_file_from_key(func_key)
+                functions_by_file.setdefault(file_key, []).append(func_key)
+
+                class_key = _extract_class_from_key(func_key)
+                if class_key:
+                    functions_by_class.setdefault(class_key, []).append(func_key)
+
+            # --- 1. File-level: Tarantula file → IR reranker → file_score ---
+            file_scores = calculate_ir_reranked_file_scores(
+                tests_for_fl,
+                tarantula_file_scores,
+                functions_by_file=functions_by_file,
+            )
+
+            # --- 2. Class-level: Tarantula class + file_score → IR reranker → class_score ---
+            class_scores = calculate_ir_reranked_class_scores(
+                tests_for_fl,
+                tarantula_class_scores,
+                file_scores,
+                functions_by_class=functions_by_class,
+            )
+
+            # --- 3. Function-level: Tarantula function + class/file score → IR reranker ---
+            func_scores = calculate_ir_reranked_function_scores(
+                tests_for_fl,
+                tarantula_func_scores,
+                class_scores,
+                file_scores,
+            )
 
         # --- Ground truth cho file-level / class-level ---
         gt_functions = bug.ground_truth  # list[str], ví dụ: ["file.c:func"]
@@ -124,6 +150,12 @@ def run_fl(dataset: str = "codeflaws"):
         )
 
         # Lưu function-level
+        test_filter_info = {
+            "exclude_fixed_fail_tests": exclude_fixed_fail_tests,
+            "excluded_fixed_fail_count": len(excluded_fixed_fail),
+            "excluded_fixed_fail_tests": list(excluded_fixed_fail),
+        }
+
         func_results[bug.bug_id] = {
             "dataset":      dataset,
             "formula":      "tarantula",
@@ -131,6 +163,7 @@ def run_fl(dataset: str = "codeflaws"):
             "scores":       func_scores,
             "tarantula_scores": tarantula_func_scores,
             "ground_truth": gt_functions,
+            "test_filter":  test_filter_info,
         }
 
         # Lưu file-level
@@ -141,6 +174,7 @@ def run_fl(dataset: str = "codeflaws"):
             "scores":       file_scores,
             "tarantula_scores": tarantula_file_scores,
             "ground_truth": gt_files,
+            "test_filter":  test_filter_info,
         }
 
         # Lưu class-level
@@ -151,6 +185,7 @@ def run_fl(dataset: str = "codeflaws"):
             "scores":       class_scores,
             "tarantula_scores": tarantula_class_scores,
             "ground_truth": gt_classes,
+            "test_filter":  test_filter_info,
         }
 
         # Final FL score chính là function score sau pipeline 3 mức.
@@ -163,7 +198,11 @@ def run_fl(dataset: str = "codeflaws"):
             "scores":       combined_scores,
             "tarantula_scores": tarantula_func_scores,
             "ground_truth": gt_functions,
+            "test_filter":  test_filter_info,
         }
+
+    if exclude_fixed_fail_tests:
+        print(f"[FL] Đã loại tổng cộng {total_excluded_fixed_fail} test buggy+fixed đều FAIL.")
 
     # --- Ghi file function-level ---
     func_file = os.path.join(EXPERIMENTS_DIR, "fault_localization_function_results.json")
@@ -203,6 +242,14 @@ def main():
     parser.add_argument("--all",          action="store_true", help="Chạy toàn bộ: FL → APR → Evaluation")
     parser.add_argument("--bug-id",       default=None, help="Chỉ chạy trên một bug cụ thể, ví dụ CVE-2018-7584")
     parser.add_argument(
+        "--include-fixed-fail-tests",
+        action="store_true",
+        help=(
+            "Không loại các test có outcome=FAIL và outcome_fixed=FAIL. "
+            "Mặc định FL/APR sẽ loại các test này."
+        ),
+    )
+    parser.add_argument(
         "--fl-eval-level",
         default="combined",
         choices=["combined", "function", "file", "class", "all"],
@@ -226,30 +273,45 @@ def main():
     dataset      = args.dataset
     llm_provider = args.llm   # None → đọc từ LLM_PROVIDER trong .env
     fl_eval_level = args.fl_eval_level
+    exclude_fixed_fail_tests = not args.include_fixed_fail_tests
 
-    # Nếu không truyền flag nào thì mặc định chạy toàn bộ
-    run_all = args.all or (not args.fl and not args.apr and not args.apr_validate and not args.eval)
+    if not (args.all or args.fl or args.apr or args.apr_validate or args.eval):
+        parser.error("Hãy chọn một mode: --fl, --apr, --apr-validate, --eval, hoặc --all.")
+
+    run_all = args.all
 
     if run_all:
         print(f"[Pipeline] Chạy toàn bộ quy trình trên dataset '{dataset}' (FL → APR LLM → Evaluation)...")
-        run_fl(dataset)
-        run_apr_pipeline(dataset, llm_provider=llm_provider)
+        run_fl(dataset, exclude_fixed_fail_tests=exclude_fixed_fail_tests)
+        run_apr_pipeline(
+            dataset,
+            llm_provider=llm_provider,
+            exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+        )
         evaluate_fl(dataset, level=fl_eval_level)
         evaluate_apr(dataset)
     else:
         if args.fl:
             print(f"[Pipeline] Chạy Fault Localization trên dataset '{dataset}'...")
-            run_fl(dataset)
+            run_fl(dataset, exclude_fixed_fail_tests=exclude_fixed_fail_tests)
             evaluate_fl(dataset, level=fl_eval_level)
 
         if args.apr:
             print(f"[Pipeline] Chạy APR (LLM: {llm_provider or 'default'}) trên dataset '{dataset}'...")
-            run_apr_pipeline(dataset, llm_provider=llm_provider)
+            run_apr_pipeline(
+                dataset,
+                llm_provider=llm_provider,
+                exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+            )
             evaluate_apr(dataset)
 
         if args.apr_validate:
             print(f"[Pipeline] Validate lại APR artifacts trên dataset '{dataset}'...")
-            run_apr_validation_only(dataset, bug_id=args.bug_id)
+            run_apr_validation_only(
+                dataset,
+                bug_id=args.bug_id,
+                exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+            )
             evaluate_apr(dataset)
 
         if args.eval:

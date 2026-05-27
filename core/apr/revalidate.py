@@ -13,7 +13,11 @@ from core.apr.validation import validate_patch
 from data_loaders.base_loader import get_loader
 
 
-def run_apr_validation_only(dataset: str = "codeflaws", bug_id: Optional[str] = None):
+def run_apr_validation_only(
+    dataset: str = "codeflaws",
+    bug_id: Optional[str] = None,
+    exclude_fixed_fail_tests: bool = True,
+):
     """Re-run validation for saved LLM patch artifacts without calling an LLM."""
     apr_results_file = os.path.join(EXPERIMENTS_DIR, "apr_results.json")
     apr_results = _load_json(apr_results_file, default={})
@@ -33,7 +37,12 @@ def run_apr_validation_only(dataset: str = "codeflaws", bug_id: Optional[str] = 
 
         print(f"[APR-VALIDATE] Validate lại {bug.bug_id}: {len(artifacts)} candidate artifact.")
         _remove_success_patches_for_bug(bug.bug_id)
-        result = _validate_bug_artifacts(dataset, bug, artifacts)
+        result = _validate_bug_artifacts(
+            dataset,
+            bug,
+            artifacts,
+            exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+        )
         apr_results[bug.bug_id] = result
         with open(apr_results_file, "w") as f:
             json.dump(apr_results, f, indent=4)
@@ -82,7 +91,12 @@ def _patch_artifacts_for_bug(bug_id: str) -> list:
     )
 
 
-def _validate_bug_artifacts(dataset: str, bug, artifacts: list) -> dict:
+def _validate_bug_artifacts(
+    dataset: str,
+    bug,
+    artifacts: list,
+    exclude_fixed_fail_tests: bool = True,
+) -> dict:
     raw_meta = bug.raw or {}
     init_passed_all, init_failed_all = dedup_initial_test_ids(bug.tests if bug else [])
     init_passed = compact_test_list(init_passed_all)
@@ -104,6 +118,7 @@ def _validate_bug_artifacts(dataset: str, bug, artifacts: list) -> dict:
             dataset,
             src_basename=os.path.basename(target_relpath),
             src_relpath=target_relpath,
+            exclude_fixed_fail_tests=exclude_fixed_fail_tests,
         )
         validation_details = getattr(validate_patch, "last_details", {}) or {}
         validation_error = validation_details.get("validation_error", "")

@@ -18,6 +18,10 @@ from core.apr.apr_utils import (
 from core.apr.artifacts import write_llm_patch_artifact
 from core.apr.config import APR_SKIP_EXISTING, APR_TOP_K
 from core.apr.validation import validate_patch
+from core.test_filtering import (
+    filter_bug_map_for_pipeline,
+    has_failed_tests,
+)
 from core.utils import (
     extract_function_code,
     normalize_code_for_edit_distance,
@@ -30,7 +34,11 @@ from data_loaders.base_loader import get_loader
 from data_loaders.sandbox_adapter import defects4c_docker_ready, get_sandbox_adapter
 
 
-def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = None):
+def run_apr_pipeline(
+    dataset: str = "codeflaws",
+    llm_provider: Optional[str] = None,
+    exclude_fixed_fail_tests: bool = True,
+):
     """
     Pipeline APR (LLM-based).
     Load dữ liệu qua get_loader() – không đọc lại file JSON thủ công.
@@ -63,6 +71,16 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
     print(f"[APR] Đang load bug records từ dataset '{dataset}'...")
     loader = get_loader(dataset)
     bug_map = {b.bug_id: b for b in loader.load_all()}
+    bug_map, excluded_fixed_fail_by_bug = filter_bug_map_for_pipeline(
+        bug_map,
+        exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+    )
+    if exclude_fixed_fail_tests:
+        total_excluded = sum(len(v) for v in excluded_fixed_fail_by_bug.values())
+        print(
+            f"[APR] Fixed-fail filtering bật: loại {total_excluded} "
+            "test buggy+fixed đều FAIL khỏi context APR."
+        )
     dataset_key = (dataset or "").strip().lower()
     filtered_fl_results = {}
     skipped_other_dataset = 0
@@ -114,6 +132,32 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
                 print(f"[APR] Bỏ qua bug {bug_id} vì đã có status=success.")
                 continue
 
+        bug_record = bug_map.get(bug_id)
+        excluded_fixed_fail_tests = excluded_fixed_fail_by_bug.get(bug_id, [])
+        if exclude_fixed_fail_tests and bug_record and not has_failed_tests(bug_record.tests):
+            print(
+                f"    [APR] Bỏ qua {bug_id}: không còn failed test actionable "
+                "sau khi loại buggy+fixed đều FAIL."
+            )
+            apr_results[bug_id] = {
+                "dataset": dataset,
+                "status": "skipped",
+                "status_scope": "patch_comparison_excluding_fixed_fail_tests",
+                "patch_comparison_status": "skipped",
+                "real_status": "skipped",
+                "validation_error": "no_actionable_failed_tests_after_fixed_fail_filter",
+                "test_filter": {
+                    "exclude_fixed_fail_tests": True,
+                    "excluded_fixed_fail_count": len(excluded_fixed_fail_tests),
+                    "excluded_fixed_fail_tests": list(excluded_fixed_fail_tests),
+                },
+                "fixed_fail_excluded_count": len(excluded_fixed_fail_tests),
+                "fixed_fail_excluded_tests": list(excluded_fixed_fail_tests),
+            }
+            with open(apr_results_file, "w") as f:
+                json.dump(apr_results, f, indent=4)
+            continue
+
         scores = result_data.get("scores", result_data) if isinstance(result_data, dict) else result_data
         if not scores:
             continue
@@ -134,7 +178,6 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
             continue
 
         primary_base = os.path.basename(bug_source_path)
-        bug_record = bug_map.get(bug_id)
         raw_meta = bug_record.raw if bug_record else None
         source_cache: dict = {}
 
@@ -345,6 +388,7 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
                 dataset,
                 src_basename=cand_base,
                 src_relpath=candidate_relpath,
+                exclude_fixed_fail_tests=exclude_fixed_fail_tests,
             )
             validation_details = getattr(validate_patch, "last_details", {}) or {}
             validation_error = validation_details.get("validation_error", "")
@@ -353,6 +397,10 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
             patch_comparison_post_passed = validation_details.get("effective_post_passed_tests", post_passed)
             patch_comparison_post_failed = validation_details.get("effective_post_failed_tests", post_failed)
             fixed_fail_excluded = validation_details.get("fixed_fail_excluded_tests", [])
+            reported_fixed_fail_excluded = list(dict.fromkeys([
+                *fixed_fail_excluded,
+                *excluded_fixed_fail_tests,
+            ]))
             patch_comparison_status = "success" if not patch_comparison_post_failed and not validation_error else "failed"
             real_status = "success" if not full_post_failed and not validation_error else "failed"
             candidate_result = {
@@ -380,9 +428,14 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
                 "patch_comparison_post_failed_count": len(patch_comparison_post_failed),
                 "patch_comparison_post_passed_tests": list(patch_comparison_post_passed),
                 "patch_comparison_post_failed_tests": list(patch_comparison_post_failed),
-                "fixed_fail_excluded_count": len(fixed_fail_excluded),
-                "fixed_fail_excluded_tests": list(fixed_fail_excluded),
+                "fixed_fail_excluded_count": len(reported_fixed_fail_excluded),
+                "fixed_fail_excluded_tests": list(reported_fixed_fail_excluded),
                 "validation_details": validation_details,
+                "test_filter": {
+                    "exclude_fixed_fail_tests": exclude_fixed_fail_tests,
+                    "excluded_fixed_fail_count": len(excluded_fixed_fail_tests),
+                    "excluded_fixed_fail_tests": list(excluded_fixed_fail_tests),
+                },
             }
             candidate_result["llm_patch_artifact"] = write_llm_patch_artifact(
                 bug_id=bug_id,
@@ -455,6 +508,10 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
         patch_comparison_post_passed = validation_details.get("effective_post_passed_tests", post_passed)
         patch_comparison_post_failed = validation_details.get("effective_post_failed_tests", post_failed)
         fixed_fail_excluded = validation_details.get("fixed_fail_excluded_tests", [])
+        reported_fixed_fail_excluded = list(dict.fromkeys([
+            *fixed_fail_excluded,
+            *excluded_fixed_fail_tests,
+        ]))
         validation_error = validation_details.get("validation_error", "")
         patch_comparison_status = (
             "success" if not patch_comparison_post_failed and not validation_error else "failed"
@@ -490,10 +547,15 @@ def run_apr_pipeline(dataset: str = "codeflaws", llm_provider: Optional[str] = N
             "patch_comparison_post_failed_count": len(patch_comparison_post_failed),
             "patch_comparison_post_passed_tests": list(patch_comparison_post_passed),
             "patch_comparison_post_failed_tests": list(patch_comparison_post_failed),
-            "fixed_fail_excluded_count": len(fixed_fail_excluded),
-            "fixed_fail_excluded_tests": list(fixed_fail_excluded),
+            "fixed_fail_excluded_count": len(reported_fixed_fail_excluded),
+            "fixed_fail_excluded_tests": list(reported_fixed_fail_excluded),
             "validation_error": validation_error,
             "validation_details": validation_details,
+            "test_filter": {
+                "exclude_fixed_fail_tests": exclude_fixed_fail_tests,
+                "excluded_fixed_fail_count": len(excluded_fixed_fail_tests),
+                "excluded_fixed_fail_tests": list(excluded_fixed_fail_tests),
+            },
         }
 
         with open(apr_results_file, "w") as f:

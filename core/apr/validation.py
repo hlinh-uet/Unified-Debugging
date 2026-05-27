@@ -5,7 +5,8 @@ from data_loaders.sandbox_adapter import get_sandbox_adapter
 
 def validate_patch(patched_file_path: str, bug_id: str, dataset: str = "codeflaws",
                    src_basename: Optional[str] = None,
-                   src_relpath: Optional[str] = None):
+                   src_relpath: Optional[str] = None,
+                   exclude_fixed_fail_tests: bool = True):
     """Sử dụng Sandbox Adapter để kiểm chứng bản vá.
 
     ``src_relpath`` cho Defects4C biết chính xác file nào trong buggy version
@@ -19,6 +20,7 @@ def validate_patch(patched_file_path: str, bug_id: str, dataset: str = "codeflaw
             patched_file_path,
             src_basename=src_basename,
             src_relpath=src_relpath,
+            exclude_fixed_fail_tests=exclude_fixed_fail_tests,
         )
         validate_patch.last_details = getattr(adapter, "last_validation_details", {}) or {}
         return result
