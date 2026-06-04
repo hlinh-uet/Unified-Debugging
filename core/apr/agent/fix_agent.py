@@ -1,3 +1,4 @@
+import json
 from typing import Optional, Tuple
 
 from core.apr.artifacts import write_llm_step_artifact
@@ -17,8 +18,15 @@ def build_fix_prompt(
     cand_label: str,
     func_code: str,
     retrieval_context: str,
+    repair_evidence_pack: dict,
     failed_tests_context: str,
 ) -> str:
+    repair_evidence_json = json.dumps(
+        repair_evidence_pack or {},
+        ensure_ascii=False,
+        indent=2,
+        default=str,
+    )
     return f"""REPAIR TASK
 Bug ID: {bug_id}
 Repair only the target C/C++ function below. The defect may be a vulnerability or a general correctness bug.
@@ -36,17 +44,24 @@ Use this metadata evidence to understand the observed failure. It may be incompl
 {failed_tests_context}
 
 RETRIEVAL CONTEXT
-Use this agent-produced context summary for relevant includes, declarations, local headers, helper functions, target references, coding idioms, risky operations, constraints, and uncertainties.
+Use this agent-produced summary to prioritize which context matters. It is guidance, not the raw source of truth.
 BEGIN RETRIEVAL CONTEXT
 {retrieval_context.strip()}
 END RETRIEVAL CONTEXT
+
+REPAIR EVIDENCE PACK
+Use this deterministic code evidence as the source-of-truth for available APIs, helper signatures, macros, types, declarations, source-file context, project-header declarations, usage examples, and caller contracts.
+BEGIN REPAIR EVIDENCE PACK JSON
+{repair_evidence_json}
+END REPAIR EVIDENCE PACK JSON
 
 OUTPUT CONTRACT
 1. Output exactly one complete fixed C/C++ definition of function {func_name}.
 2. Preserve the existing function signature, coding style, macros, and helper APIs unless the bug fix strictly requires otherwise.
 3. Keep the patch minimal and localized to function {func_name}.
 4. Do not add includes, new global helpers, main functions, unrelated refactors, or changes outside the target function.
-5. Do not include explanations, preface text, markdown, code fences, or backticks.
+5. Do not call or rely on an API, macro, type, helper, ownership convention, or error-handling convention unless it appears in the target function, retrieval context, repair evidence pack, or is clearly provided by an included standard/system header shown in the evidence.
+6. Do not include explanations, preface text, markdown, code fences, or backticks.
 
 FIXED FUNCTION
 """
@@ -63,6 +78,7 @@ def run_fix_agent(
     cand_label: str,
     func_code: str,
     retrieval_context: str,
+    repair_evidence_pack: dict,
     failed_tests_context: str,
 ) -> Tuple[Optional[str], dict]:
     prompt = build_fix_prompt(
@@ -71,6 +87,7 @@ def run_fix_agent(
         cand_label=cand_label,
         func_code=func_code,
         retrieval_context=retrieval_context,
+        repair_evidence_pack=repair_evidence_pack,
         failed_tests_context=failed_tests_context,
     )
     response = call_llm(

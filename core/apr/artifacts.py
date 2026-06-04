@@ -84,6 +84,50 @@ def write_llm_step_artifact(
     return artifact
 
 
+def write_code_context_collector_artifact(
+    *,
+    bug_id: str,
+    attempt_index: int,
+    qualified_name: str,
+    candidate_relpath: str,
+    collector_context: dict,
+    repair_evidence_pack: dict,
+    status: str = "generated",
+    error: str = "",
+) -> dict:
+    """Save deterministic code-context collector output for debugging APR prompts."""
+    bug_dir = llm_bug_artifact_dir(bug_id)
+    base_name = llm_artifact_base_name(attempt_index, qualified_name, "code_context_collector_agent")
+
+    context_path = os.path.join(bug_dir, f"{base_name}.context.json")
+    evidence_path = os.path.join(bug_dir, f"{base_name}.repair_evidence.json")
+    metadata_path = os.path.join(bug_dir, f"{base_name}.json")
+
+    with open(context_path, "w") as f:
+        json.dump(collector_context or {}, f, ensure_ascii=False, indent=2, default=str)
+    with open(evidence_path, "w") as f:
+        json.dump(repair_evidence_pack or {}, f, ensure_ascii=False, indent=2, default=str)
+
+    artifact = {
+        "bug_id": bug_id,
+        "attempt_index": attempt_index,
+        "function": qualified_name,
+        "repair_target_relpath": candidate_relpath,
+        "step_name": "code_context_collector_agent",
+        "status": status,
+        "error": error,
+        "artifact_dir": rel_experiment_path(bug_dir),
+        "collector_context_path": rel_experiment_path(context_path),
+        "repair_evidence_pack_path": rel_experiment_path(evidence_path),
+        "metadata_path": rel_experiment_path(metadata_path),
+    }
+
+    with open(metadata_path, "w") as f:
+        json.dump(artifact, f, ensure_ascii=False, indent=4)
+
+    return artifact
+
+
 def write_llm_patch_artifact(
     *,
     bug_id: str,
@@ -97,6 +141,7 @@ def write_llm_patch_artifact(
     status: str = "generated",
     validation_error: str = "",
     fail_context_agent_artifact: Optional[dict] = None,
+    code_context_collector_agent_artifact: Optional[dict] = None,
     retrieval_context_agent_artifact: Optional[dict] = None,
     fix_agent_artifact: Optional[dict] = None,
 ) -> dict:
@@ -129,6 +174,7 @@ def write_llm_patch_artifact(
         "patched_file_path": "",
         "metadata_path": rel_experiment_path(metadata_path),
         "fail_context_agent_artifact": fail_context_agent_artifact or {},
+        "code_context_collector_agent_artifact": code_context_collector_agent_artifact or {},
         "retrieval_context_agent_artifact": retrieval_context_agent_artifact or {},
         "fix_agent_artifact": fix_agent_artifact or {},
     }

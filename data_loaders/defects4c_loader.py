@@ -278,9 +278,13 @@ class Defects4CLoader(BugLoader):
 
         fixed_dir = os.path.join(cache_dir, "fixed_ver")
         buggy_dir = os.path.join(cache_dir, "buggy_ver")
-        if not _ensure_worktree(repo_dir, fixed_dir, commit_after):
+        worktree_repo = _ensure_worktree_source_repo(repo_dir, os.path.join(cache_dir, "_repo"))
+        if not worktree_repo:
             return "", ""
-        if not _ensure_worktree(repo_dir, buggy_dir, commit_after):
+
+        if not _ensure_worktree(worktree_repo, fixed_dir, commit_after):
+            return "", ""
+        if not _ensure_worktree(worktree_repo, buggy_dir, commit_after):
             return "", ""
 
         overlay_files = [
@@ -451,6 +455,72 @@ def _relpath_or_basename(path: str, root: str) -> str:
     return os.path.basename(path)
 
 
+def _git_cmd(repo_dir: str, *args: str) -> List[str]:
+    cmd = ["git"]
+    if repo_dir:
+        cmd.extend(["-c", f"safe.directory={repo_dir}"])
+        git_dir = os.path.join(repo_dir, ".git")
+        if os.path.isdir(git_dir):
+            cmd.extend(["-c", f"safe.directory={git_dir}"])
+    cmd.extend(args)
+    return cmd
+
+
+def _git_error_tail(result: subprocess.CompletedProcess) -> str:
+    detail = (result.stderr or result.stdout or "").strip().splitlines()
+    return detail[-1] if detail else "unknown"
+
+
+def _ensure_worktree_source_repo(source_repo: str, cache_repo: str) -> str:
+    """Return a user-writable repo suitable as the owner of git worktrees.
+
+    Defects4C source repos are often created by Docker and owned by root/nobody.
+    Even with safe.directory configured, `git worktree add` writes bookkeeping
+    under the source repo's .git/worktrees and fails for a normal host user.
+    Keep that source tree read-only and create worktrees from a local cache clone
+    owned by the current user instead.
+    """
+    if not source_repo or not os.path.isdir(source_repo):
+        return ""
+
+    if not os.access(os.path.join(source_repo, ".git"), os.W_OK):
+        if not os.path.isdir(os.path.join(cache_repo, ".git")):
+            if os.path.exists(cache_repo):
+                shutil.rmtree(cache_repo)
+            os.makedirs(os.path.dirname(cache_repo), exist_ok=True)
+            clone = subprocess.run(
+                _git_cmd(source_repo, "clone", "--shared", "--no-checkout", source_repo, cache_repo),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=180,
+            )
+            if clone.returncode != 0:
+                if not _copy_git_dir_cache(source_repo, cache_repo):
+                    print(f"[Defects4CLoader] git clone cache lỗi ({cache_repo}): {_git_error_tail(clone)}")
+                    return ""
+        return cache_repo
+
+    return source_repo
+
+
+def _copy_git_dir_cache(source_repo: str, cache_repo: str) -> bool:
+    source_git = os.path.join(source_repo, ".git")
+    cache_git = os.path.join(cache_repo, ".git")
+    if not os.path.isdir(source_git):
+        return False
+    try:
+        if os.path.exists(cache_repo):
+            shutil.rmtree(cache_repo)
+        os.makedirs(cache_repo, exist_ok=True)
+        shutil.copytree(source_git, cache_git, symlinks=True)
+    except OSError:
+        return False
+    return os.path.isdir(cache_git)
+
+
 def _ensure_worktree(repo_dir: str, worktree_dir: str, commit: str) -> bool:
     """Create or reset a detached git worktree at ``commit``."""
     if not repo_dir or not os.path.isdir(repo_dir) or not commit:
@@ -462,12 +532,12 @@ def _ensure_worktree(repo_dir: str, worktree_dir: str, commit: str) -> bool:
             shutil.rmtree(worktree_dir)
         os.makedirs(os.path.dirname(worktree_dir), exist_ok=True)
         subprocess.run(
-            ["git", "-C", repo_dir, "worktree", "prune"],
+            _git_cmd(repo_dir, "-C", repo_dir, "worktree", "prune"),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
         add = subprocess.run(
-            ["git", "-C", repo_dir, "worktree", "add", "--detach", "--force", worktree_dir, commit],
+            _git_cmd(repo_dir, "-C", repo_dir, "worktree", "add", "--detach", "--force", worktree_dir, commit),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -476,9 +546,7 @@ def _ensure_worktree(repo_dir: str, worktree_dir: str, commit: str) -> bool:
             timeout=120,
         )
         if add.returncode != 0:
-            detail = (add.stderr or add.stdout or "").strip().splitlines()
-            tail = detail[-1] if detail else "unknown"
-            print(f"[Defects4CLoader] git worktree add lỗi ({worktree_dir}): {tail}")
+            print(f"[Defects4CLoader] git worktree add lỗi ({worktree_dir}): {_git_error_tail(add)}")
             return False
 
     reset = subprocess.run(

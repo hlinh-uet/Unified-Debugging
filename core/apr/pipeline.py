@@ -4,16 +4,19 @@ import shutil
 from typing import Optional
 
 from configs.path import EXPERIMENTS_DIR, PATCHES_DIR
-from core.apr.agent import run_fail_context_agent, run_fix_agent, run_retrieval_context_agent
+from core.apr.agent import (
+    run_code_context_collector_agent,
+    run_fail_context_agent,
+    run_fix_agent,
+    run_retrieval_context_agent,
+)
 from core.apr.apr_utils import (
-    build_local_header_context,
     candidate_relpath_from_buggy_tree,
     compact_test_list,
     dedup_initial_test_ids,
     failed_candidate_result,
     is_defects4c_dataset,
     source_language_from_path,
-    trim_source_for_prompt,
 )
 from core.apr.artifacts import write_llm_patch_artifact
 from core.apr.config import APR_SKIP_EXISTING, APR_TOP_K
@@ -257,9 +260,26 @@ def run_apr_pipeline(
             target_func = qualified_name
             attempted = True
 
-            prompt_source = trim_source_for_prompt(source_code, start_idx, end_idx)
-            local_header_context = build_local_header_context(source_code, candidate_path)
+            header_context_root = ""
+            if isinstance(raw_meta, dict):
+                header_context_root = raw_meta.get("buggy_tree_dir") or raw_meta.get("source_repo_dir") or ""
             llm_patch_attempt_index += 1
+            collector_context, code_context_collector_agent_artifact = run_code_context_collector_agent(
+                bug_id=bug_id,
+                attempt_index=llm_patch_attempt_index,
+                qualified_name=qualified_name,
+                candidate_relpath=candidate_relpath,
+                func_name=source_func_name,
+                cand_label=cand_label,
+                func_code=func_code,
+                source_code=source_code,
+                source_path=candidate_path,
+                start_idx=start_idx,
+                end_idx=end_idx,
+                context_root=header_context_root,
+            )
+            repair_evidence_pack = collector_context.get("repair_evidence_pack") or {}
+
             retrieval_context, retrieval_context_agent_artifact = run_retrieval_context_agent(
                 bug_id=bug_id,
                 attempt_index=llm_patch_attempt_index,
@@ -269,8 +289,7 @@ def run_apr_pipeline(
                 func_name=source_func_name,
                 cand_label=cand_label,
                 func_code=func_code,
-                local_header_context=local_header_context,
-                prompt_source=prompt_source,
+                collector_context=collector_context,
             )
             if not retrieval_context:
                 print("    [ERROR] RetrievalContextAgent trả về None. Bỏ qua hàm này.")
@@ -286,6 +305,7 @@ def run_apr_pipeline(
                 cand_label=cand_label,
                 func_code=func_code,
                 retrieval_context=retrieval_context,
+                repair_evidence_pack=repair_evidence_pack,
                 failed_tests_context=failed_tests_context,
             )
             if not raw_patch:
@@ -315,6 +335,7 @@ def run_apr_pipeline(
                     status="malformed_function",
                     validation_error="malformed_function",
                     fail_context_agent_artifact=fail_context_agent_artifact,
+                    code_context_collector_agent_artifact=code_context_collector_agent_artifact,
                     retrieval_context_agent_artifact=retrieval_context_agent_artifact,
                     fix_agent_artifact=fix_agent_artifact,
                 )
@@ -355,6 +376,7 @@ def run_apr_pipeline(
                     status="no_op",
                     validation_error="no_op",
                     fail_context_agent_artifact=fail_context_agent_artifact,
+                    code_context_collector_agent_artifact=code_context_collector_agent_artifact,
                     retrieval_context_agent_artifact=retrieval_context_agent_artifact,
                     fix_agent_artifact=fix_agent_artifact,
                 )
@@ -449,6 +471,7 @@ def run_apr_pipeline(
                 status=candidate_result["status"],
                 validation_error=validation_error,
                 fail_context_agent_artifact=fail_context_agent_artifact,
+                code_context_collector_agent_artifact=code_context_collector_agent_artifact,
                 retrieval_context_agent_artifact=retrieval_context_agent_artifact,
                 fix_agent_artifact=fix_agent_artifact,
             )
