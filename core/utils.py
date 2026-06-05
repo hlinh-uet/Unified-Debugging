@@ -465,14 +465,13 @@ def extract_function_code(
             - start_idx:  Vị trí byte bắt đầu (return type) trong source_code.
             - end_idx:    Vị trí ngay sau ``}`` đóng (exclusive).
     """
+    ts_result = _extract_function_code_tree_sitter(source_code, func_name, language)
+    if ts_result[0] is not None:
+        return ts_result
     if _is_scoped_cpp_name(func_name):
         scoped_result = _extract_scoped_function_code_regex(source_code, func_name)
         if scoped_result[0] is not None:
             return scoped_result
-
-    ts_result = _extract_function_code_tree_sitter(source_code, func_name, language)
-    if ts_result[0] is not None:
-        return ts_result
     regex_result = _extract_function_code_regex(source_code, func_name)
     if regex_result[0] is not None:
         return regex_result
@@ -553,8 +552,8 @@ def _extract_function_code_tree_sitter(
         declarator = node.child_by_field_name("declarator")
         if declarator is None:
             continue
-        name = _tree_sitter_function_name(declarator, source_bytes)
-        if not _function_name_matches(name, func_name):
+        names = _tree_sitter_function_candidate_names(node, declarator, source_bytes)
+        if not any(_function_name_matches(name, func_name) for name in names):
             continue
         code = source_bytes[node.start_byte:node.end_byte].decode(
             "utf-8",
@@ -579,6 +578,14 @@ def _normalize_function_symbol(value: str) -> str:
     return value
 
 
+def _normalize_qualified_function_symbol(value: str) -> str:
+    return "::".join(
+        _normalize_function_symbol(part)
+        for part in str(value or "").strip().split("::")
+        if part.strip()
+    )
+
+
 def _function_scope_parts(func_name: str) -> list:
     if not _is_scoped_cpp_name(func_name):
         return []
@@ -594,9 +601,14 @@ def _is_scoped_cpp_name(func_name: str) -> bool:
 
 
 def _function_name_matches(actual: str, requested: str) -> bool:
-    if actual == requested:
+    actual_norm = _normalize_qualified_function_symbol(actual)
+    requested_norm = _normalize_qualified_function_symbol(requested)
+    if actual_norm == requested_norm:
         return True
-    return not _is_scoped_cpp_name(requested) and actual == _function_name_leaf(requested)
+    return (
+        not _is_scoped_cpp_name(requested_norm)
+        and _function_name_leaf(actual_norm) == _function_name_leaf(requested_norm)
+    )
 
 
 def _allow_unscoped_fallback(source_code: str, func_name: str) -> bool:
@@ -659,7 +671,7 @@ def _tree_sitter_function_name(declarator, source_bytes: bytes) -> str:
                 "utf-8",
                 errors="replace",
             )
-            return text.split("::")[-1].strip()
+            return _normalize_qualified_function_symbol(text)
 
     if declarator.type in (
         "identifier",
@@ -677,13 +689,44 @@ def _tree_sitter_function_name(declarator, source_bytes: bytes) -> str:
             "utf-8",
             errors="replace",
         )
-        return text.split("::")[-1].split("<", 1)[0].strip()
+        return _normalize_qualified_function_symbol(text)
 
     for child in declarator.children:
         name = _tree_sitter_function_name(child, source_bytes)
         if name:
             return name
     return ""
+
+
+def _tree_sitter_function_candidate_names(node, declarator, source_bytes: bytes) -> list:
+    name = _tree_sitter_function_name(declarator, source_bytes)
+    if not name:
+        return []
+
+    names = [name]
+    if "::" not in name:
+        scopes = _tree_sitter_enclosing_type_scopes(node, source_bytes)
+        if scopes:
+            names.append("::".join([*scopes, name]))
+    return list(dict.fromkeys(names))
+
+
+def _tree_sitter_enclosing_type_scopes(node, source_bytes: bytes) -> list:
+    scopes = []
+    cur = getattr(node, "parent", None)
+    while cur is not None:
+        if cur.type in ("class_specifier", "struct_specifier", "union_specifier"):
+            name_node = cur.child_by_field_name("name")
+            if name_node is not None:
+                text = source_bytes[name_node.start_byte:name_node.end_byte].decode(
+                    "utf-8",
+                    errors="replace",
+                )
+                name = _normalize_function_symbol(text)
+                if name:
+                    scopes.append(name)
+        cur = getattr(cur, "parent", None)
+    return list(reversed(scopes))
 
 
 def _extract_scoped_function_code_regex(
@@ -730,6 +773,8 @@ def _function_name_call_pattern(func_name: str) -> str:
         if op:
             return r'operator\s*' + re.escape(op) + r'\s*\('
         return r'operator\s*\('
+    if func_name.startswith("~"):
+        return re.escape(func_name) + r'\s*\('
     return r'\b' + re.escape(func_name) + r'\s*\('
 
 
@@ -840,7 +885,7 @@ def _extract_function_code_regex(
     for pattern in patterns:
         for m in pattern.finditer(source_code, start, end):
             name_start = m.start()
-            open_paren = source_code.find('(', m.start(), m.end())
+            open_paren = source_code.rfind('(', m.start(), m.end())
             if open_paren < 0:
                 continue
             if open_paren >= end:
@@ -879,15 +924,41 @@ def _extract_function_code_regex(
                         break
                     i = nl + 1
                     continue
-                # __attribute__((...)) hoặc const/throw()... – nhảy qua token + paren
+                # Chỉ bỏ qua các suffix hợp lệ sau declarator của hàm.
+                # Không bỏ qua identifier bất kỳ: nếu match nằm trong return type
+                # dạng macro (vd. FMT_ENABLE_IF_T(...) format_to(...)), token kế
+                # tiếp là tên hàm thật và candidate macro phải bị loại.
                 if c.isalpha() or c == '_':
                     j = i
                     while j < n and (source_code[j].isalnum() or source_code[j] == '_'):
                         j += 1
-                    # Nếu token này là 'return' hoặc keyword khác, có nghĩa không phải def
-                    if source_code[i:j] in ("return", "sizeof", "if", "while", "for", "switch"):
+                    token = source_code[i:j]
+                    allowed_suffix = {
+                        "const",
+                        "volatile",
+                        "noexcept",
+                        "override",
+                        "final",
+                        "throw",
+                        "__attribute__",
+                        "__declspec",
+                        "FMT_NOEXCEPT",
+                        "FMT_NOEXCEPT_IF",
+                        "FMT_OVERRIDE",
+                        "FMT_CONSTEXPR",
+                        "FMT_CONSTEXPR_DECL",
+                        "FMT_CONSTEXPR20",
+                        "FMT_NODISCARD",
+                        "TSRMLS_DC",
+                        "TSRMLS_D",
+                    }
+                    if token == "requires":
+                        body_open = _find_cpp_requires_body_open(source_code, j, n)
+                        if body_open >= 0:
+                            i = body_open
                         break
-                    # Nhảy qua whitespace, nếu có '(' kế tiếp thì skip paren group
+                    if token not in allowed_suffix:
+                        break
                     k = j
                     while k < n and source_code[k].isspace():
                         k += 1
@@ -898,6 +969,12 @@ def _extract_function_code_regex(
                         i = end_paren + 1
                         continue
                     i = j
+                    continue
+                if c == '&':
+                    if i + 1 < n and source_code[i + 1] == '&':
+                        i += 2
+                    else:
+                        i += 1
                     continue
                 if c == ':':
                     body_open = _find_cpp_ctor_body_open(source_code, i)
@@ -974,6 +1051,38 @@ def _find_cpp_ctor_body_open(source: str, colon_pos: int) -> int:
             i = j + 1
             continue
         if c == ';':
+            return -1
+        i += 1
+    return -1
+
+
+def _find_cpp_requires_body_open(source: str, start: int, end: int) -> int:
+    i = start
+    depth = 0
+    while i < end:
+        c = source[i]
+        if c in ('"', "'"):
+            i = _skip_string_or_char(source, i)
+            continue
+        if c == '/' and i + 1 < end and source[i + 1] == '/':
+            nl = source.find('\n', i)
+            if nl < 0:
+                return -1
+            i = nl + 1
+            continue
+        if c == '/' and i + 1 < end and source[i + 1] == '*':
+            comment_end = source.find('*/', i + 2)
+            if comment_end < 0:
+                return -1
+            i = comment_end + 2
+            continue
+        if c in '(<[':
+            depth += 1
+        elif c in ')>]':
+            depth = max(0, depth - 1)
+        elif c == '{' and depth == 0:
+            return i
+        elif c == ';' and depth == 0:
             return -1
         i += 1
     return -1
