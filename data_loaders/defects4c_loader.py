@@ -144,7 +144,7 @@ class Defects4CLoader(BugLoader):
         raw_source_file = raw.get("source_file", "")
         host_source_file = _container_to_host_path(raw_source_file)
         repo_dir = _find_git_root(host_source_file)
-        source_relpath = _relpath_or_basename(host_source_file, repo_dir)
+        source_relpath = _defects4c_source_relpath(raw_source_file, host_source_file, repo_dir)
         source_basename = raw.get("source_basename") or os.path.basename(source_relpath)
         normalized_src_files = src_files or ([source_relpath] if source_relpath else [])
         cache_raw = {
@@ -273,18 +273,41 @@ class Defects4CLoader(BugLoader):
         os.makedirs(cache_dir, exist_ok=True)
         commit_after = str(raw.get("commit_after") or "").strip()
         commit_before = str(raw.get("commit_before") or "").strip()
-        if not repo_dir or not os.path.isdir(repo_dir) or not commit_after or not commit_before:
+        if not commit_after or not commit_before:
             return "", ""
 
         fixed_dir = os.path.join(cache_dir, "fixed_ver")
         buggy_dir = os.path.join(cache_dir, "buggy_ver")
-        worktree_repo = _ensure_worktree_source_repo(repo_dir, os.path.join(cache_dir, "_repo"))
+        project_key = _defects4c_project_cache_key(raw, repo_dir)
+        shared_cache_repo = os.path.join(DEFECTS4C_CACHE_DIR, "_repos", project_key, "_repo")
+        worktree_repo = _select_cached_repo(shared_cache_repo)
+        if worktree_repo and not _ensure_cached_commits(
+            worktree_repo,
+            repo_dir,
+            [commit_after, commit_before],
+        ):
+            worktree_repo = ""
+        if not worktree_repo and repo_dir and os.path.isdir(repo_dir):
+            worktree_repo = _ensure_worktree_source_repo(repo_dir, shared_cache_repo)
+            if worktree_repo and not _ensure_cached_commits(
+                worktree_repo,
+                repo_dir,
+                [commit_after, commit_before],
+            ):
+                worktree_repo = ""
+        if not worktree_repo:
+            # Backward compatibility for caches created before project-level repos.
+            worktree_repo = _select_cached_repo(os.path.join(cache_dir, "_repo"))
         if not worktree_repo:
             return "", ""
 
         if not _ensure_worktree(worktree_repo, fixed_dir, commit_after):
             return "", ""
+        if not _verify_worktree_head(fixed_dir, commit_after, "fixed_ver"):
+            return "", ""
         if not _ensure_worktree(worktree_repo, buggy_dir, commit_after):
+            return "", ""
+        if not _verify_worktree_head(buggy_dir, commit_after, "buggy_ver"):
             return "", ""
 
         overlay_files = [
@@ -413,6 +436,53 @@ def _normalize_coverage_key(value: str) -> str:
     return value
 
 
+def _defects4c_source_relpath(raw_source_file: str, host_source_file: str, repo_dir: str) -> str:
+    """Resolve the source path inside a Defects4C git_repo_dir_* tree."""
+    for path in (raw_source_file, host_source_file):
+        relpath = _relpath_after_git_repo_dir(path)
+        if relpath:
+            return relpath
+    return _relpath_or_basename(host_source_file, repo_dir)
+
+
+def _relpath_after_git_repo_dir(path: str) -> str:
+    if not path or not isinstance(path, str):
+        return ""
+    parts = path.strip().replace("\\", "/").split("/")
+    for idx, part in enumerate(parts):
+        if part.startswith("git_repo_dir") and idx + 1 < len(parts):
+            return "/".join(parts[idx + 1:])
+    return ""
+
+
+def _defects4c_project_cache_key(raw: dict, repo_dir: str) -> str:
+    project = str(raw.get("project") or "").strip()
+    if not project:
+        project = _project_from_defects4c_path(str(raw.get("source_file") or ""))
+    if not project:
+        project = _project_from_defects4c_path(repo_dir)
+    if not project:
+        project = os.path.basename(repo_dir.rstrip(os.sep)) or "unknown"
+    return _safe_cache_key(project)
+
+
+def _project_from_defects4c_path(path: str) -> str:
+    if not path or not isinstance(path, str):
+        return ""
+    parts = path.strip().replace("\\", "/").split("/")
+    for idx, part in enumerate(parts):
+        if part.startswith("git_repo_dir") and idx > 0:
+            return parts[idx - 1]
+    return ""
+
+
+def _safe_cache_key(value: str) -> str:
+    safe = str(value or "").strip().replace("\\", "/")
+    safe = safe.replace("@", "__").replace("/", "__")
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", safe)
+    return safe or "unknown"
+
+
 def _container_to_host_path(path: str) -> str:
     if not path or not isinstance(path, str):
         return path
@@ -471,39 +541,157 @@ def _git_error_tail(result: subprocess.CompletedProcess) -> str:
     return detail[-1] if detail else "unknown"
 
 
-def _ensure_worktree_source_repo(source_repo: str, cache_repo: str) -> str:
-    """Return a user-writable repo suitable as the owner of git worktrees.
+def _select_cached_repo(cache_repo: str) -> str:
+    if cache_repo and os.path.isdir(os.path.join(cache_repo, ".git")):
+        return cache_repo
+    return ""
 
-    Defects4C source repos are often created by Docker and owned by root/nobody.
-    Even with safe.directory configured, `git worktree add` writes bookkeeping
-    under the source repo's .git/worktrees and fails for a normal host user.
-    Keep that source tree read-only and create worktrees from a local cache clone
-    owned by the current user instead.
+
+def _ensure_cached_commits(cache_repo: str, source_repo: str, commits: List[str]) -> bool:
+    missing = _missing_commits(cache_repo, commits)
+    if not missing:
+        return True
+    if not source_repo or not os.path.isdir(source_repo):
+        return False
+
+    cmd = ["git"]
+    for safe_repo in _git_safe_directories(cache_repo) + _git_safe_directories(source_repo):
+        cmd.extend(["-c", f"safe.directory={safe_repo}"])
+    cmd.extend(["-C", cache_repo, "fetch", "--no-tags", source_repo, *missing])
+    fetch = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=180,
+    )
+    if fetch.returncode != 0:
+        _merge_git_objects_cache(source_repo, cache_repo)
+    missing_after = _missing_commits(cache_repo, commits)
+    if missing_after:
+        print(
+            f"[Defects4CLoader] cache repo thiếu commit ({cache_repo}): "
+            f"{', '.join(missing_after)}; fetch: {_git_error_tail(fetch)}"
+        )
+        return False
+    return True
+
+
+def _missing_commits(repo_dir: str, commits: List[str]) -> List[str]:
+    missing = []
+    for commit in commits:
+        commit = str(commit or "").strip()
+        if not commit:
+            continue
+        check = subprocess.run(
+            _git_cmd(repo_dir, "-C", repo_dir, "cat-file", "-e", f"{commit}^{{commit}}"),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if check.returncode != 0:
+            missing.append(commit)
+    return missing
+
+
+def _verify_worktree_head(worktree_dir: str, expected_commit: str, label: str) -> bool:
+    expected = str(expected_commit or "").strip().lower()
+    if not worktree_dir or not expected:
+        return False
+    result = subprocess.run(
+        _git_cmd(worktree_dir, "-C", worktree_dir, "rev-parse", "HEAD"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    actual = (result.stdout or "").strip().lower()
+    if result.returncode == 0 and actual == expected:
+        return True
+    detail = _git_error_tail(result) if result.returncode != 0 else f"HEAD={actual or '<empty>'}"
+    print(f"[Defects4CLoader] Verify {label} HEAD lỗi ({worktree_dir}): expected {expected}, {detail}")
+    return False
+
+
+def _git_safe_directories(repo_dir: str) -> List[str]:
+    if not repo_dir:
+        return []
+    out = [repo_dir]
+    git_dir = os.path.join(repo_dir, ".git")
+    if os.path.isdir(git_dir):
+        out.append(git_dir)
+    return out
+
+
+def _merge_git_objects_cache(source_repo: str, cache_repo: str) -> bool:
+    source_git = _git_dir_path(source_repo)
+    cache_git = _git_dir_path(cache_repo)
+    if not source_git or not cache_git:
+        return False
+    source_objects = os.path.join(source_git, "objects")
+    cache_objects = os.path.join(cache_git, "objects")
+    if not os.path.isdir(source_objects) or not os.path.isdir(cache_objects):
+        return False
+    try:
+        shutil.copytree(source_objects, cache_objects, symlinks=True, dirs_exist_ok=True)
+    except OSError:
+        return False
+    return True
+
+
+def _git_dir_path(repo_dir: str) -> str:
+    marker = os.path.join(repo_dir, ".git")
+    if os.path.isdir(marker):
+        return marker
+    if not os.path.isfile(marker):
+        return ""
+    try:
+        with open(marker, "r") as f:
+            content = f.read().strip()
+    except OSError:
+        return ""
+    prefix = "gitdir:"
+    if not content.lower().startswith(prefix):
+        return ""
+    gitdir = content[len(prefix):].strip()
+    if not os.path.isabs(gitdir):
+        gitdir = os.path.normpath(os.path.join(repo_dir, gitdir))
+    return gitdir if os.path.isdir(gitdir) else ""
+
+
+def _ensure_worktree_source_repo(source_repo: str, cache_repo: str) -> str:
+    """Return a project-level cache repo suitable as the owner of worktrees.
+
+    Defects4C source repos may be created by Docker and owned by root/nobody.
+    Keep those trees read-only from this loader and create worktrees from a
+    single user-owned cache repo per Defects4C project.
     """
+    selected = _select_cached_repo(cache_repo)
+    if selected:
+        return selected
     if not source_repo or not os.path.isdir(source_repo):
         return ""
 
-    if not os.access(os.path.join(source_repo, ".git"), os.W_OK):
-        if not os.path.isdir(os.path.join(cache_repo, ".git")):
-            if os.path.exists(cache_repo):
-                shutil.rmtree(cache_repo)
-            os.makedirs(os.path.dirname(cache_repo), exist_ok=True)
-            clone = subprocess.run(
-                _git_cmd(source_repo, "clone", "--shared", "--no-checkout", source_repo, cache_repo),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=180,
-            )
-            if clone.returncode != 0:
-                if not _copy_git_dir_cache(source_repo, cache_repo):
-                    print(f"[Defects4CLoader] git clone cache lỗi ({cache_repo}): {_git_error_tail(clone)}")
-                    return ""
-        return cache_repo
-
-    return source_repo
+    if os.path.exists(cache_repo):
+        shutil.rmtree(cache_repo)
+    os.makedirs(os.path.dirname(cache_repo), exist_ok=True)
+    clone = subprocess.run(
+        _git_cmd(source_repo, "clone", "--no-checkout", source_repo, cache_repo),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=180,
+    )
+    if clone.returncode != 0:
+        if not _copy_git_dir_cache(source_repo, cache_repo):
+            print(f"[Defects4CLoader] git clone cache lỗi ({cache_repo}): {_git_error_tail(clone)}")
+            return ""
+    return _select_cached_repo(cache_repo)
 
 
 def _copy_git_dir_cache(source_repo: str, cache_repo: str) -> bool:

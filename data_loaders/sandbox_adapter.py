@@ -684,6 +684,8 @@ class Defects4CAdapter(SandboxAdapter):
         template = (bug_meta.get("test_cmd_template") or "").strip()
         if not compile_cmd or not template or not test_ids:
             return False, [], [], "metadata_suite_config_missing"
+        compile_timeout = int(os.getenv("APR_VALIDATE_COMPILE_TIMEOUT_SECONDS", "1800"))
+        test_timeout = int(os.getenv("APR_VALIDATE_TEST_TIMEOUT_SECONDS", "180"))
 
         helper_path = self._extract_metadata_helper_path(template)
         if helper_path:
@@ -705,7 +707,12 @@ class Defects4CAdapter(SandboxAdapter):
                 "fi",
             ])
         lines.extend([
-            f"({compile_cmd}) >/tmp/udbg_compile.log 2>&1",
+            "export BUILD_META_TEST_TIMEOUT="
+            + shlex.quote(str(test_timeout)),
+            "export BUILD_META_COMPILE_TIMEOUT="
+            + shlex.quote(str(compile_timeout)),
+            f"(timeout --kill-after=10s {shlex.quote(str(compile_timeout) + 's')} "
+            f"bash -lc {shlex.quote(compile_cmd)}) >/tmp/udbg_compile.log 2>&1",
             "compile_rc=$?",
             "if [ $compile_rc -ne 0 ]; then echo __UD_COMPILE_FAIL__; tail -80 /tmp/udbg_compile.log; exit 97; fi",
         ])
@@ -713,7 +720,8 @@ class Defects4CAdapter(SandboxAdapter):
             test_cmd = template.replace("{test_id}", shlex.quote(tid))
             marker = shlex.quote(tid)
             lines.extend([
-                f"({test_cmd}) >/tmp/udbg_test.log 2>&1",
+                f"(timeout --kill-after=10s {shlex.quote(str(test_timeout) + 's')} "
+                f"bash -lc {shlex.quote(test_cmd)}) >/tmp/udbg_test.log 2>&1",
                 "rc=$?",
                 f"if [ $rc -eq 0 ]; then echo __UD_PASS__ {marker}; else echo __UD_FAIL__ {marker}; tail -40 /tmp/udbg_test.log; fi",
             ])
@@ -824,12 +832,13 @@ class Defects4CAdapter(SandboxAdapter):
             TEST_ID="${1:?Usage: $0 <test_id>}"
             BUILD_DIR="$HERE/build_meta_fmt"
             TEST_WORK_DIR="$BUILD_DIR/test"
+            TEST_TIMEOUT="${BUILD_META_TEST_TIMEOUT:-180}"
             if [[ "$TEST_ID" == *"::"* ]]; then
               CTEST_NAME="${TEST_ID%%::*}"
               GTEST_FILTER="${TEST_ID#*::}"
-              OUTPUT=$(cd "$TEST_WORK_DIR" && "$BUILD_DIR/bin/$CTEST_NAME" --gtest_filter="$GTEST_FILTER" --gtest_color=no 2>&1)
+              OUTPUT=$(cd "$TEST_WORK_DIR" && timeout --kill-after=10s "${TEST_TIMEOUT}s" "$BUILD_DIR/bin/$CTEST_NAME" --gtest_filter="$GTEST_FILTER" --gtest_color=no 2>&1)
             else
-              OUTPUT=$(ctest --test-dir "$BUILD_DIR" -R "^${TEST_ID}$" -V --timeout 120 2>&1)
+              OUTPUT=$(ctest --test-dir "$BUILD_DIR" -R "^${TEST_ID}$" -V --timeout "$TEST_TIMEOUT" 2>&1)
             fi
             STATUS=$?
             echo "$OUTPUT"
