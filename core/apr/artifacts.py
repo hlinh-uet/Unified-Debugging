@@ -6,7 +6,10 @@ from typing import Optional
 from configs.path import EXPERIMENTS_DIR, LLM_PATCHES_DIR
 
 from core.apr.config import DEFAULT_LLM_PROVIDER
-from core.apr.evaluation_snapshot import extract_evaluation_snapshot
+from core.apr.evaluation_snapshot import (
+    extract_evaluation_snapshot,
+    sanitize_evaluation_data,
+)
 
 
 def safe_artifact_part(value: object, max_len: int = 120) -> str:
@@ -181,6 +184,7 @@ def write_llm_patch_artifact(
         "fix_agent_artifact": fix_agent_artifact or {},
     }
     artifact.update(evaluation_snapshot or {})
+    artifact = sanitize_evaluation_data(artifact)
 
     if patched_file:
         with open(patched_file_path, "w") as f:
@@ -250,6 +254,7 @@ def write_refix_patch_artifact(
         "refix_agent_artifact": refix_agent_artifact or {},
     }
     artifact.update(evaluation_snapshot or {})
+    artifact = sanitize_evaluation_data(artifact)
 
     if patched_file:
         with open(patched_file_path, "w") as f:
@@ -269,6 +274,9 @@ def update_patch_artifact_evaluation(artifact: dict, evaluation_snapshot: dict) 
         return artifact
 
     artifact.update(extract_evaluation_snapshot(evaluation_snapshot))
+    cleaned = sanitize_evaluation_data(artifact)
+    artifact.clear()
+    artifact.update(cleaned)
     public = {k: v for k, v in artifact.items() if not k.startswith("_")}
     with open(metadata_path, "w") as f:
         json.dump(public, f, indent=4)

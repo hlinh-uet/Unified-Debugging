@@ -429,18 +429,15 @@ class Defects4CAdapter(SandboxAdapter):
 
         full_failed_set = set(full_failed)
         full_passed = full_passed or [t for t in test_ids if t not in full_failed_set]
-        fixed_fail_excluded = self._fixed_fail_excluded_tests(bug_meta)
-        effective_failed = [t for t in full_failed if t not in fixed_fail_excluded]
-        effective_passed = [t for t in full_passed if t not in fixed_fail_excluded]
+        fixed_fail_tests = self._fixed_fail_excluded_tests(bug_meta)
+        fixed_fail_excluded = fixed_fail_tests if exclude_fixed_fail_tests else set()
+        comparison_failed = [t for t in full_failed if t not in fixed_fail_excluded]
+        comparison_passed = [t for t in full_passed if t not in fixed_fail_excluded]
 
         self.last_validation_details = {
             "validation_error": "",
             "full_post_passed_tests": list(full_passed),
             "full_post_failed_tests": list(full_failed),
-            "effective_post_passed_tests": list(effective_passed),
-            "effective_post_failed_tests": list(effective_failed),
-            "patch_comparison_post_passed_tests": list(effective_passed),
-            "patch_comparison_post_failed_tests": list(effective_failed),
             "fixed_fail_excluded_tests": sorted(fixed_fail_excluded),
             "exclude_fixed_fail_tests_from_run": exclude_fixed_fail_tests,
             "validation_test_count": len(test_ids),
@@ -453,11 +450,11 @@ class Defects4CAdapter(SandboxAdapter):
         }
         print(
             f"    [Defects4C:{bug_meta.get('data_folder', 'metadata')}] full_scope_tests={len(test_ids)} "
-            f"full_failed_total={len(full_failed)} effective_failed_total={len(effective_failed)}"
+            f"full_failed_total={len(full_failed)} comparison_failed_total={len(comparison_failed)}"
         )
-        if not effective_failed:
-            return True, list(effective_passed), []
-        return False, list(effective_passed), list(effective_failed)
+        if not comparison_failed:
+            return True, list(comparison_passed), []
+        return False, list(comparison_passed), list(comparison_failed)
 
     def _validation_error_result(self, reason: str):
         self.last_validation_details = {

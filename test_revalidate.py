@@ -58,8 +58,11 @@ class ArtifactSnapshotTests(unittest.TestCase):
             ["actionable", "fixed-fail"],
             initial["full_failed"],
         )
-        self.assertEqual(1, initial["fields"]["init_failed_count"])
-        self.assertEqual(2, initial["fields"]["full_init_failed_count"])
+        self.assertEqual(["actionable"], initial["fields"]["init_failed_tests"])
+        self.assertEqual(
+            ["actionable", "fixed-fail"],
+            initial["fields"]["full_init_failed_tests"],
+        )
 
     def test_initial_apr_artifact_persists_complete_snapshot(self):
         initial = build_initial_test_snapshot(
@@ -76,10 +79,10 @@ class ArtifactSnapshotTests(unittest.TestCase):
                 "validation_error": "",
                 "full_post_passed_tests": ["passing", "actionable"],
                 "full_post_failed_tests": ["fixed-fail"],
-                "effective_post_passed_tests": ["passing", "actionable"],
-                "effective_post_failed_tests": [],
                 "fixed_fail_excluded_tests": ["fixed-fail"],
             },
+            post_passed=["passing", "actionable"],
+            post_failed=[],
             exclude_fixed_fail_tests=True,
         )
 
@@ -114,6 +117,17 @@ class ArtifactSnapshotTests(unittest.TestCase):
             saved["full_init_failed_tests"],
         )
         self.assertEqual(["fixed-fail"], saved["full_post_failed_tests"])
+        for legacy_key in (
+            "status_scope",
+            "patch_comparison_status",
+            "init_failed_count",
+            "post_failed_count",
+            "patch_comparison_post_failed_tests",
+            "fixed_fail_excluded_count",
+            "test_filter",
+        ):
+            self.assertNotIn(legacy_key, saved)
+        self.assertNotIn("full_post_failed_tests", saved["validation_details"])
 
 
 class RevalidateScopeTests(unittest.TestCase):
@@ -150,6 +164,16 @@ class RevalidateScopeTests(unittest.TestCase):
                 "function": "example.c:main",
                 "repair_target_relpath": "example.c",
                 "patched_file_path": patched_path,
+                "effective_post_failed_tests": ["legacy-top-level"],
+                "status_scope": "legacy-scope",
+                "post_failed_count": 99,
+                "patch_comparison_post_failed_tests": ["legacy-comparison"],
+                "test_filter": {"legacy": True},
+                "validation_details": {
+                    "effective_post_failed_tests": ["legacy-nested"],
+                    "full_post_failed_tests": ["legacy-duplicate"],
+                    "patch_comparison_post_failed_tests": ["legacy-comparison"],
+                },
                 "_metadata_abs_path": metadata_path,
                 "_patched_file_abs_path": patched_path,
             }
@@ -157,8 +181,8 @@ class RevalidateScopeTests(unittest.TestCase):
                 "validation_error": "",
                 "full_post_passed_tests": ["passing"],
                 "full_post_failed_tests": ["fixed-fail", "actionable-fail"],
-                "effective_post_passed_tests": ["passing"],
-                "effective_post_failed_tests": ["actionable-fail"],
+                "patch_comparison_post_passed_tests": ["passing"],
+                "patch_comparison_post_failed_tests": ["actionable-fail"],
                 "fixed_fail_excluded_tests": ["fixed-fail"],
             }
 
@@ -185,6 +209,26 @@ class RevalidateScopeTests(unittest.TestCase):
             self.assertEqual("nonefix", saved_artifact["status"])
             self.assertEqual(["actionable-fail"], saved_artifact["init_failed_tests"])
             self.assertEqual(["actionable-fail"], saved_artifact["post_failed_tests"])
+            self.assertNotIn("effective_post_failed_tests", saved_artifact)
+            self.assertNotIn(
+                "effective_post_failed_tests",
+                saved_artifact["validation_details"],
+            )
+            self.assertNotIn(
+                "full_post_failed_tests",
+                saved_artifact["validation_details"],
+            )
+            self.assertNotIn(
+                "patch_comparison_post_failed_tests",
+                saved_artifact["validation_details"],
+            )
+            for legacy_key in (
+                "status_scope",
+                "post_failed_count",
+                "patch_comparison_post_failed_tests",
+                "test_filter",
+            ):
+                self.assertNotIn(legacy_key, saved_artifact)
 
     def test_include_fixed_fail_uses_full_scope_for_both_sides(self):
         tests = [
@@ -221,8 +265,8 @@ class RevalidateScopeTests(unittest.TestCase):
                 "validation_error": "",
                 "full_post_passed_tests": ["passing"],
                 "full_post_failed_tests": ["fixed-fail"],
-                "effective_post_passed_tests": ["passing"],
-                "effective_post_failed_tests": [],
+                "patch_comparison_post_passed_tests": ["passing"],
+                "patch_comparison_post_failed_tests": [],
                 "fixed_fail_excluded_tests": ["fixed-fail"],
             }
 
@@ -237,7 +281,6 @@ class RevalidateScopeTests(unittest.TestCase):
                 )
 
             self.assertEqual("nonefix", result["status"])
-            self.assertEqual("full_suite", result["status_scope"])
             self.assertEqual(["fixed-fail"], result["init_failed_tests"])
             self.assertEqual(["fixed-fail"], result["post_failed_tests"])
             self.assertEqual([], result["fixed_fail_excluded_tests"])

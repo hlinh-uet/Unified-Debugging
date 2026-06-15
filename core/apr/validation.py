@@ -30,8 +30,6 @@ def validate_patch(patched_file_path: str, bug_id: str, dataset: str = "codeflaw
             "validation_error": f"validate_exception:{e}",
             "full_post_passed_tests": [],
             "full_post_failed_tests": [],
-            "effective_post_passed_tests": [],
-            "effective_post_failed_tests": [],
             "fixed_fail_excluded_tests": [],
         }
         return False, [], []

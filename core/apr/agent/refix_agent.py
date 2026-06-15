@@ -102,8 +102,7 @@ def _focused_validation_feedback(validation_details: dict, prior_context: dict) 
     details = validation_details or {}
     for key in (
         "validation_error",
-        "effective_post_failed_tests",
-        "patch_comparison_post_failed_tests",
+        "post_failed_tests",
         "full_post_failed_tests",
     ):
         value = details.get(key)
@@ -192,10 +191,8 @@ def _compact_validation_details(validation_details: dict) -> dict:
     details = validation_details or {}
     out = {
         "validation_error": details.get("validation_error", ""),
-        "effective_post_failed_tests": details.get("effective_post_failed_tests", []),
-        "patch_comparison_post_failed_tests": details.get("patch_comparison_post_failed_tests", []),
+        "post_failed_tests": details.get("post_failed_tests", []),
         "full_post_failed_tests": details.get("full_post_failed_tests", []),
-        "fixed_fail_excluded_tests": details.get("fixed_fail_excluded_tests", []),
     }
     tail = str(details.get("validation_log_tail") or "")
     if tail:

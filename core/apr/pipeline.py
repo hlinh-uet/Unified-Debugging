@@ -149,16 +149,8 @@ def run_apr_pipeline(
             apr_results[bug_id] = {
                 "dataset": dataset,
                 "status": "skipped",
-                "status_scope": "patch_comparison_excluding_fixed_fail_tests",
-                "patch_comparison_status": "skipped",
                 "real_status": "skipped",
                 "validation_error": "no_actionable_failed_tests_after_fixed_fail_filter",
-                "test_filter": {
-                    "exclude_fixed_fail_tests": True,
-                    "excluded_fixed_fail_count": len(excluded_fixed_fail_tests),
-                    "excluded_fixed_fail_tests": list(excluded_fixed_fail_tests),
-                },
-                "fixed_fail_excluded_count": len(excluded_fixed_fail_tests),
                 "fixed_fail_excluded_tests": list(excluded_fixed_fail_tests),
             }
             with open(apr_results_file, "w") as f:
@@ -476,15 +468,15 @@ def run_apr_pipeline(
                 candidate_results,
                 key=lambda c: (
                     1 if c.get("status") == "invalid" else 0,
-                    c["patch_comparison_post_failed_count"],
-                    -c["patch_comparison_post_passed_count"],
+                    len(c["post_failed_tests"]),
+                    -len(c["post_passed_tests"]),
                 ),
             )
             target_func = best_candidate["function"]
             print(
                 f"    [BEST] Chọn candidate tốt nhất: {target_func} "
-                f"(patch_failed={best_candidate['patch_comparison_post_failed_count']}, "
-                f"full_failed={best_candidate['full_post_failed_count']})"
+                f"(patch_failed={len(best_candidate['post_failed_tests'])}, "
+                f"full_failed={len(best_candidate['full_post_failed_tests'])})"
             )
 
         if best_candidate:
@@ -505,8 +497,9 @@ def run_apr_pipeline(
             apr_results[bug_id] = {
                 "dataset": dataset,
                 "status": "llm_failed" if attempted and not llm_attempted else "skipped",
+                "real_status": "llm_failed" if attempted and not llm_attempted else "skipped",
+                "validation_error": "",
                 **initial["fields"],
-                "fixed_fail_excluded_count": len(initial["excluded"]),
                 "fixed_fail_excluded_tests": list(initial["excluded"]),
             }
 

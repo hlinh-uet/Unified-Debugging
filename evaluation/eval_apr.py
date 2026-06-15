@@ -325,10 +325,8 @@ def _build_fix_eval_row(
 
 def _post_failed_ids_from_result(bug_res: dict) -> Tuple[set, str]:
     values = bug_res.get("full_post_failed_tests")
-    count = bug_res.get("full_post_failed_count")
     if not isinstance(values, list):
         values = bug_res.get("post_failed_tests")
-        count = bug_res.get("post_failed_count")
     if values is None:
         return set(), "post_failed_tests_missing"
     if not isinstance(values, list):
@@ -336,8 +334,6 @@ def _post_failed_ids_from_result(bug_res: dict) -> Tuple[set, str]:
     if any(_is_compaction_marker(v) for v in values):
         return set(), "post_failed_tests_compacted"
     failed = {str(v).strip() for v in values if str(v).strip()}
-    if isinstance(count, int) and count != len(failed):
-        return set(), f"post_failed_tests_count_mismatch:{len(failed)}!={count}"
     return failed, ""
 
 

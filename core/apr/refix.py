@@ -156,14 +156,14 @@ def _refix_bug_artifacts(
             candidate_results,
             key=lambda c: (
                 1 if c.get("status") == "invalid" else 0,
-                c["patch_comparison_post_failed_count"],
-                -c["patch_comparison_post_passed_count"],
+                len(c["post_failed_tests"]),
+                -len(c["post_passed_tests"]),
             ),
         )
         print(
             f"    [BEST] Chọn ReFix candidate tốt nhất: {best_candidate.get('function')} "
-            f"(patch_failed={best_candidate['patch_comparison_post_failed_count']}, "
-            f"full_failed={best_candidate['full_post_failed_count']})"
+            f"(patch_failed={len(best_candidate['post_failed_tests'])}, "
+            f"full_failed={len(best_candidate['full_post_failed_tests'])})"
         )
 
     if not best_candidate:
@@ -229,7 +229,7 @@ def _run_one_refix_candidate(
         print(f"    [SKIP] Không trích xuất được function gốc {source_func_name}.")
         return None
 
-    previous_validation = artifact.get("validation_details") or {}
+    previous_validation = _validation_feedback_from_artifact(artifact)
     if not previous_validation:
         previous_validation = _validate_existing_artifact(
             dataset=dataset,
@@ -475,11 +475,9 @@ def _refix_source_artifacts_for_bug(bug_id: str) -> list:
 
 
 def _failed_count(artifact: dict) -> int:
-    details = artifact.get("validation_details") or {}
-    if isinstance(details, dict):
-        failed = details.get("effective_post_failed_tests")
-        if isinstance(failed, list):
-            return len(failed)
+    failed = artifact.get("post_failed_tests")
+    if isinstance(failed, list):
+        return len(failed)
     return 10**9
 
 
@@ -491,7 +489,7 @@ def _validate_existing_artifact(
     target_relpath: str,
     exclude_fixed_fail_tests: bool,
 ) -> dict:
-    validate_patch(
+    _, _, post_failed = validate_patch(
         patched_file_path,
         bug_id,
         dataset,
@@ -499,7 +497,20 @@ def _validate_existing_artifact(
         src_relpath=target_relpath,
         exclude_fixed_fail_tests=exclude_fixed_fail_tests,
     )
-    return getattr(validate_patch, "last_details", {}) or {}
+    details = getattr(validate_patch, "last_details", {}) or {}
+    return {
+        **details,
+        "post_failed_tests": post_failed,
+    }
+
+
+def _validation_feedback_from_artifact(artifact: dict) -> dict:
+    details = dict(artifact.get("validation_details") or {})
+    for key in ("validation_error", "post_failed_tests", "full_post_failed_tests"):
+        value = artifact.get(key)
+        if value:
+            details[key] = value
+    return details
 
 
 def _prior_context_from_artifact(artifact: dict) -> dict:

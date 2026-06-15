@@ -160,23 +160,23 @@ def _validate_bug_artifacts(
             candidate_results,
             key=lambda c: (
                 1 if c.get("status") == "invalid" else 0,
-                c["patch_comparison_post_failed_count"],
-                -c["patch_comparison_post_passed_count"],
+                len(c["post_failed_tests"]),
+                -len(c["post_passed_tests"]),
             ),
         )
         print(
             f"    [BEST] Chọn candidate tốt nhất: {best_candidate.get('function')} "
-            f"(patch_failed={best_candidate['patch_comparison_post_failed_count']}, "
-            f"full_failed={best_candidate['full_post_failed_count']})"
+            f"(patch_failed={len(best_candidate['post_failed_tests'])}, "
+            f"full_failed={len(best_candidate['full_post_failed_tests'])})"
         )
 
     if not best_candidate:
         return {
             "dataset": dataset,
             "status": "skipped",
+            "real_status": "skipped",
             "validation_error": "no_patch_artifacts",
             **initial["fields"],
-            "fixed_fail_excluded_count": len(initial["excluded"]),
             "fixed_fail_excluded_tests": list(initial["excluded"]),
         }
 

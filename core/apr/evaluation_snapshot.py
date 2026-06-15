@@ -10,37 +10,51 @@ from core.test_filtering import filter_buggy_and_fixed_fail_tests
 
 EVALUATION_SNAPSHOT_KEYS = (
     "status",
-    "status_scope",
-    "patch_comparison_status",
     "real_status",
     "validation_error",
+    "init_passed_tests",
+    "init_failed_tests",
+    "full_init_passed_tests",
+    "full_init_failed_tests",
+    "post_passed_tests",
+    "post_failed_tests",
+    "full_post_passed_tests",
+    "full_post_failed_tests",
+    "fixed_fail_excluded_tests",
+    "validation_details",
+)
+
+LEGACY_EVALUATION_KEYS = {
+    "status_scope",
+    "patch_comparison_status",
     "init_scope",
     "init_passed_count",
     "init_failed_count",
-    "init_passed_tests",
-    "init_failed_tests",
     "full_init_passed_count",
     "full_init_failed_count",
-    "full_init_passed_tests",
-    "full_init_failed_tests",
     "post_scope",
     "post_passed_count",
     "post_failed_count",
-    "post_passed_tests",
-    "post_failed_tests",
     "full_post_passed_count",
     "full_post_failed_count",
-    "full_post_passed_tests",
-    "full_post_failed_tests",
     "patch_comparison_post_passed_count",
     "patch_comparison_post_failed_count",
     "patch_comparison_post_passed_tests",
     "patch_comparison_post_failed_tests",
     "fixed_fail_excluded_count",
-    "fixed_fail_excluded_tests",
-    "validation_details",
     "test_filter",
-)
+}
+
+VALIDATION_RESULT_KEYS = {
+    "validation_error",
+    "full_post_passed_tests",
+    "full_post_failed_tests",
+    "patch_comparison_post_passed_tests",
+    "patch_comparison_post_failed_tests",
+    "fixed_fail_excluded_tests",
+    "exclude_fixed_fail_tests_from_run",
+    "validation_test_count",
+}
 
 
 def build_initial_test_snapshot(
@@ -68,22 +82,15 @@ def build_initial_test_snapshot(
             excluded = []
         comparison_passed, comparison_failed = dedup_initial_test_ids(comparison_tests)
 
-    scope = _comparison_scope(exclude_fixed_fail_tests)
     return {
-        "scope": scope,
         "comparison_passed": comparison_passed,
         "comparison_failed": comparison_failed,
         "full_passed": full_passed,
         "full_failed": full_failed,
         "excluded": excluded,
         "fields": {
-            "init_scope": scope,
-            "init_passed_count": len(comparison_passed),
-            "init_failed_count": len(comparison_failed),
             "init_passed_tests": compact_test_list(comparison_passed),
             "init_failed_tests": compact_test_list(comparison_failed),
-            "full_init_passed_count": len(full_passed),
-            "full_init_failed_count": len(full_failed),
             "full_init_passed_tests": compact_test_list(full_passed),
             "full_init_failed_tests": compact_test_list(full_failed),
         },
@@ -100,21 +107,17 @@ def build_validation_snapshot(
     exclude_fixed_fail_tests: bool,
 ) -> dict:
     """Build the persisted evaluation contract for one validated patch."""
-    details = dict(validation_details or {})
-    error = str(validation_error or details.get("validation_error") or "").strip()
-    full_post_passed = list(details.get("full_post_passed_tests", post_passed or []))
-    full_post_failed = list(details.get("full_post_failed_tests", post_failed or []))
+    raw_details = dict(validation_details or {})
+    error = str(validation_error or raw_details.get("validation_error") or "").strip()
+    full_post_passed = list(raw_details.get("full_post_passed_tests", post_passed or []))
+    full_post_failed = list(raw_details.get("full_post_failed_tests", post_failed or []))
 
     if exclude_fixed_fail_tests:
-        comparison_post_passed = list(
-            details.get("effective_post_passed_tests", post_passed or [])
-        )
-        comparison_post_failed = list(
-            details.get("effective_post_failed_tests", post_failed or [])
-        )
+        comparison_post_passed = list(post_passed or [])
+        comparison_post_failed = list(post_failed or [])
         excluded = list(dict.fromkeys([
             *initial.get("excluded", []),
-            *details.get("fixed_fail_excluded_tests", []),
+            *raw_details.get("fixed_fail_excluded_tests", []),
         ]))
     else:
         comparison_post_passed = full_post_passed
@@ -131,36 +134,18 @@ def build_validation_snapshot(
         full_post_failed,
         error,
     )
-    scope = _comparison_scope(exclude_fixed_fail_tests)
 
     return {
         "status": status,
-        "status_scope": scope,
-        "patch_comparison_status": status,
         "real_status": real_status,
         "validation_error": error,
         **initial.get("fields", {}),
-        "post_scope": scope,
-        "post_passed_count": len(comparison_post_passed),
-        "post_failed_count": len(comparison_post_failed),
         "post_passed_tests": comparison_post_passed,
         "post_failed_tests": comparison_post_failed,
-        "full_post_passed_count": len(full_post_passed),
-        "full_post_failed_count": len(full_post_failed),
         "full_post_passed_tests": full_post_passed,
         "full_post_failed_tests": full_post_failed,
-        "patch_comparison_post_passed_count": len(comparison_post_passed),
-        "patch_comparison_post_failed_count": len(comparison_post_failed),
-        "patch_comparison_post_passed_tests": comparison_post_passed,
-        "patch_comparison_post_failed_tests": comparison_post_failed,
-        "fixed_fail_excluded_count": len(excluded),
         "fixed_fail_excluded_tests": excluded,
-        "validation_details": details,
-        "test_filter": {
-            "exclude_fixed_fail_tests": exclude_fixed_fail_tests,
-            "excluded_fixed_fail_count": len(excluded),
-            "excluded_fixed_fail_tests": excluded,
-        },
+        "validation_details": compact_validation_details(raw_details),
     }
 
 
@@ -174,23 +159,44 @@ def build_invalid_snapshot(
         "validation_error": validation_error,
         "full_post_passed_tests": [],
         "full_post_failed_tests": [],
-        "effective_post_passed_tests": [],
-        "effective_post_failed_tests": [],
         "fixed_fail_excluded_tests": list(initial.get("excluded", [])),
     }
     return build_validation_snapshot(
         initial,
         validation_details=details,
+        post_passed=[],
+        post_failed=[],
         validation_error=validation_error,
         exclude_fixed_fail_tests=exclude_fixed_fail_tests,
     )
 
 
 def extract_evaluation_snapshot(record: dict) -> dict:
-    return {key: record.get(key) for key in EVALUATION_SNAPSHOT_KEYS if key in record}
+    snapshot = {key: record.get(key) for key in EVALUATION_SNAPSHOT_KEYS if key in record}
+    return sanitize_evaluation_data(snapshot)
 
 
-def _comparison_scope(exclude_fixed_fail_tests: bool) -> str:
-    if exclude_fixed_fail_tests:
-        return "patch_comparison_excluding_fixed_fail_tests"
-    return "full_suite"
+def sanitize_evaluation_data(value):
+    """Remove superseded evaluation fields before metadata is persisted."""
+    if isinstance(value, dict):
+        cleaned = {}
+        for key, item in value.items():
+            if key.startswith("effective_post_") or key in LEGACY_EVALUATION_KEYS:
+                continue
+            if key == "validation_details" and isinstance(item, dict):
+                cleaned[key] = compact_validation_details(item)
+            else:
+                cleaned[key] = sanitize_evaluation_data(item)
+        return cleaned
+    if isinstance(value, list):
+        return [sanitize_evaluation_data(item) for item in value]
+    return value
+
+
+def compact_validation_details(details: dict) -> dict:
+    return sanitize_evaluation_data({
+        key: value
+        for key, value in (details or {}).items()
+        if key not in VALIDATION_RESULT_KEYS
+        and not key.startswith("effective_post_")
+    })
