@@ -3,6 +3,7 @@ import json
 from typing import Tuple
 
 from configs.path import EXPERIMENTS_DIR, CODEFLAWS_SOURCE_DIR
+from core.apr.apr_utils import classify_patch_outcome
 from core.utils import (
     extract_function_code,
     get_codeflaws_accepted_cfile,
@@ -48,20 +49,15 @@ def _classify_fix(init_failed: list, post_failed: list) -> str:
         "Plausible" (all init-fails fixed, no regression) is a CleanFix sub-type
         tracked separately in the aggregated summary.
     """
-    init_failed_set = set(init_failed)
-    post_failed_set = set(post_failed)
-
-    fixed      = init_failed_set - post_failed_set   # were failing, now pass
-    regression = post_failed_set - init_failed_set   # were passing, now fail
-
-    any_fixed = bool(fixed)
-    has_reg   = bool(regression)
-
-    if     any_fixed and not has_reg: return "CleanFix"
-    if     any_fixed and     has_reg: return "NoiseFix"
-    if not any_fixed and not has_reg: return "NoneFix"
-    # not any_fixed and has_reg
-    return "NegFix"
+    outcome = classify_patch_outcome(init_failed, post_failed)
+    if outcome == "plausible":
+        return "CleanFix" if init_failed else "NoneFix"
+    return {
+        "cleanfix": "CleanFix",
+        "noisefix": "NoiseFix",
+        "nonefix": "NoneFix",
+        "negfix": "NegFix",
+    }[outcome]
 
 
 def evaluate_apr(dataset: str = "codeflaws"):

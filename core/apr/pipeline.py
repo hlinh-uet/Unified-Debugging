@@ -12,14 +12,18 @@ from core.apr.agent import (
 )
 from core.apr.apr_utils import (
     candidate_relpath_from_buggy_tree,
-    compact_test_list,
-    dedup_initial_test_ids,
-    failed_candidate_result,
+    is_plausible_status,
     is_defects4c_dataset,
     source_language_from_path,
 )
 from core.apr.artifacts import write_llm_patch_artifact
 from core.apr.config import APR_SKIP_EXISTING, APR_TOP_K
+from core.apr.evaluation_snapshot import (
+    build_initial_test_snapshot,
+    build_invalid_snapshot,
+    build_validation_snapshot,
+    extract_evaluation_snapshot,
+)
 from core.apr.validation import validate_patch
 from core.test_filtering import (
     filter_bug_map_for_pipeline,
@@ -131,8 +135,8 @@ def run_apr_pipeline(
             if APR_SKIP_EXISTING:
                 print(f"[APR] Bỏ qua bug {bug_id} vì đã có record trong apr_results.json.")
                 continue
-            if apr_results[bug_id].get("status") == "success":
-                print(f"[APR] Bỏ qua bug {bug_id} vì đã có status=success.")
+            if is_plausible_status(apr_results[bug_id].get("status")):
+                print(f"[APR] Bỏ qua bug {bug_id} vì đã có patch plausible.")
                 continue
 
         bug_record = bug_map.get(bug_id)
@@ -192,20 +196,13 @@ def run_apr_pipeline(
         if not failed_tests_context:
             print(f"    [ERROR] FailContextAgent trả về None. Bỏ qua bug {bug_id}.")
             continue
-        init_passed_all, init_failed_all = dedup_initial_test_ids(
-            bug_record.tests if bug_record else []
+        initial = build_initial_test_snapshot(
+            bug_record.tests if bug_record else [],
+            exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+            excluded_fixed_fail_tests=excluded_fixed_fail_tests,
         )
-        init_passed = compact_test_list(init_passed_all)
-        init_failed = compact_test_list(init_failed_all)
 
-        status = "skipped"
-        patched_func = None
-        patched_source = None
-        repair_target_file = None
         target_func = None
-        post_passed = []
-        post_failed = []
-        validation_details = {}
         attempted = False
         llm_attempted = False
         llm_patch_attempt_index = 0
@@ -324,6 +321,11 @@ def run_apr_pipeline(
             )
             if not reparsed_func:
                 print("    [ERROR] LLM trả về function không hoàn chỉnh/không parse được. Bỏ qua validate.")
+                snapshot = build_invalid_snapshot(
+                    initial,
+                    validation_error="malformed_function",
+                    exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+                )
                 llm_patch_artifact = write_llm_patch_artifact(
                     bug_id=bug_id,
                     attempt_index=llm_patch_attempt_index,
@@ -332,24 +334,24 @@ def run_apr_pipeline(
                     llm_provider=llm_provider,
                     raw_patch=raw_patch,
                     patched_function=candidate_patched_func,
-                    status="malformed_function",
-                    validation_error="malformed_function",
+                    status=snapshot["status"],
+                    validation_error=snapshot["validation_error"],
+                    evaluation_snapshot=snapshot,
                     fail_context_agent_artifact=fail_context_agent_artifact,
                     code_context_collector_agent_artifact=code_context_collector_agent_artifact,
                     retrieval_context_agent_artifact=retrieval_context_agent_artifact,
                     fix_agent_artifact=fix_agent_artifact,
                 )
-                candidate_results.append(failed_candidate_result(
-                    qualified_name=qualified_name,
-                    score=score,
-                    status="validation_error",
-                    validation_error="malformed_function",
-                    candidate_path=candidate_path,
-                    candidate_relpath=candidate_relpath,
-                    patched_function=candidate_patched_func,
-                    patched_file="",
-                    llm_patch_artifact=llm_patch_artifact,
-                ))
+                candidate_results.append({
+                    "function": qualified_name,
+                    "score": score,
+                    "repair_target_file": candidate_path,
+                    "repair_target_relpath": candidate_relpath,
+                    "patched_function": candidate_patched_func,
+                    "patched_file": "",
+                    "llm_patch_artifact": llm_patch_artifact,
+                    **snapshot,
+                })
                 continue
             candidate_patched_func = reparsed_func
 
@@ -364,6 +366,11 @@ def run_apr_pipeline(
             patched_norm = normalize_code_for_edit_distance(candidate_patched_func)
             if not patched_norm or candidate_patched_source == source_code:
                 print("    [NO-OP] Patch không thay đổi hàm nguồn, bỏ qua candidate này.")
+                snapshot = build_invalid_snapshot(
+                    initial,
+                    validation_error="no_op",
+                    exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+                )
                 llm_patch_artifact = write_llm_patch_artifact(
                     bug_id=bug_id,
                     attempt_index=llm_patch_attempt_index,
@@ -373,38 +380,34 @@ def run_apr_pipeline(
                     raw_patch=raw_patch,
                     patched_function=candidate_patched_func,
                     patched_file=candidate_patched_source,
-                    status="no_op",
-                    validation_error="no_op",
+                    status=snapshot["status"],
+                    validation_error=snapshot["validation_error"],
+                    evaluation_snapshot=snapshot,
                     fail_context_agent_artifact=fail_context_agent_artifact,
                     code_context_collector_agent_artifact=code_context_collector_agent_artifact,
                     retrieval_context_agent_artifact=retrieval_context_agent_artifact,
                     fix_agent_artifact=fix_agent_artifact,
                 )
-                candidate_results.append(failed_candidate_result(
-                    qualified_name=qualified_name,
-                    score=score,
-                    status="no_op",
-                    validation_error="no_op",
-                    candidate_path=candidate_path,
-                    candidate_relpath=candidate_relpath,
-                    patched_function=candidate_patched_func,
-                    patched_file=candidate_patched_source,
-                    llm_patch_artifact=llm_patch_artifact,
-                ))
+                candidate_results.append({
+                    "function": qualified_name,
+                    "score": score,
+                    "repair_target_file": candidate_path,
+                    "repair_target_relpath": candidate_relpath,
+                    "patched_function": candidate_patched_func,
+                    "patched_file": candidate_patched_source,
+                    "llm_patch_artifact": llm_patch_artifact,
+                    **snapshot,
+                })
                 continue
             if patched_norm == orig_norm:
                 print("    [WARN] Patch chỉ khác theo normalized diff; vẫn validate để tránh bỏ nhầm.")
 
-            patched_func = candidate_patched_func
-            patched_source = candidate_patched_source
-            repair_target_file = candidate_path
-
             safe_cand = cand_label.replace("/", "__").replace(" ", "_")
             tmp_path = os.path.join(EXPERIMENTS_DIR, f"tmp_{bug_id.replace('@', '__')}__{safe_cand}")
             with open(tmp_path, "w") as f:
-                f.write(patched_source)
+                f.write(candidate_patched_source)
 
-            is_valid, post_passed, post_failed = validate_patch(
+            _, post_passed, post_failed = validate_patch(
                 tmp_path,
                 bug_id,
                 dataset,
@@ -414,50 +417,22 @@ def run_apr_pipeline(
             )
             validation_details = getattr(validate_patch, "last_details", {}) or {}
             validation_error = validation_details.get("validation_error", "")
-            full_post_passed = validation_details.get("full_post_passed_tests", post_passed)
-            full_post_failed = validation_details.get("full_post_failed_tests", post_failed)
-            patch_comparison_post_passed = validation_details.get("effective_post_passed_tests", post_passed)
-            patch_comparison_post_failed = validation_details.get("effective_post_failed_tests", post_failed)
-            fixed_fail_excluded = validation_details.get("fixed_fail_excluded_tests", [])
-            reported_fixed_fail_excluded = list(dict.fromkeys([
-                *fixed_fail_excluded,
-                *excluded_fixed_fail_tests,
-            ]))
-            patch_comparison_status = "success" if not patch_comparison_post_failed and not validation_error else "failed"
-            real_status = "success" if not full_post_failed and not validation_error else "failed"
+            snapshot = build_validation_snapshot(
+                initial,
+                validation_details=validation_details,
+                post_passed=post_passed,
+                post_failed=post_failed,
+                validation_error=validation_error,
+                exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+            )
             candidate_result = {
                 "function": qualified_name,
                 "score": score,
-                "status": "success" if is_valid else ("validation_error" if validation_error else "failed"),
-                "status_scope": "patch_comparison_excluding_fixed_fail_tests",
-                "patch_comparison_status": patch_comparison_status,
-                "real_status": real_status,
-                "validation_error": validation_error,
                 "repair_target_file": candidate_path,
                 "repair_target_relpath": candidate_relpath,
                 "patched_function": candidate_patched_func,
                 "patched_file": candidate_patched_source,
-                "post_scope": "full_suite",
-                "post_passed_count": len(full_post_passed),
-                "post_failed_count": len(full_post_failed),
-                "post_passed_tests": list(full_post_passed),
-                "post_failed_tests": list(full_post_failed),
-                "full_post_passed_count": len(full_post_passed),
-                "full_post_failed_count": len(full_post_failed),
-                "full_post_passed_tests": list(full_post_passed),
-                "full_post_failed_tests": list(full_post_failed),
-                "patch_comparison_post_passed_count": len(patch_comparison_post_passed),
-                "patch_comparison_post_failed_count": len(patch_comparison_post_failed),
-                "patch_comparison_post_passed_tests": list(patch_comparison_post_passed),
-                "patch_comparison_post_failed_tests": list(patch_comparison_post_failed),
-                "fixed_fail_excluded_count": len(reported_fixed_fail_excluded),
-                "fixed_fail_excluded_tests": list(reported_fixed_fail_excluded),
-                "validation_details": validation_details,
-                "test_filter": {
-                    "exclude_fixed_fail_tests": exclude_fixed_fail_tests,
-                    "excluded_fixed_fail_count": len(excluded_fixed_fail_tests),
-                    "excluded_fixed_fail_tests": list(excluded_fixed_fail_tests),
-                },
+                **snapshot,
             }
             candidate_result["llm_patch_artifact"] = write_llm_patch_artifact(
                 bug_id=bug_id,
@@ -468,8 +443,9 @@ def run_apr_pipeline(
                 raw_patch=raw_patch,
                 patched_function=candidate_patched_func,
                 patched_file=candidate_patched_source,
-                status=candidate_result["status"],
-                validation_error=validation_error,
+                status=snapshot["status"],
+                validation_error=snapshot["validation_error"],
+                evaluation_snapshot=snapshot,
                 fail_context_agent_artifact=fail_context_agent_artifact,
                 code_context_collector_agent_artifact=code_context_collector_agent_artifact,
                 retrieval_context_agent_artifact=retrieval_context_agent_artifact,
@@ -477,7 +453,7 @@ def run_apr_pipeline(
             )
             candidate_results.append(candidate_result)
 
-            if is_valid:
+            if snapshot["status"] == "plausible":
                 print(f"    [SUCCESS] Bản vá hợp lệ cho {bug_id} trong hàm '{func_name}'!")
                 patch_name = f"{bug_id}_patch.c" if cand_base == primary_base else f"{bug_id}_patch__{safe_cand}"
                 patch_path = os.path.join(PATCHES_DIR, patch_name)
@@ -488,7 +464,6 @@ def run_apr_pipeline(
                     print(f"    [WARN] Không lưu được patch file: {e_mv}")
                     if os.path.exists(tmp_path):
                         os.remove(tmp_path)
-                status = "success"
                 best_candidate = candidate_result
                 break
             else:
@@ -496,90 +471,44 @@ def run_apr_pipeline(
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
 
-        if status != "success" and candidate_results:
+        if best_candidate is None and candidate_results:
             best_candidate = min(
                 candidate_results,
                 key=lambda c: (
-                    1 if c.get("validation_error") else 0,
+                    1 if c.get("status") == "invalid" else 0,
                     c["patch_comparison_post_failed_count"],
                     -c["patch_comparison_post_passed_count"],
                 ),
             )
-            patched_func = best_candidate["patched_function"]
-            patched_source = best_candidate["patched_file"]
-            repair_target_file = best_candidate["repair_target_file"]
             target_func = best_candidate["function"]
-            post_passed = best_candidate["post_passed_tests"]
-            post_failed = best_candidate["post_failed_tests"]
-            validation_details = best_candidate.get("validation_details") or {
-                "validation_error": best_candidate.get("validation_error", ""),
-                "full_post_passed_tests": best_candidate.get("full_post_passed_tests", post_passed),
-                "full_post_failed_tests": best_candidate.get("full_post_failed_tests", post_failed),
-                "fixed_fail_excluded_tests": best_candidate.get("fixed_fail_excluded_tests", []),
-            }
             print(
                 f"    [BEST] Chọn candidate tốt nhất: {target_func} "
                 f"(patch_failed={best_candidate['patch_comparison_post_failed_count']}, "
                 f"full_failed={best_candidate['full_post_failed_count']})"
             )
 
-        if attempted and status == "skipped":
-            status = "failed" if llm_attempted else "llm_failed"
-
-        full_post_passed = validation_details.get("full_post_passed_tests", post_passed)
-        full_post_failed = validation_details.get("full_post_failed_tests", post_failed)
-        patch_comparison_post_passed = validation_details.get("effective_post_passed_tests", post_passed)
-        patch_comparison_post_failed = validation_details.get("effective_post_failed_tests", post_failed)
-        fixed_fail_excluded = validation_details.get("fixed_fail_excluded_tests", [])
-        reported_fixed_fail_excluded = list(dict.fromkeys([
-            *fixed_fail_excluded,
-            *excluded_fixed_fail_tests,
-        ]))
-        validation_error = validation_details.get("validation_error", "")
-        patch_comparison_status = (
-            "success" if not patch_comparison_post_failed and not validation_error else "failed"
-        )
-        real_status = "success" if not full_post_failed and not validation_error else "failed"
-
-        apr_results[bug_id] = {
-            "dataset": dataset,
-            "status": status,
-            "status_scope": "patch_comparison_excluding_fixed_fail_tests",
-            "patch_comparison_status": patch_comparison_status,
-            "real_status": real_status,
-            "patched_function": patched_func,
-            "patched_file": patched_source,
-            "llm_patch_artifact": best_candidate.get("llm_patch_artifact") if best_candidate else {},
-            "repair_target_file": repair_target_file,
-            "repair_target_relpath": candidate_relpath_from_buggy_tree(repair_target_file or "", raw_meta),
-            "selected_function": target_func,
-            "init_passed_count": len(init_passed_all),
-            "init_failed_count": len(init_failed_all),
-            "init_passed_tests": init_passed,
-            "init_failed_tests": init_failed,
-            "post_scope": "full_suite",
-            "post_passed_count": len(full_post_passed),
-            "post_failed_count": len(full_post_failed),
-            "post_passed_tests": list(full_post_passed),
-            "post_failed_tests": list(full_post_failed),
-            "full_post_passed_count": len(full_post_passed),
-            "full_post_failed_count": len(full_post_failed),
-            "full_post_passed_tests": list(full_post_passed),
-            "full_post_failed_tests": list(full_post_failed),
-            "patch_comparison_post_passed_count": len(patch_comparison_post_passed),
-            "patch_comparison_post_failed_count": len(patch_comparison_post_failed),
-            "patch_comparison_post_passed_tests": list(patch_comparison_post_passed),
-            "patch_comparison_post_failed_tests": list(patch_comparison_post_failed),
-            "fixed_fail_excluded_count": len(reported_fixed_fail_excluded),
-            "fixed_fail_excluded_tests": list(reported_fixed_fail_excluded),
-            "validation_error": validation_error,
-            "validation_details": validation_details,
-            "test_filter": {
-                "exclude_fixed_fail_tests": exclude_fixed_fail_tests,
-                "excluded_fixed_fail_count": len(excluded_fixed_fail_tests),
-                "excluded_fixed_fail_tests": list(excluded_fixed_fail_tests),
-            },
-        }
+        if best_candidate:
+            apr_results[bug_id] = {
+                "dataset": dataset,
+                "patched_function": best_candidate.get("patched_function"),
+                "patched_file": best_candidate.get("patched_file"),
+                "llm_patch_artifact": best_candidate.get("llm_patch_artifact") or {},
+                "repair_target_file": best_candidate.get("repair_target_file"),
+                "repair_target_relpath": candidate_relpath_from_buggy_tree(
+                    best_candidate.get("repair_target_file") or "",
+                    raw_meta,
+                ) or best_candidate.get("repair_target_relpath", ""),
+                "selected_function": best_candidate.get("function"),
+                **extract_evaluation_snapshot(best_candidate),
+            }
+        else:
+            apr_results[bug_id] = {
+                "dataset": dataset,
+                "status": "llm_failed" if attempted and not llm_attempted else "skipped",
+                **initial["fields"],
+                "fixed_fail_excluded_count": len(initial["excluded"]),
+                "fixed_fail_excluded_tests": list(initial["excluded"]),
+            }
 
         with open(apr_results_file, "w") as f:
             json.dump(apr_results, f, indent=4)

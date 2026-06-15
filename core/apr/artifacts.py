@@ -6,6 +6,7 @@ from typing import Optional
 from configs.path import EXPERIMENTS_DIR, LLM_PATCHES_DIR
 
 from core.apr.config import DEFAULT_LLM_PROVIDER
+from core.apr.evaluation_snapshot import extract_evaluation_snapshot
 
 
 def safe_artifact_part(value: object, max_len: int = 120) -> str:
@@ -140,6 +141,7 @@ def write_llm_patch_artifact(
     patched_file: Optional[str] = None,
     status: str = "generated",
     validation_error: str = "",
+    evaluation_snapshot: Optional[dict] = None,
     fail_context_agent_artifact: Optional[dict] = None,
     code_context_collector_agent_artifact: Optional[dict] = None,
     retrieval_context_agent_artifact: Optional[dict] = None,
@@ -178,6 +180,7 @@ def write_llm_patch_artifact(
         "retrieval_context_agent_artifact": retrieval_context_agent_artifact or {},
         "fix_agent_artifact": fix_agent_artifact or {},
     }
+    artifact.update(evaluation_snapshot or {})
 
     if patched_file:
         with open(patched_file_path, "w") as f:
@@ -187,4 +190,86 @@ def write_llm_patch_artifact(
     with open(metadata_path, "w") as f:
         json.dump(artifact, f, indent=4)
 
+    return artifact
+
+
+def write_refix_patch_artifact(
+    *,
+    bug_id: str,
+    attempt_index: int,
+    refix_round: int,
+    qualified_name: str,
+    candidate_relpath: str,
+    llm_provider: Optional[str],
+    raw_patch: str,
+    patched_function: str,
+    patched_file: Optional[str] = None,
+    status: str = "generated",
+    validation_error: str = "",
+    validation_details: Optional[dict] = None,
+    evaluation_snapshot: Optional[dict] = None,
+    parent_patch_artifact: Optional[dict] = None,
+    refix_agent_artifact: Optional[dict] = None,
+) -> dict:
+    """Save a ReFix-produced patch without overwriting the original APR artifact."""
+    bug_dir = llm_bug_artifact_dir(bug_id)
+    base_name = llm_artifact_base_name(
+        attempt_index,
+        qualified_name,
+        f"refix{refix_round:02d}",
+    )
+
+    response_path = os.path.join(bug_dir, f"{base_name}.response.txt")
+    function_path = os.path.join(bug_dir, f"{base_name}.function.c")
+    patched_file_path = os.path.join(bug_dir, f"{base_name}.patched.c")
+    metadata_path = os.path.join(bug_dir, f"{base_name}.json")
+
+    with open(response_path, "w") as f:
+        f.write(raw_patch or "")
+    with open(function_path, "w") as f:
+        f.write(patched_function or "")
+
+    artifact = {
+        "bug_id": bug_id,
+        "attempt_index": attempt_index,
+        "refix_round": refix_round,
+        "function": qualified_name,
+        "repair_target_relpath": candidate_relpath,
+        "llm_provider": llm_provider or DEFAULT_LLM_PROVIDER,
+        "agent": "refix_agent",
+        "status": status,
+        "validation_error": validation_error,
+        "validation_details": validation_details or {},
+        "artifact_dir": rel_experiment_path(bug_dir),
+        "llm_response_path": rel_experiment_path(response_path),
+        "raw_patch_path": rel_experiment_path(response_path),
+        "patched_function_path": rel_experiment_path(function_path),
+        "patched_file_path": "",
+        "metadata_path": rel_experiment_path(metadata_path),
+        "parent_patch_artifact": parent_patch_artifact or {},
+        "refix_agent_artifact": refix_agent_artifact or {},
+    }
+    artifact.update(evaluation_snapshot or {})
+
+    if patched_file:
+        with open(patched_file_path, "w") as f:
+            f.write(patched_file)
+        artifact["patched_file_path"] = rel_experiment_path(patched_file_path)
+
+    with open(metadata_path, "w") as f:
+        json.dump(artifact, f, indent=4)
+
+    return artifact
+
+
+def update_patch_artifact_evaluation(artifact: dict, evaluation_snapshot: dict) -> dict:
+    """Persist a validation snapshot into an existing patch metadata artifact."""
+    metadata_path = artifact.get("_metadata_abs_path")
+    if not metadata_path:
+        return artifact
+
+    artifact.update(extract_evaluation_snapshot(evaluation_snapshot))
+    public = {k: v for k, v in artifact.items() if not k.startswith("_")}
+    with open(metadata_path, "w") as f:
+        json.dump(public, f, indent=4)
     return artifact

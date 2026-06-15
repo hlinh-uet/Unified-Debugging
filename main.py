@@ -15,6 +15,7 @@ from core.fault_localization import (
 )
 from core.apr_baseline import run_apr_pipeline
 from core.apr.revalidate import run_apr_validation_only
+from core.apr.refix import run_refix_from_saved_artifacts
 from core.test_filtering import (
     filtered_bug_record_for_pipeline,
     has_failed_tests,
@@ -238,9 +239,15 @@ def main():
     parser.add_argument("--fl",           action="store_true", help="Chỉ chạy Fault Localization (Tarantula)")
     parser.add_argument("--apr",          action="store_true", help="Chỉ chạy APR với LLM")
     parser.add_argument("--apr-validate", action="store_true", help="Chỉ validate lại các patch LLM đã lưu, không gọi LLM")
+    parser.add_argument("--refix",        action="store_true", help="Chạy ReFix từ llm_patches đã lưu")
     parser.add_argument("--eval",         action="store_true", help="Chỉ chạy Evaluation")
     parser.add_argument("--all",          action="store_true", help="Chạy toàn bộ: FL → APR → Evaluation")
     parser.add_argument("--bug-id",       default=None, help="Chỉ chạy trên một bug cụ thể, ví dụ CVE-2018-7584")
+    parser.add_argument(
+        "--with-refix",
+        action="store_true",
+        help="Sau APR, chạy thêm ReFix trên các patch LLM đã fail rồi mới evaluation.",
+    )
     parser.add_argument(
         "--include-fixed-fail-tests",
         action="store_true",
@@ -275,8 +282,8 @@ def main():
     fl_eval_level = args.fl_eval_level
     exclude_fixed_fail_tests = not args.include_fixed_fail_tests
 
-    if not (args.all or args.fl or args.apr or args.apr_validate or args.eval):
-        parser.error("Hãy chọn một mode: --fl, --apr, --apr-validate, --eval, hoặc --all.")
+    if not (args.all or args.fl or args.apr or args.apr_validate or args.refix or args.eval):
+        parser.error("Hãy chọn một mode: --fl, --apr, --apr-validate, --refix, --eval, hoặc --all.")
 
     run_all = args.all
 
@@ -288,6 +295,13 @@ def main():
             llm_provider=llm_provider,
             exclude_fixed_fail_tests=exclude_fixed_fail_tests,
         )
+        if args.with_refix:
+            run_refix_from_saved_artifacts(
+                dataset,
+                bug_id=args.bug_id,
+                llm_provider=llm_provider,
+                exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+            )
         evaluate_fl(dataset, level=fl_eval_level)
         evaluate_apr(dataset)
     else:
@@ -303,6 +317,13 @@ def main():
                 llm_provider=llm_provider,
                 exclude_fixed_fail_tests=exclude_fixed_fail_tests,
             )
+            if args.with_refix:
+                run_refix_from_saved_artifacts(
+                    dataset,
+                    bug_id=args.bug_id,
+                    llm_provider=llm_provider,
+                    exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+                )
             evaluate_apr(dataset)
 
         if args.apr_validate:
@@ -310,6 +331,16 @@ def main():
             run_apr_validation_only(
                 dataset,
                 bug_id=args.bug_id,
+                exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+            )
+            evaluate_apr(dataset)
+
+        if args.refix:
+            print(f"[Pipeline] Chạy ReFix từ artifacts đã lưu trên dataset '{dataset}'...")
+            run_refix_from_saved_artifacts(
+                dataset,
+                bug_id=args.bug_id,
+                llm_provider=llm_provider,
                 exclude_fixed_fail_tests=exclude_fixed_fail_tests,
             )
             evaluate_apr(dataset)

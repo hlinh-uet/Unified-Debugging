@@ -6,8 +6,12 @@ from typing import Optional
 from configs.path import EXPERIMENTS_DIR, LLM_PATCHES_DIR, PATCHES_DIR
 from core.apr.apr_utils import (
     candidate_relpath_from_buggy_tree,
-    compact_test_list,
-    dedup_initial_test_ids,
+)
+from core.apr.artifacts import update_patch_artifact_evaluation
+from core.apr.evaluation_snapshot import (
+    build_initial_test_snapshot,
+    build_validation_snapshot,
+    extract_evaluation_snapshot,
 )
 from core.apr.validation import validate_patch
 from data_loaders.base_loader import get_loader
@@ -98,13 +102,13 @@ def _validate_bug_artifacts(
     exclude_fixed_fail_tests: bool = True,
 ) -> dict:
     raw_meta = bug.raw or {}
-    init_passed_all, init_failed_all = dedup_initial_test_ids(bug.tests if bug else [])
-    init_passed = compact_test_list(init_passed_all)
-    init_failed = compact_test_list(init_failed_all)
+    initial = build_initial_test_snapshot(
+        bug.tests if bug else [],
+        exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+    )
 
     candidate_results = []
     best_candidate = None
-    status = "failed"
 
     for artifact in artifacts:
         target_relpath = str(artifact.get("repair_target_relpath") or "").strip()
@@ -112,7 +116,7 @@ def _validate_bug_artifacts(
         patched_file_path = artifact["_patched_file_abs_path"]
         print(f"  - Validate {target_func or target_relpath}")
 
-        is_valid, post_passed, post_failed = validate_patch(
+        _, post_passed, post_failed = validate_patch(
             patched_file_path,
             bug.bug_id,
             dataset,
@@ -122,50 +126,31 @@ def _validate_bug_artifacts(
         )
         validation_details = getattr(validate_patch, "last_details", {}) or {}
         validation_error = validation_details.get("validation_error", "")
-        full_post_passed = validation_details.get("full_post_passed_tests", post_passed)
-        full_post_failed = validation_details.get("full_post_failed_tests", post_failed)
-        patch_post_passed = validation_details.get("effective_post_passed_tests", post_passed)
-        patch_post_failed = validation_details.get("effective_post_failed_tests", post_failed)
-        fixed_fail_excluded = validation_details.get("fixed_fail_excluded_tests", [])
-
-        candidate_status = "success" if is_valid else ("validation_error" if validation_error else "failed")
+        snapshot = build_validation_snapshot(
+            initial,
+            validation_details=validation_details,
+            post_passed=post_passed,
+            post_failed=post_failed,
+            validation_error=validation_error,
+            exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+        )
         candidate_result = {
             "function": target_func,
             "score": 0.0,
-            "status": candidate_status,
-            "status_scope": "patch_comparison_excluding_fixed_fail_tests",
-            "patch_comparison_status": "success" if not patch_post_failed and not validation_error else "failed",
-            "real_status": "success" if not full_post_failed and not validation_error else "failed",
-            "validation_error": validation_error,
             "repair_target_file": _repair_target_file(raw_meta, target_relpath),
             "repair_target_relpath": target_relpath,
             "patched_function": _read_artifact_text(artifact.get("patched_function_path")),
             "patched_file": _read_artifact_text(artifact.get("patched_file_path")),
             "llm_patch_artifact": _public_artifact(artifact),
-            "post_scope": "full_suite",
-            "post_passed_count": len(full_post_passed),
-            "post_failed_count": len(full_post_failed),
-            "post_passed_tests": list(full_post_passed),
-            "post_failed_tests": list(full_post_failed),
-            "full_post_passed_count": len(full_post_passed),
-            "full_post_failed_count": len(full_post_failed),
-            "full_post_passed_tests": list(full_post_passed),
-            "full_post_failed_tests": list(full_post_failed),
-            "patch_comparison_post_passed_count": len(patch_post_passed),
-            "patch_comparison_post_failed_count": len(patch_post_failed),
-            "patch_comparison_post_passed_tests": list(patch_post_passed),
-            "patch_comparison_post_failed_tests": list(patch_post_failed),
-            "fixed_fail_excluded_count": len(fixed_fail_excluded),
-            "fixed_fail_excluded_tests": list(fixed_fail_excluded),
-            "validation_details": validation_details,
+            **snapshot,
         }
         candidate_results.append(candidate_result)
-        _update_patch_artifact_status(artifact, candidate_status, validation_error, validation_details)
+        update_patch_artifact_evaluation(artifact, snapshot)
+        candidate_result["llm_patch_artifact"] = _public_artifact(artifact)
 
-        if is_valid:
+        if snapshot["status"] == "plausible":
             _save_success_patch(bug, artifact, target_relpath)
             best_candidate = candidate_result
-            status = "success"
             print(f"    [SUCCESS] Patch hợp lệ cho {bug.bug_id}.")
             break
         print("    [FAIL] Patch không vượt qua validation.")
@@ -174,7 +159,7 @@ def _validate_bug_artifacts(
         best_candidate = min(
             candidate_results,
             key=lambda c: (
-                1 if c.get("validation_error") else 0,
+                1 if c.get("status") == "invalid" else 0,
                 c["patch_comparison_post_failed_count"],
                 -c["patch_comparison_post_passed_count"],
             ),
@@ -190,26 +175,13 @@ def _validate_bug_artifacts(
             "dataset": dataset,
             "status": "skipped",
             "validation_error": "no_patch_artifacts",
-            "init_passed_count": len(init_passed_all),
-            "init_failed_count": len(init_failed_all),
-            "init_passed_tests": init_passed,
-            "init_failed_tests": init_failed,
+            **initial["fields"],
+            "fixed_fail_excluded_count": len(initial["excluded"]),
+            "fixed_fail_excluded_tests": list(initial["excluded"]),
         }
-
-    validation_details = best_candidate.get("validation_details") or {}
-    validation_error = best_candidate.get("validation_error", "")
-    full_post_passed = best_candidate.get("full_post_passed_tests", [])
-    full_post_failed = best_candidate.get("full_post_failed_tests", [])
-    patch_post_passed = best_candidate.get("patch_comparison_post_passed_tests", [])
-    patch_post_failed = best_candidate.get("patch_comparison_post_failed_tests", [])
-    fixed_fail_excluded = best_candidate.get("fixed_fail_excluded_tests", [])
 
     return {
         "dataset": dataset,
-        "status": status,
-        "status_scope": "patch_comparison_excluding_fixed_fail_tests",
-        "patch_comparison_status": "success" if not patch_post_failed and not validation_error else "failed",
-        "real_status": "success" if not full_post_failed and not validation_error else "failed",
         "patched_function": best_candidate.get("patched_function"),
         "patched_file": best_candidate.get("patched_file"),
         "llm_patch_artifact": best_candidate.get("llm_patch_artifact") or {},
@@ -219,40 +191,8 @@ def _validate_bug_artifacts(
             raw_meta,
         ) or best_candidate.get("repair_target_relpath", ""),
         "selected_function": best_candidate.get("function"),
-        "init_passed_count": len(init_passed_all),
-        "init_failed_count": len(init_failed_all),
-        "init_passed_tests": init_passed,
-        "init_failed_tests": init_failed,
-        "post_scope": "full_suite",
-        "post_passed_count": len(full_post_passed),
-        "post_failed_count": len(full_post_failed),
-        "post_passed_tests": list(full_post_passed),
-        "post_failed_tests": list(full_post_failed),
-        "full_post_passed_count": len(full_post_passed),
-        "full_post_failed_count": len(full_post_failed),
-        "full_post_passed_tests": list(full_post_passed),
-        "full_post_failed_tests": list(full_post_failed),
-        "patch_comparison_post_passed_count": len(patch_post_passed),
-        "patch_comparison_post_failed_count": len(patch_post_failed),
-        "patch_comparison_post_passed_tests": list(patch_post_passed),
-        "patch_comparison_post_failed_tests": list(patch_post_failed),
-        "fixed_fail_excluded_count": len(fixed_fail_excluded),
-        "fixed_fail_excluded_tests": list(fixed_fail_excluded),
-        "validation_error": validation_error,
-        "validation_details": validation_details,
+        **extract_evaluation_snapshot(best_candidate),
     }
-
-
-def _update_patch_artifact_status(artifact: dict, status: str, validation_error: str, details: dict):
-    path = artifact.get("_metadata_abs_path")
-    if not path:
-        return
-    public = _public_artifact(artifact)
-    public["status"] = status
-    public["validation_error"] = validation_error
-    public["validation_details"] = details or {}
-    with open(path, "w") as f:
-        json.dump(public, f, indent=4)
 
 
 def _save_success_patch(bug, artifact: dict, target_relpath: str):

@@ -14,6 +14,9 @@ get_loader(dataset)
                          ▼
                 Sandbox Adapter (compile + test)
                          │
+                         ├──► ReFix (optional)
+                         │        đọc llm_patches fail → LLM sửa lại → validate lại
+                         │
                          ▼
                   experiments/patches/      ← bản vá thành công
                          │
@@ -80,13 +83,59 @@ python3 main.py --apr --dataset tcpdump    # dùng LLM_PROVIDER trong .env
 python3 main.py --apr-validate --dataset php
 python3 main.py --apr-validate --dataset php --bug-id CVE-2018-7584
 
-# Bước 4 (optional) – Evaluation (FL + APR), lọc theo dataset.
+# Bước 4 (optional) – ReFix: sửa lại các patch APR đã fail từ artifact đã lưu.
+python3 main.py --refix --dataset fmt --llm openrouter
+python3 main.py --refix --dataset fmt --bug-id D.2__c1d430e61ab3 --llm openrouter
+
+# Bước 5 (optional) – Evaluation (FL + APR), lọc theo dataset.
 python3 main.py --eval --dataset tcpdump
 python3 main.py --eval --dataset tcpdump --fl-eval-level function
 python3 main.py --eval --dataset tcpdump --fl-eval-level file
 python3 main.py --eval --dataset tcpdump --fl-eval-level class
 python3 main.py --eval --dataset tcpdump --fl-eval-level all
 ```
+
+### Chạy APR kèm ReFix
+
+ReFix có thể chạy liền mạch ngay sau APR. Pipeline sẽ sinh patch APR như cũ,
+validate, rồi ReFix các candidate đã fail trong `experiments/llm_patches/`.
+
+```bash
+python3 main.py --apr --dataset fmt --llm openrouter --with-refix
+python3 main.py --apr --dataset fmt --bug-id D.2__c1d430e61ab3 --llm openrouter --with-refix
+python3 main.py --all --dataset fmt --llm openrouter --with-refix
+```
+
+### ReFix hoạt động như thế nào
+
+ReFix đọc lại artifact APR đã lưu:
+
+```text
+experiments/llm_patches/<bug-id>/
+```
+
+Với mỗi candidate fail, ReFix dùng:
+
+- function gốc trước APR;
+- function đã được APR patch nhưng fail;
+- `validation_details`, gồm `validation_error`, failed tests và `validation_log_tail` nếu có;
+- context cũ từ FailContext/Retrieval/Fix agent.
+
+ReFix tạo artifact mới dạng `__refix01.*` và không ghi đè artifact APR gốc:
+
+```text
+experiments/llm_patches/<bug-id>/
+  02__chrono.h_chrono_formatter_chrono_formatter.json
+  02__chrono.h_chrono_formatter_chrono_formatter__refix01.json
+  02__chrono.h_chrono_formatter_chrono_formatter__refix01.response.txt
+  02__chrono.h_chrono_formatter_chrono_formatter__refix01.function.c
+  02__chrono.h_chrono_formatter_chrono_formatter__refix01.patched.c
+```
+
+Nếu ReFix pass, patch cuối được lưu vào `experiments/patches/` và
+`experiments/apr_results.json` được cập nhật. Nếu đang phân tích kết quả cũ
+trong `experiments/Results/...`, cần copy đúng `llm_patches/` của experiment đó
+về `experiments/llm_patches/` trước khi chạy ReFix độc lập.
 
 
 ### Tham số dòng lệnh
@@ -97,7 +146,9 @@ python3 main.py --eval --dataset tcpdump --fl-eval-level all
 | `--fl`          | Chỉ chạy Fault Localization                        |
 | `--apr`         | Chỉ chạy APR với LLM; cần kết quả FL trước đó      |
 | `--apr-validate` | Chỉ validate lại patch artifact đã lưu, không gọi LLM |
-| `--bug-id`      | Giới hạn một bug khi dùng `--apr-validate`, ví dụ `CVE-2018-7584` |
+| `--refix`       | Chạy ReFix từ `experiments/llm_patches/` đã lưu    |
+| `--bug-id`      | Giới hạn một bug khi dùng `--apr-validate` hoặc `--refix`, ví dụ `CVE-2018-7584` |
+| `--with-refix`  | Sau APR hoặc `--all`, chạy thêm ReFix trước Evaluation |
 | `--eval`        | Chỉ chạy Evaluation (FL + APR), lọc theo dataset   |
 | `--all`         | Chạy FL → APR LLM → Evaluation                     |
 | `--include-fixed-fail-tests` | Không loại test có `outcome=FAIL` và `outcome_fixed=FAIL`; mặc định các test này bị loại khỏi FL/APR/validation |

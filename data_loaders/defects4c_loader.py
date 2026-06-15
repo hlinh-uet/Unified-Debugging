@@ -66,7 +66,10 @@ class Defects4CLoader(BugLoader):
         for folder, metadata_dir in self._metadata_dirs():
             direct = os.path.join(metadata_dir, f"{requested}_meta.json")
             if os.path.isfile(direct):
-                return self._record_from_meta_file(direct, data_folder=folder)
+                record = self._record_from_meta_file(direct, data_folder=folder)
+                if record:
+                    self._prefer_unique_metadata_id(record, requested)
+                return record
             for filename in sorted(os.listdir(metadata_dir)):
                 if filename.endswith("_meta.json"):
                     metadata_files.append((folder, os.path.join(metadata_dir, filename)))
@@ -90,7 +93,10 @@ class Defects4CLoader(BugLoader):
             if project and commit_after:
                 candidates.add(f"{project}@{commit_after}")
             if requested in candidates:
-                return self._record_from_meta_file(path, data_folder=folder)
+                record = self._record_from_meta_file(path, data_folder=folder)
+                if record and requested in {metadata_stem, commit_after, f"{project}@{commit_after}"}:
+                    self._prefer_unique_metadata_id(record, metadata_stem)
+                return record
         return None
 
     def _resolve_data_folder(self, requested: Optional[str]) -> Optional[str]:
@@ -347,6 +353,19 @@ class Defects4CLoader(BugLoader):
             raw = record.raw or {}
             record.bug_id = raw.get("metadata_stem") or record.bug_id
             raw["bug_id"] = record.bug_id
+
+    @staticmethod
+    def _prefer_unique_metadata_id(record: BugRecord, unique_id: str) -> None:
+        """Make load_one() use the same unique IDs that load_all() uses."""
+        if not record or not unique_id:
+            return
+        raw = record.raw or {}
+        original = record.bug_id
+        if original == unique_id:
+            return
+        raw.setdefault("original_bug_id", original)
+        raw["bug_id"] = unique_id
+        record.bug_id = unique_id
 
 
 def get_defects4c_accepted_path(bug_id: str, data_folder: Optional[str] = None) -> str:

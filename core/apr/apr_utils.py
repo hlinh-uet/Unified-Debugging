@@ -60,52 +60,27 @@ def dedup_initial_test_ids(tests):
     return passed, failed
 
 
-def failed_candidate_result(
-    *,
-    qualified_name: str,
-    score: float,
-    status: str,
-    validation_error: str,
-    candidate_path: str,
-    candidate_relpath: str,
-    patched_function: str,
-    patched_file: str,
-    llm_patch_artifact: dict,
-) -> dict:
-    return {
-        "function": qualified_name,
-        "score": score,
-        "status": status,
-        "status_scope": "patch_comparison_excluding_fixed_fail_tests",
-        "patch_comparison_status": "failed",
-        "real_status": "failed",
-        "validation_error": validation_error,
-        "repair_target_file": candidate_path,
-        "repair_target_relpath": candidate_relpath,
-        "patched_function": patched_function,
-        "patched_file": patched_file,
-        "llm_patch_artifact": llm_patch_artifact,
-        "post_scope": "full_suite",
-        "post_passed_count": 0,
-        "post_failed_count": 0,
-        "post_passed_tests": [],
-        "post_failed_tests": [],
-        "full_post_passed_count": 0,
-        "full_post_failed_count": 0,
-        "full_post_passed_tests": [],
-        "full_post_failed_tests": [],
-        "patch_comparison_post_passed_count": 0,
-        "patch_comparison_post_failed_count": 0,
-        "patch_comparison_post_passed_tests": [],
-        "patch_comparison_post_failed_tests": [],
-        "fixed_fail_excluded_count": 0,
-        "fixed_fail_excluded_tests": [],
-        "validation_details": {
-            "validation_error": validation_error,
-            "full_post_passed_tests": [],
-            "full_post_failed_tests": [],
-            "effective_post_passed_tests": [],
-            "effective_post_failed_tests": [],
-            "fixed_fail_excluded_tests": [],
-        },
-    }
+def classify_patch_outcome(init_failed, post_failed, validation_error: str = "") -> str:
+    """Classify one patch using the same test scope for init and post."""
+    if str(validation_error or "").strip():
+        return "invalid"
+
+    init_failed_set = {str(t).strip() for t in init_failed or [] if str(t).strip()}
+    post_failed_set = {str(t).strip() for t in post_failed or [] if str(t).strip()}
+    if not post_failed_set:
+        return "plausible"
+
+    fixed = init_failed_set - post_failed_set
+    regressions = post_failed_set - init_failed_set
+    if fixed and regressions:
+        return "noisefix"
+    if fixed:
+        return "cleanfix"
+    if regressions:
+        return "negfix"
+    return "nonefix"
+
+
+def is_plausible_status(status: object) -> bool:
+    """Accept both the current outcome label and legacy APR success records."""
+    return str(status or "").strip().lower() in {"plausible", "success"}
