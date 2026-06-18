@@ -1,3 +1,4 @@
+import difflib
 import json
 from typing import Optional, Tuple
 
@@ -6,7 +7,10 @@ from core.apr.llm import call_llm
 
 
 REFIX_SYSTEM_PROMPT = (
-    "You are a professional C/C++ patch refinement agent. Return ONLY the raw fixed C/C++ code. "
+    "You are a professional C/C++ patch refinement agent. Refine the previous failed patch; "
+    "do not solve from scratch unless the previous patch is clearly unrelated or invalid. "
+    "Never return a function identical to the previous patched function. "
+    "Return ONLY the raw fixed C/C++ code. "
     "No markdown, no explanation, no backticks."
 )
 
@@ -19,6 +23,7 @@ def build_refix_prompt(
     original_function: str,
     previous_patched_function: str,
     validation_details: dict,
+    patch_validation_analysis: str,
     prior_context: dict,
 ) -> str:
     focused_feedback = _focused_validation_feedback(validation_details, prior_context)
@@ -26,6 +31,7 @@ def build_refix_prompt(
         focused_feedback=focused_feedback,
         previous_patched_function=previous_patched_function,
     )
+    patch_delta = _patch_delta_summary(original_function, previous_patched_function)
     compact_validation = _compact_validation_details(validation_details)
     validation_json = json.dumps(
         compact_validation,
@@ -38,6 +44,9 @@ def build_refix_prompt(
         ensure_ascii=False,
         indent=2,
         default=str,
+    )
+    patch_validation_text = (patch_validation_analysis or "").strip() or (
+        "No PatchValidationAgent analysis was available. Rely on validation feedback and patch delta."
     )
     return f"""REFIX TASK
 Bug ID: {bug_id}
@@ -57,6 +66,22 @@ PREVIOUS PATCHED FUNCTION THAT FAILED VALIDATION
 BEGIN PREVIOUS PATCHED FUNCTION
 {previous_patched_function}
 END PREVIOUS PATCHED FUNCTION
+
+PATCH DELTA FROM ORIGINAL TO PREVIOUS PATCH
+This is the exact change already attempted by FixAgent. Do not blindly undo it by copying
+ORIGINAL FUNCTION. If this delta already addresses the suspected failure but validation still
+fails, the previous patch is insufficient and must be refined with a different minimal change.
+BEGIN PATCH DELTA
+{patch_delta}
+END PATCH DELTA
+
+PATCH VALIDATION ANALYSIS
+This critique was produced after validating the FixAgent patch. Use it to decide what to keep,
+what to revert, and what to refine. It is more specific than the original failure summary, but
+validation feedback and source code still take priority if there is a conflict.
+BEGIN PATCH VALIDATION ANALYSIS
+{patch_validation_text}
+END PATCH VALIDATION ANALYSIS
 
 FOCUSED FAILURE SIGNAL
 This is the most important evidence. The previous patch must be corrected to satisfy this behavior.
@@ -79,11 +104,24 @@ BEGIN COMPACT VALIDATION FEEDBACK JSON
 END COMPACT VALIDATION FEEDBACK JSON
 
 PRIOR APR CONTEXT
-This contains saved metadata from the original APR attempt. It may include retrieval/fix/fail-context artifact
-paths and previous status. Treat it as debugging context, not as source code truth.
+This contains saved metadata from the original APR attempt. It may include fail-context,
+code-context, and fix-agent artifact paths/responses plus previous status. Use the fail-context
+excerpts to understand the original intent, but treat ORIGINAL FUNCTION, PREVIOUS PATCHED FUNCTION, and
+VALIDATION FEEDBACK as stronger evidence.
 BEGIN PRIOR APR CONTEXT JSON
 {prior_context_json}
 END PRIOR APR CONTEXT JSON
+
+REFIX POLICY
+1. Treat PREVIOUS PATCHED FUNCTION as the baseline to improve, not as disposable text.
+2. Preserve any useful checks, bounds, conversions, helper calls, and style choices from the previous patch.
+3. Change only the part of the previous patch that explains the validation failure.
+4. If validation failed because the previous patch was malformed, uncompilable, or a no-op, repair that concrete issue while staying close to the failure evidence.
+5. If validation feedback shows the previous patch fixed one failure but introduced a regression, keep the useful fix and remove only the regressing behavior.
+6. Do not reintroduce the original bug from ORIGINAL FUNCTION unless the previous patch clearly changed the wrong code.
+7. Do not output the same code as PREVIOUS PATCHED FUNCTION; if no safe refinement is obvious, make the smallest evidence-backed adjustment rather than repeating it.
+8. If PATCH VALIDATION ANALYSIS says part of the FixAgent patch is useful, preserve it unless source/validation evidence proves it caused a regression.
+9. If PATCH VALIDATION ANALYSIS says a change violated the failure contract, revert or refine that exact change while keeping useful parts.
 
 OUTPUT CONTRACT
 1. Output exactly one complete fixed C/C++ definition of function {func_name}.
@@ -92,6 +130,7 @@ OUTPUT CONTRACT
 4. Do not add includes, new global helpers, main functions, unrelated refactors, or changes outside this function.
 5. Do not return markdown, explanations, code fences, or backticks.
 6. If the previous patch changed behavior in the wrong direction, revert only that wrong part and keep useful parts.
+7. Do not produce a completely new patch when a small refinement of the previous patch can address the feedback.
 
 REFINED FIXED FUNCTION
 """
@@ -127,10 +166,40 @@ def _focused_validation_feedback(validation_details: dict, prior_context: dict) 
         if not text:
             continue
         lower = text.lower()
-        if "failure_summary" in lower or "expected" in lower or "observed" in lower:
+        if (
+            "failure_summary" in lower
+            or "likely_patch_issue" in lower
+            or "patch_outcome" in lower
+            or "forbidden_changes" in lower
+            or "must_preserve" in lower
+            or "suspected_root_cause" in lower
+            or "expected" in lower
+            or "observed" in lower
+        ):
             parts.append(f"{key}:\n{text[:5000]}")
 
     return "\n\n".join(parts) if parts else "No focused failure signal was available."
+
+
+def _patch_delta_summary(original_function: str, previous_patched_function: str) -> str:
+    original_lines = (original_function or "").splitlines()
+    previous_lines = (previous_patched_function or "").splitlines()
+    diff_lines = list(
+        difflib.unified_diff(
+            original_lines,
+            previous_lines,
+            fromfile="original",
+            tofile="previous_patch",
+            lineterm="",
+            n=3,
+        )
+    )
+    if not diff_lines:
+        return "No textual delta was detected between original and previous patch."
+    text = "\n".join(diff_lines)
+    if len(text) > 6000:
+        return text[:6000] + "\n...<patch delta truncated>"
+    return text
 
 
 def _build_patch_diagnosis_hints(
@@ -182,6 +251,28 @@ def _build_patch_diagnosis_hints(
             "the output must still contain the negative sign."
         )
 
+    string_length_failure = (
+        "length" in feedback_lc
+        and "string" in feedback_lc
+        and ("numeric" in feedback_lc or "decimal" in feedback_lc or "strtol" in feedback_lc)
+    )
+    previous_removed_numeric_hint = (
+        "lyd_valhint_string" in patch_lc
+        and "strtol" not in patch_lc
+        and "lyd_valhint_decnum" not in patch_lc
+    )
+    if string_length_failure:
+        hints.append(
+            "The focused failure discusses string length validation and numeric/decimal value hints. "
+            "Be careful not to classify schema-unknown string content as numeric too early."
+        )
+        if previous_removed_numeric_hint:
+            hints.append(
+                "The previous patch already removed generic strtol/LYD_VALHINT_DECNUM detection. "
+                "Do not reintroduce that original numeric-detection logic unless the validation log "
+                "explicitly says the removal caused a regression."
+            )
+
     if not hints:
         hints.append("No deterministic diagnosis hint was inferred beyond the focused failure signal.")
     return "\n".join(f"- {hint}" for hint in hints)
@@ -221,7 +312,8 @@ def run_refix_agent(
     original_function: str,
     previous_patched_function: str,
     validation_details: dict,
-    prior_context: dict,
+    patch_validation_analysis: str = "",
+    prior_context: Optional[dict] = None,
 ) -> Tuple[Optional[str], dict]:
     prompt = build_refix_prompt(
         bug_id=bug_id,
@@ -230,6 +322,7 @@ def run_refix_agent(
         original_function=original_function,
         previous_patched_function=previous_patched_function,
         validation_details=validation_details,
+        patch_validation_analysis=patch_validation_analysis,
         prior_context=prior_context,
     )
     response = call_llm(

@@ -720,6 +720,7 @@ class Defects4CAdapter(SandboxAdapter):
                 f"(timeout --kill-after=10s {shlex.quote(str(test_timeout) + 's')} "
                 f"bash -lc {shlex.quote(test_cmd)}) >/tmp/udbg_test.log 2>&1",
                 "rc=$?",
+                f"if [ $rc -eq 124 ] || [ $rc -eq 137 ]; then echo __UD_TIMEOUT__ {marker}; tail -40 /tmp/udbg_test.log; exit 96; fi",
                 f"if [ $rc -eq 0 ]; then echo __UD_PASS__ {marker}; else echo __UD_FAIL__ {marker}; tail -40 /tmp/udbg_test.log; fi",
             ])
         script = "\n".join(lines)
@@ -742,9 +743,14 @@ class Defects4CAdapter(SandboxAdapter):
                 passed.append(line.split(" ", 1)[1].strip())
             elif line.startswith("__UD_FAIL__ "):
                 failed.append(line.split(" ", 1)[1].strip())
+            elif line.startswith("__UD_TIMEOUT__ "):
+                timed_out = line.split(" ", 1)[1].strip()
+                return False, passed, failed, f"test_timeout:{timed_out}"
             elif line.startswith("__UD_TEST_HELPER_MISSING__ "):
                 missing = line.split(" ", 1)[1].strip()
                 return False, [], [], f"test_helper_missing:{missing}"
+        if result.returncode == 96:
+            return False, passed, failed, "test_timeout"
         if result.returncode == 97:
             return False, [], [], "compile_failed"
         if result.returncode == 98:

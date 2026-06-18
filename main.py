@@ -259,10 +259,11 @@ def main():
     parser.add_argument(
         "--fl-eval-level",
         default="combined",
-        choices=["combined", "function", "file", "class", "all"],
+        choices=["combined", "apr_feedback", "function", "file", "class", "all"],
         help=(
             "Mức kết quả FL dùng khi evaluation: combined "
-            "(fault_localization_results.json), function "
+            "(fault_localization_results.json), apr_feedback "
+            "(fault_localization_apr_feedback_results.json), function "
             "(fault_localization_function_results.json), file "
             "(fault_localization_file_results.json), class "
             "(fault_localization_class_results.json), hoặc all."

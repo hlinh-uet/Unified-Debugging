@@ -6,13 +6,14 @@ from configs.path import EXPERIMENTS_DIR
 
 FL_RESULT_FILES = {
     "combined": "fault_localization_results.json",
+    "apr_feedback": "fault_localization_apr_feedback_results.json",
     "function": "fault_localization_function_results.json",
     "file": "fault_localization_file_results.json",
     "class": "fault_localization_class_results.json",
 }
 
 
-def evaluate_fl(dataset: str = "", level: str = "combined"):
+def evaluate_fl(dataset: str = "", level: str = "combined", results_dir: str = None):
     """
     Đánh giá Fault Localization với các metrics chuẩn:
       - Top-K accuracy (K=1, 3, 5): GT function xuất hiện trong top K?
@@ -24,18 +25,18 @@ def evaluate_fl(dataset: str = "", level: str = "combined"):
     (tất cả hàm cùng điểm được gán rank = vị trí cuối cùng trong nhóm).
     """
     if level == "all":
-        for one_level in ("combined", "function", "file", "class"):
-            evaluate_fl(dataset, level=one_level)
+        for one_level in ("combined", "apr_feedback", "function", "file", "class"):
+            evaluate_fl(dataset, level=one_level, results_dir=results_dir)
         return
 
     if level not in FL_RESULT_FILES:
         raise ValueError(
             f"FL evaluation level không hợp lệ: {level}. "
-            "Chọn một trong: combined, function, file, class, all."
+            "Chọn một trong: combined, apr_feedback, function, file, class, all."
         )
 
     print(f"\n--- Báo cáo Đánh giá Fault Localization (FL - {level}) ---")
-    fl_results_file = os.path.join(EXPERIMENTS_DIR, FL_RESULT_FILES[level])
+    fl_results_file = os.path.join(results_dir or EXPERIMENTS_DIR, FL_RESULT_FILES[level])
     if not os.path.exists(fl_results_file):
         print(f"Không tìm thấy file kết quả định vị lỗi {fl_results_file}")
         return

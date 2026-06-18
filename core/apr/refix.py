@@ -4,9 +4,10 @@ import shutil
 from typing import Optional
 
 from configs.path import EXPERIMENTS_DIR, LLM_PATCHES_DIR, PATCHES_DIR
-from core.apr.agent import run_refix_agent
+from core.apr.agent import run_patch_validation_agent, run_refix_agent
 from core.apr.apr_utils import (
     candidate_relpath_from_buggy_tree,
+    candidate_quality_key,
     is_plausible_status,
     is_defects4c_dataset,
     source_language_from_path,
@@ -28,7 +29,83 @@ from core.utils import (
     source_function_name_for_extraction,
 )
 from data_loaders.base_loader import get_loader
-from data_loaders.sandbox_adapter import defects4c_docker_ready
+from data_loaders.sandbox_adapter import defects4c_docker_ready, get_sandbox_adapter
+
+
+def run_refix_for_failed_artifacts(
+    *,
+    dataset: str,
+    bug,
+    artifacts: list,
+    llm_provider: Optional[str],
+    exclude_fixed_fail_tests: bool,
+    excluded_fixed_fail_tests: list,
+    refix_round: int = 1,
+) -> Optional[dict]:
+    """Run ReFix directly from failed patch artifacts produced in the current APR run."""
+    return _refix_bug_artifacts(
+        dataset=dataset,
+        bug=bug,
+        artifacts=artifacts,
+        llm_provider=llm_provider,
+        exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+        excluded_fixed_fail_tests=excluded_fixed_fail_tests,
+        refix_round=refix_round,
+    )
+
+
+def _candidate_trace_record(candidate: Optional[dict], *, agent: str) -> dict:
+    """Return a compact manifest entry; full patch content stays in artifact files."""
+    if not candidate:
+        return {}
+    artifact = candidate.get("llm_patch_artifact") or {}
+    return {
+        "agent": agent,
+        "function": candidate.get("function") or candidate.get("selected_function"),
+        "repair_target_file": candidate.get("repair_target_file"),
+        "repair_target_relpath": candidate.get("repair_target_relpath"),
+        "llm_patch_artifact": artifact,
+        "validation_context_path": artifact.get("validation_context_path", ""),
+        "quality_key": list(candidate_quality_key(candidate)),
+        **extract_evaluation_snapshot(candidate),
+    }
+
+
+def _artifact_trace_record(artifact: Optional[dict], *, agent: str) -> dict:
+    """Return a compact manifest entry for a saved patch metadata artifact."""
+    if not artifact:
+        return {}
+    return {
+        "agent": agent,
+        "function": artifact.get("function"),
+        "repair_target_relpath": artifact.get("repair_target_relpath"),
+        "llm_patch_artifact": artifact,
+        "validation_context_path": artifact.get("validation_context_path", ""),
+        "quality_key": list(candidate_quality_key(artifact)),
+        **extract_evaluation_snapshot(artifact),
+    }
+
+
+def _merge_evaluation_history(existing_history: list, refix_result: dict) -> list:
+    """Keep prior history and append the standalone ReFix evaluation if missing."""
+    history = list(existing_history) if isinstance(existing_history, list) else []
+    refix_artifact = (refix_result or {}).get("llm_patch_artifact") or {}
+    refix_path = refix_artifact.get("metadata_path") or refix_artifact.get("patched_function_path")
+    for item in history:
+        artifact = item.get("artifact") if isinstance(item, dict) else {}
+        if isinstance(artifact, dict) and refix_path and (
+            artifact.get("metadata_path") == refix_path
+            or artifact.get("patched_function_path") == refix_path
+        ):
+            return history
+    history.append(
+        {
+            "agent": "refix_agent",
+            "artifact": refix_artifact,
+            **extract_evaluation_snapshot(refix_result),
+        }
+    )
+    return history
 
 
 def run_refix_from_saved_artifacts(
@@ -81,12 +158,16 @@ def run_refix_from_saved_artifacts(
         if not artifacts:
             print(f"[REFIX] Bỏ qua {cur_bug_id}: không có failed APR artifact để refix.")
             continue
+        best_fix_artifact = min(artifacts, key=candidate_quality_key)
 
-        print(f"[REFIX] Xử lý {cur_bug_id}: {len(artifacts)} failed candidate artifact.")
+        print(
+            f"[REFIX] Xử lý {cur_bug_id}: chọn best FixAgent artifact từ "
+            f"{len(artifacts)} failed artifact."
+        )
         result = _refix_bug_artifacts(
             dataset=dataset,
             bug=bug,
-            artifacts=artifacts,
+            artifacts=[best_fix_artifact],
             llm_provider=llm_provider,
             exclude_fixed_fail_tests=exclude_fixed_fail_tests,
             excluded_fixed_fail_tests=excluded_fixed_fail_by_bug.get(cur_bug_id, []),
@@ -94,10 +175,45 @@ def run_refix_from_saved_artifacts(
         )
         if not result:
             continue
-        apr_results[cur_bug_id] = result
+        existing_result = apr_results.get(cur_bug_id) if isinstance(apr_results, dict) else {}
+        if not isinstance(existing_result, dict):
+            existing_result = {}
+        refix_is_better = candidate_quality_key(result) < candidate_quality_key(best_fix_artifact)
+        if refix_is_better:
+            apr_results[cur_bug_id] = {
+                **result,
+                "selected_agent": "refix_agent",
+                "selected_candidate": _candidate_trace_record(result, agent="refix_agent"),
+                "fix_agent_best_candidate": _artifact_trace_record(best_fix_artifact, agent="fix_agent"),
+                "refix_agent_result": _candidate_trace_record(result, agent="refix_agent"),
+                "refix_attempted": True,
+                "refix_selected": True,
+                "refix_applied": True,
+            }
+            updated += 1
+        else:
+            print(
+                f"[REFIX] Giữ FixAgent artifact cho {cur_bug_id}: "
+                f"ReFix không cải thiện status={result.get('status')}"
+            )
+            apr_results[cur_bug_id] = {
+                **existing_result,
+                "selected_agent": existing_result.get("selected_agent") or "fix_agent",
+                "fix_agent_best_candidate": existing_result.get("fix_agent_best_candidate")
+                or _artifact_trace_record(best_fix_artifact, agent="fix_agent"),
+                "refix_agent_result": _candidate_trace_record(result, agent="refix_agent"),
+                "refix_agent_evaluation": extract_evaluation_snapshot(result),
+                "refix_attempted": True,
+                "refix_selected": False,
+                "refix_applied": False,
+                "refix_source_artifact": result.get("refix_source_artifact") or {},
+                "evaluation_history": _merge_evaluation_history(
+                    existing_result.get("evaluation_history") or [],
+                    result,
+                ),
+            }
         with open(apr_results_file, "w") as f:
             json.dump(apr_results, f, indent=4)
-        updated += 1
 
     print(f"[REFIX] Đã cập nhật {updated} bug trong {apr_results_file}.")
 
@@ -154,11 +270,7 @@ def _refix_bug_artifacts(
     if best_candidate is None and candidate_results:
         best_candidate = min(
             candidate_results,
-            key=lambda c: (
-                1 if c.get("status") == "invalid" else 0,
-                len(c["post_failed_tests"]),
-                -len(c["post_passed_tests"]),
-            ),
+            key=candidate_quality_key,
         )
         print(
             f"    [BEST] Chọn ReFix candidate tốt nhất: {best_candidate.get('function')} "
@@ -169,13 +281,51 @@ def _refix_bug_artifacts(
     if not best_candidate:
         return None
 
+    fix_agent_evaluation = extract_evaluation_snapshot(
+        best_candidate.get("refix_source_artifact") or {}
+    )
+    refix_agent_evaluation = extract_evaluation_snapshot(best_candidate)
+    evaluation_history = []
+    if fix_agent_evaluation:
+        evaluation_history.append(
+            {
+                "agent": "fix_agent",
+                "artifact": best_candidate.get("refix_source_artifact") or {},
+                **fix_agent_evaluation,
+            }
+        )
+    if refix_agent_evaluation:
+        evaluation_history.append(
+            {
+                "agent": "refix_agent",
+                "artifact": best_candidate.get("llm_patch_artifact") or {},
+                **refix_agent_evaluation,
+            }
+        )
+
     return {
         "dataset": dataset,
         "patched_function": best_candidate.get("patched_function"),
         "patched_file": best_candidate.get("patched_file"),
         "llm_patch_artifact": best_candidate.get("llm_patch_artifact") or {},
+        "selected_agent": "refix_agent",
+        "selected_candidate": _candidate_trace_record(best_candidate, agent="refix_agent"),
+        "refix_agent_candidates": [
+            _candidate_trace_record(candidate, agent="refix_agent")
+            for candidate in candidate_results
+        ],
+        "fix_agent_best_candidate": _artifact_trace_record(
+            best_candidate.get("refix_source_artifact") or {},
+            agent="fix_agent",
+        ),
+        "refix_agent_result": _candidate_trace_record(best_candidate, agent="refix_agent"),
+        "refix_attempted": True,
+        "refix_selected": True,
         "refix_applied": True,
         "refix_source_artifact": best_candidate.get("refix_source_artifact") or {},
+        "fix_agent_evaluation": fix_agent_evaluation,
+        "refix_agent_evaluation": refix_agent_evaluation,
+        "evaluation_history": evaluation_history,
         "repair_target_file": best_candidate.get("repair_target_file"),
         "repair_target_relpath": best_candidate.get("repair_target_relpath")
         or candidate_relpath_from_buggy_tree(best_candidate.get("repair_target_file") or "", raw_meta),
@@ -198,7 +348,11 @@ def _run_one_refix_candidate(
     initial: dict,
     refix_round: int,
 ) -> Optional[dict]:
-    original_path = _repair_target_file(raw_meta, target_relpath)
+    original_path = (
+        artifact.get("_repair_target_file_abs_path")
+        or _repair_target_file(raw_meta, target_relpath)
+        or _fallback_repair_target_file(dataset, bug.bug_id, target_relpath)
+    )
     if not original_path or not os.path.isfile(original_path):
         print(f"    [SKIP] Không tìm thấy source gốc cho {target_relpath}.")
         return None
@@ -207,8 +361,8 @@ def _run_one_refix_candidate(
     previous_patched_file = artifact.get("_patched_file_abs_path") or _experiment_path(
         str(artifact.get("patched_file_path") or "")
     )
-    if not previous_function.strip() or not os.path.isfile(previous_patched_file):
-        print("    [SKIP] Artifact thiếu previous patched function/file.")
+    if not previous_function.strip():
+        print("    [SKIP] Artifact thiếu previous patched function.")
         return None
 
     with open(original_path, "r", errors="replace") as f:
@@ -230,7 +384,7 @@ def _run_one_refix_candidate(
         return None
 
     previous_validation = _validation_feedback_from_artifact(artifact)
-    if not previous_validation:
+    if not previous_validation and os.path.isfile(previous_patched_file):
         previous_validation = _validate_existing_artifact(
             dataset=dataset,
             bug_id=bug.bug_id,
@@ -238,6 +392,23 @@ def _run_one_refix_candidate(
             target_relpath=target_relpath,
             exclude_fixed_fail_tests=exclude_fixed_fail_tests,
         )
+
+    prior_context = _prior_context_from_artifact(artifact)
+    patch_validation_analysis, patch_validation_agent_artifact = run_patch_validation_agent(
+        bug_id=bug.bug_id,
+        attempt_index=attempt_index,
+        qualified_name=qualified_name,
+        candidate_relpath=target_relpath,
+        llm_provider=llm_provider,
+        func_name=source_func_name,
+        cand_label=target_relpath or os.path.basename(original_path),
+        original_function=original_function,
+        patched_function=previous_function,
+        validation_details=previous_validation,
+        prior_context=prior_context,
+    )
+    if patch_validation_agent_artifact:
+        artifact["patch_validation_agent_artifact"] = patch_validation_agent_artifact
 
     raw_patch, refix_agent_artifact = run_refix_agent(
         bug_id=bug.bug_id,
@@ -251,7 +422,8 @@ def _run_one_refix_candidate(
         original_function=original_function,
         previous_patched_function=previous_function,
         validation_details=previous_validation,
-        prior_context=_prior_context_from_artifact(artifact),
+        patch_validation_analysis=patch_validation_analysis,
+        prior_context=prior_context,
     )
     if not raw_patch:
         return _failed_refix_candidate(
@@ -364,7 +536,21 @@ def _run_one_refix_candidate(
         validation_error=snapshot["validation_error"],
         validation_details=validation_details,
         evaluation_snapshot=snapshot,
+        validation_context=_refix_validation_context(
+            bug_id=bug.bug_id,
+            qualified_name=qualified_name,
+            target_relpath=target_relpath,
+            original_path=original_path,
+            raw_patch=raw_patch,
+            patched_function=candidate_patched_func,
+            snapshot=snapshot,
+            validation_details=validation_details,
+            parent_patch_artifact=_public_artifact(artifact),
+            patch_validation_agent_artifact=artifact.get("patch_validation_agent_artifact") or {},
+            refix_agent_artifact=refix_agent_artifact,
+        ),
         parent_patch_artifact=_public_artifact(artifact),
+        patch_validation_agent_artifact=artifact.get("patch_validation_agent_artifact") or {},
         refix_agent_artifact=refix_agent_artifact,
     )
 
@@ -417,7 +603,21 @@ def _failed_refix_candidate(
         validation_error=validation_error,
         validation_details=snapshot["validation_details"],
         evaluation_snapshot=snapshot,
+        validation_context=_refix_validation_context(
+            bug_id=bug.bug_id,
+            qualified_name=qualified_name,
+            target_relpath=target_relpath,
+            original_path=original_path,
+            raw_patch=raw_patch,
+            patched_function=patched_function,
+            snapshot=snapshot,
+            validation_details=snapshot.get("validation_details") or {},
+            parent_patch_artifact=_public_artifact(artifact),
+            patch_validation_agent_artifact=artifact.get("patch_validation_agent_artifact") or {},
+            refix_agent_artifact=refix_agent_artifact,
+        ),
         parent_patch_artifact=_public_artifact(artifact),
+        patch_validation_agent_artifact=artifact.get("patch_validation_agent_artifact") or {},
         refix_agent_artifact=refix_agent_artifact,
     )
     return {
@@ -430,6 +630,37 @@ def _failed_refix_candidate(
         "llm_patch_artifact": refix_patch_artifact,
         "refix_source_artifact": _public_artifact(artifact),
         **snapshot,
+    }
+
+
+def _refix_validation_context(
+    *,
+    bug_id: str,
+    qualified_name: str,
+    target_relpath: str,
+    original_path: str,
+    raw_patch: str,
+    patched_function: str,
+    snapshot: dict,
+    validation_details: dict,
+    parent_patch_artifact: dict,
+    patch_validation_agent_artifact: dict,
+    refix_agent_artifact: dict,
+) -> dict:
+    """Build rich validation feedback for ReFix-produced artifacts."""
+    return {
+        "agent": "refix_agent",
+        "bug_id": bug_id,
+        "function": qualified_name,
+        "repair_target_file": original_path,
+        "repair_target_relpath": target_relpath,
+        "evaluation_snapshot": extract_evaluation_snapshot(snapshot),
+        "raw_validation_details": validation_details or {},
+        "raw_patch_excerpt": (raw_patch or "")[:8000],
+        "patched_function_excerpt": (patched_function or "")[:8000],
+        "parent_patch_artifact": parent_patch_artifact or {},
+        "patch_validation_agent_artifact": patch_validation_agent_artifact or {},
+        "refix_agent_artifact": refix_agent_artifact or {},
     }
 
 
@@ -453,14 +684,19 @@ def _refix_source_artifacts_for_bug(bug_id: str) -> list:
         if is_plausible_status(data.get("status")):
             continue
         patched_rel = data.get("patched_file_path")
+        patched_function_rel = data.get("patched_function_path")
         target_rel = data.get("repair_target_relpath")
-        if not patched_rel or not target_rel:
+        if not patched_rel and not patched_function_rel:
             continue
-        patched_path = _experiment_path(str(patched_rel))
-        if not os.path.isfile(patched_path):
+        patched_path = _experiment_path(str(patched_rel)) if patched_rel else ""
+        patched_function_path = _experiment_path(str(patched_function_rel)) if patched_function_rel else ""
+        if patched_rel and not os.path.isfile(patched_path):
+            continue
+        if not patched_rel and not os.path.isfile(patched_function_path):
             continue
         data["_metadata_abs_path"] = path
-        data["_patched_file_abs_path"] = patched_path
+        if patched_path:
+            data["_patched_file_abs_path"] = patched_path
         artifacts.append(data)
 
     return sorted(
@@ -505,35 +741,51 @@ def _validate_existing_artifact(
 
 
 def _validation_feedback_from_artifact(artifact: dict) -> dict:
-    details = dict(artifact.get("validation_details") or {})
+    validation_context = _artifact_validation_context(artifact)
+    details = dict(validation_context.get("raw_validation_details") or {})
+    if not details:
+        details = dict(validation_context.get("validation_details") or {})
+    if not details:
+        details = dict(artifact.get("validation_details") or {})
     for key in ("validation_error", "post_failed_tests", "full_post_failed_tests"):
-        value = artifact.get(key)
+        value = artifact.get(key) or (validation_context.get("evaluation_snapshot") or {}).get(key)
         if value:
             details[key] = value
     return details
 
 
 def _prior_context_from_artifact(artifact: dict) -> dict:
+    validation_context = _artifact_validation_context(artifact)
     out = {
         "function": artifact.get("function"),
         "status": artifact.get("status"),
         "validation_error": artifact.get("validation_error"),
         "repair_target_relpath": artifact.get("repair_target_relpath"),
+        "validation_context": validation_context,
         "fail_context_agent_artifact": artifact.get("fail_context_agent_artifact") or {},
         "code_context_collector_agent_artifact": artifact.get("code_context_collector_agent_artifact") or {},
         "retrieval_context_agent_artifact": artifact.get("retrieval_context_agent_artifact") or {},
         "fix_agent_artifact": artifact.get("fix_agent_artifact") or {},
+        "patch_validation_agent_artifact": artifact.get("patch_validation_agent_artifact") or {},
     }
     for key in (
         "fail_context_agent_artifact",
         "retrieval_context_agent_artifact",
         "fix_agent_artifact",
+        "patch_validation_agent_artifact",
     ):
         response_path = (out.get(key) or {}).get("response_path")
         text = _read_artifact_text(response_path)
         if text:
             out[f"{key}_response_excerpt"] = text[:4000]
     return out
+
+
+def _artifact_validation_context(artifact: dict) -> dict:
+    path_value = artifact.get("validation_context_path")
+    if not path_value:
+        return {}
+    return _load_json(_experiment_path(str(path_value)), default={})
 
 
 def _save_success_patch(bug, candidate: dict):
@@ -562,6 +814,17 @@ def _repair_target_file(raw_meta: dict, relpath: str) -> str:
         if os.path.isfile(path):
             return path
     return ""
+
+
+def _fallback_repair_target_file(dataset: str, bug_id: str, relpath: str) -> str:
+    """Resolve source path for saved artifacts that lack repair_target_relpath."""
+    if relpath:
+        return ""
+    try:
+        source_path = get_sandbox_adapter(dataset, bug_id).get_source_path()
+    except Exception:
+        return ""
+    return source_path if source_path and os.path.isfile(source_path) else ""
 
 
 def _read_artifact_text(path_value: object) -> str:

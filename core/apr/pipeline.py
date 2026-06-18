@@ -8,10 +8,10 @@ from core.apr.agent import (
     run_code_context_collector_agent,
     run_fail_context_agent,
     run_fix_agent,
-    run_retrieval_context_agent,
 )
 from core.apr.apr_utils import (
     candidate_relpath_from_buggy_tree,
+    candidate_quality_key,
     is_plausible_status,
     is_defects4c_dataset,
     source_language_from_path,
@@ -25,6 +25,7 @@ from core.apr.evaluation_snapshot import (
     extract_evaluation_snapshot,
 )
 from core.apr.validation import validate_patch
+from core.apr.refix import run_refix_for_failed_artifacts
 from core.test_filtering import (
     filter_bug_map_for_pipeline,
     has_failed_tests,
@@ -39,6 +40,56 @@ from core.utils import (
 )
 from data_loaders.base_loader import get_loader
 from data_loaders.sandbox_adapter import defects4c_docker_ready, get_sandbox_adapter
+
+
+def _build_patch_validation_context(
+    *,
+    agent: str,
+    bug_id: str,
+    qualified_name: str,
+    candidate_relpath: str,
+    repair_target_file: str,
+    raw_patch: str,
+    patched_function: str,
+    snapshot: dict,
+    validation_details: dict,
+    fail_context_agent_artifact: dict,
+    code_context_collector_agent_artifact: dict,
+    fix_agent_artifact: dict,
+) -> dict:
+    """Build rich validation feedback for ReFix/debug artifacts."""
+    return {
+        "agent": agent,
+        "bug_id": bug_id,
+        "function": qualified_name,
+        "repair_target_file": repair_target_file,
+        "repair_target_relpath": candidate_relpath,
+        "evaluation_snapshot": extract_evaluation_snapshot(snapshot),
+        "raw_validation_details": validation_details or {},
+        "raw_patch_excerpt": (raw_patch or "")[:8000],
+        "patched_function_excerpt": (patched_function or "")[:8000],
+        "fail_context_agent_artifact": fail_context_agent_artifact or {},
+        "code_context_collector_agent_artifact": code_context_collector_agent_artifact or {},
+        "fix_agent_artifact": fix_agent_artifact or {},
+    }
+
+
+def _candidate_trace_record(candidate: Optional[dict], *, agent: str) -> dict:
+    """Return a compact manifest entry; full patch content stays in artifact files."""
+    if not candidate:
+        return {}
+    artifact = candidate.get("llm_patch_artifact") or {}
+    return {
+        "agent": agent,
+        "function": candidate.get("function"),
+        "score": candidate.get("score"),
+        "repair_target_file": candidate.get("repair_target_file"),
+        "repair_target_relpath": candidate.get("repair_target_relpath"),
+        "llm_patch_artifact": artifact,
+        "validation_context_path": artifact.get("validation_context_path", ""),
+        "quality_key": list(candidate_quality_key(candidate)),
+        **extract_evaluation_snapshot(candidate),
+    }
 
 
 def run_apr_pipeline(
@@ -269,21 +320,6 @@ def run_apr_pipeline(
             )
             repair_evidence_pack = collector_context.get("repair_evidence_pack") or {}
 
-            retrieval_context, retrieval_context_agent_artifact = run_retrieval_context_agent(
-                bug_id=bug_id,
-                attempt_index=llm_patch_attempt_index,
-                qualified_name=qualified_name,
-                candidate_relpath=candidate_relpath,
-                llm_provider=llm_provider,
-                func_name=source_func_name,
-                cand_label=cand_label,
-                func_code=func_code,
-                collector_context=collector_context,
-            )
-            if not retrieval_context:
-                print("    [ERROR] RetrievalContextAgent trả về None. Bỏ qua hàm này.")
-                continue
-
             raw_patch, fix_agent_artifact = run_fix_agent(
                 bug_id=bug_id,
                 attempt_index=llm_patch_attempt_index,
@@ -293,7 +329,6 @@ def run_apr_pipeline(
                 func_name=source_func_name,
                 cand_label=cand_label,
                 func_code=func_code,
-                retrieval_context=retrieval_context,
                 repair_evidence_pack=repair_evidence_pack,
                 failed_tests_context=failed_tests_context,
             )
@@ -329,9 +364,22 @@ def run_apr_pipeline(
                     status=snapshot["status"],
                     validation_error=snapshot["validation_error"],
                     evaluation_snapshot=snapshot,
+                    validation_context=_build_patch_validation_context(
+                        agent="fix_agent",
+                        bug_id=bug_id,
+                        qualified_name=qualified_name,
+                        candidate_relpath=candidate_relpath,
+                        repair_target_file=candidate_path,
+                        raw_patch=raw_patch,
+                        patched_function=candidate_patched_func,
+                        snapshot=snapshot,
+                        validation_details=snapshot.get("validation_details") or {},
+                        fail_context_agent_artifact=fail_context_agent_artifact,
+                        code_context_collector_agent_artifact=code_context_collector_agent_artifact,
+                        fix_agent_artifact=fix_agent_artifact,
+                    ),
                     fail_context_agent_artifact=fail_context_agent_artifact,
                     code_context_collector_agent_artifact=code_context_collector_agent_artifact,
-                    retrieval_context_agent_artifact=retrieval_context_agent_artifact,
                     fix_agent_artifact=fix_agent_artifact,
                 )
                 candidate_results.append({
@@ -342,6 +390,7 @@ def run_apr_pipeline(
                     "patched_function": candidate_patched_func,
                     "patched_file": "",
                     "llm_patch_artifact": llm_patch_artifact,
+                    "fix_agent_evaluation": extract_evaluation_snapshot(snapshot),
                     **snapshot,
                 })
                 continue
@@ -375,9 +424,22 @@ def run_apr_pipeline(
                     status=snapshot["status"],
                     validation_error=snapshot["validation_error"],
                     evaluation_snapshot=snapshot,
+                    validation_context=_build_patch_validation_context(
+                        agent="fix_agent",
+                        bug_id=bug_id,
+                        qualified_name=qualified_name,
+                        candidate_relpath=candidate_relpath,
+                        repair_target_file=candidate_path,
+                        raw_patch=raw_patch,
+                        patched_function=candidate_patched_func,
+                        snapshot=snapshot,
+                        validation_details=snapshot.get("validation_details") or {},
+                        fail_context_agent_artifact=fail_context_agent_artifact,
+                        code_context_collector_agent_artifact=code_context_collector_agent_artifact,
+                        fix_agent_artifact=fix_agent_artifact,
+                    ),
                     fail_context_agent_artifact=fail_context_agent_artifact,
                     code_context_collector_agent_artifact=code_context_collector_agent_artifact,
-                    retrieval_context_agent_artifact=retrieval_context_agent_artifact,
                     fix_agent_artifact=fix_agent_artifact,
                 )
                 candidate_results.append({
@@ -388,6 +450,7 @@ def run_apr_pipeline(
                     "patched_function": candidate_patched_func,
                     "patched_file": candidate_patched_source,
                     "llm_patch_artifact": llm_patch_artifact,
+                    "fix_agent_evaluation": extract_evaluation_snapshot(snapshot),
                     **snapshot,
                 })
                 continue
@@ -438,11 +501,25 @@ def run_apr_pipeline(
                 status=snapshot["status"],
                 validation_error=snapshot["validation_error"],
                 evaluation_snapshot=snapshot,
+                validation_context=_build_patch_validation_context(
+                    agent="fix_agent",
+                    bug_id=bug_id,
+                    qualified_name=qualified_name,
+                    candidate_relpath=candidate_relpath,
+                    repair_target_file=candidate_path,
+                    raw_patch=raw_patch,
+                    patched_function=candidate_patched_func,
+                    snapshot=snapshot,
+                    validation_details=validation_details,
+                    fail_context_agent_artifact=fail_context_agent_artifact,
+                    code_context_collector_agent_artifact=code_context_collector_agent_artifact,
+                    fix_agent_artifact=fix_agent_artifact,
+                ),
                 fail_context_agent_artifact=fail_context_agent_artifact,
                 code_context_collector_agent_artifact=code_context_collector_agent_artifact,
-                retrieval_context_agent_artifact=retrieval_context_agent_artifact,
                 fix_agent_artifact=fix_agent_artifact,
             )
+            candidate_result["fix_agent_evaluation"] = extract_evaluation_snapshot(snapshot)
             candidate_results.append(candidate_result)
 
             if snapshot["status"] == "plausible":
@@ -466,11 +543,7 @@ def run_apr_pipeline(
         if best_candidate is None and candidate_results:
             best_candidate = min(
                 candidate_results,
-                key=lambda c: (
-                    1 if c.get("status") == "invalid" else 0,
-                    len(c["post_failed_tests"]),
-                    -len(c["post_passed_tests"]),
-                ),
+                key=candidate_quality_key,
             )
             target_func = best_candidate["function"]
             print(
@@ -479,12 +552,101 @@ def run_apr_pipeline(
                 f"full_failed={len(best_candidate['full_post_failed_tests'])})"
             )
 
+        fix_agent_best_candidate = best_candidate
+        refix_result = None
+        refix_selected = False
+        if best_candidate and not is_plausible_status(best_candidate.get("status")):
+            refix_artifacts = []
+            artifact = dict(best_candidate.get("llm_patch_artifact") or {})
+            if artifact.get("patched_file_path") or artifact.get("patched_function_path"):
+                artifact["_repair_target_file_abs_path"] = best_candidate.get("repair_target_file") or ""
+                refix_artifacts.append(artifact)
+            if refix_artifacts and bug_record:
+                print("    [REFIX] FixAgent chưa success; chạy ReFix trên best failed candidate.")
+                refix_result = run_refix_for_failed_artifacts(
+                    dataset=dataset,
+                    bug=bug_record,
+                    artifacts=refix_artifacts,
+                    llm_provider=llm_provider,
+                    exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+                    excluded_fixed_fail_tests=excluded_fixed_fail_tests,
+                    refix_round=1,
+                )
+                if refix_result:
+                    if candidate_quality_key(refix_result) < candidate_quality_key(best_candidate):
+                        best_candidate = refix_result
+                        refix_selected = True
+                        print(
+                            f"    [REFIX] ReFix tốt hơn FixAgent best: status={refix_result.get('status')} "
+                            f"full_status={refix_result.get('real_status')}"
+                        )
+                    else:
+                        print(
+                            f"    [REFIX] Giữ FixAgent best vì ReFix không cải thiện: "
+                            f"refix_status={refix_result.get('status')} "
+                            f"refix_full_status={refix_result.get('real_status')}"
+                        )
+
         if best_candidate:
+            fix_agent_evaluation = (
+                extract_evaluation_snapshot(fix_agent_best_candidate)
+                if fix_agent_best_candidate
+                else {}
+            )
+            refix_agent_evaluation = (
+                extract_evaluation_snapshot(refix_result)
+                if refix_result
+                else {}
+            )
+            evaluation_history = []
+            if fix_agent_evaluation:
+                evaluation_history.append(
+                    {
+                        "agent": "fix_agent",
+                        "artifact": (fix_agent_best_candidate or {}).get("llm_patch_artifact") or {},
+                        **fix_agent_evaluation,
+                    }
+                )
+            if refix_agent_evaluation:
+                evaluation_history.append(
+                    {
+                        "agent": "refix_agent",
+                        "artifact": (refix_result or {}).get("llm_patch_artifact") or {},
+                        **refix_agent_evaluation,
+                    }
+                )
+            fix_agent_candidates = [
+                _candidate_trace_record(candidate, agent="fix_agent")
+                for candidate in candidate_results
+            ]
+            fix_agent_best_trace = _candidate_trace_record(
+                fix_agent_best_candidate,
+                agent="fix_agent",
+            )
+            refix_agent_result_trace = _candidate_trace_record(
+                refix_result,
+                agent="refix_agent",
+            )
             apr_results[bug_id] = {
                 "dataset": dataset,
                 "patched_function": best_candidate.get("patched_function"),
                 "patched_file": best_candidate.get("patched_file"),
                 "llm_patch_artifact": best_candidate.get("llm_patch_artifact") or {},
+                "selected_agent": "refix_agent" if refix_selected else "fix_agent",
+                "selected_candidate": _candidate_trace_record(
+                    best_candidate,
+                    agent="refix_agent" if refix_selected else "fix_agent",
+                ),
+                "fix_agent_candidates": fix_agent_candidates,
+                "fix_agent_best_candidate": fix_agent_best_trace,
+                "refix_agent_result": refix_agent_result_trace,
+                "fix_agent_evaluation": fix_agent_evaluation,
+                "refix_agent_evaluation": refix_agent_evaluation,
+                "evaluation_history": evaluation_history,
+                "refix_attempted": bool(refix_result),
+                "refix_selected": refix_selected,
+                "refix_applied": refix_selected,
+                "refix_source_artifact": (refix_result or {}).get("refix_source_artifact") or {},
                 "repair_target_file": best_candidate.get("repair_target_file"),
                 "repair_target_relpath": candidate_relpath_from_buggy_tree(
                     best_candidate.get("repair_target_file") or "",

@@ -145,6 +145,7 @@ def write_llm_patch_artifact(
     status: str = "generated",
     validation_error: str = "",
     evaluation_snapshot: Optional[dict] = None,
+    validation_context: Optional[dict] = None,
     fail_context_agent_artifact: Optional[dict] = None,
     code_context_collector_agent_artifact: Optional[dict] = None,
     retrieval_context_agent_artifact: Optional[dict] = None,
@@ -157,6 +158,7 @@ def write_llm_patch_artifact(
     response_path = os.path.join(bug_dir, f"{base_name}.response.txt")
     function_path = os.path.join(bug_dir, f"{base_name}.function.c")
     patched_file_path = os.path.join(bug_dir, f"{base_name}.patched.c")
+    validation_context_path = os.path.join(bug_dir, f"{base_name}.validation.json")
     metadata_path = os.path.join(bug_dir, f"{base_name}.json")
 
     with open(response_path, "w") as f:
@@ -177,6 +179,7 @@ def write_llm_patch_artifact(
         "raw_patch_path": rel_experiment_path(response_path),
         "patched_function_path": rel_experiment_path(function_path),
         "patched_file_path": "",
+        "validation_context_path": "",
         "metadata_path": rel_experiment_path(metadata_path),
         "fail_context_agent_artifact": fail_context_agent_artifact or {},
         "code_context_collector_agent_artifact": code_context_collector_agent_artifact or {},
@@ -190,6 +193,11 @@ def write_llm_patch_artifact(
         with open(patched_file_path, "w") as f:
             f.write(patched_file)
         artifact["patched_file_path"] = rel_experiment_path(patched_file_path)
+
+    if validation_context:
+        with open(validation_context_path, "w") as f:
+            json.dump(sanitize_evaluation_data(validation_context), f, ensure_ascii=False, indent=2, default=str)
+        artifact["validation_context_path"] = rel_experiment_path(validation_context_path)
 
     with open(metadata_path, "w") as f:
         json.dump(artifact, f, indent=4)
@@ -212,7 +220,9 @@ def write_refix_patch_artifact(
     validation_error: str = "",
     validation_details: Optional[dict] = None,
     evaluation_snapshot: Optional[dict] = None,
+    validation_context: Optional[dict] = None,
     parent_patch_artifact: Optional[dict] = None,
+    patch_validation_agent_artifact: Optional[dict] = None,
     refix_agent_artifact: Optional[dict] = None,
 ) -> dict:
     """Save a ReFix-produced patch without overwriting the original APR artifact."""
@@ -226,6 +236,7 @@ def write_refix_patch_artifact(
     response_path = os.path.join(bug_dir, f"{base_name}.response.txt")
     function_path = os.path.join(bug_dir, f"{base_name}.function.c")
     patched_file_path = os.path.join(bug_dir, f"{base_name}.patched.c")
+    validation_context_path = os.path.join(bug_dir, f"{base_name}.validation.json")
     metadata_path = os.path.join(bug_dir, f"{base_name}.json")
 
     with open(response_path, "w") as f:
@@ -249,8 +260,10 @@ def write_refix_patch_artifact(
         "raw_patch_path": rel_experiment_path(response_path),
         "patched_function_path": rel_experiment_path(function_path),
         "patched_file_path": "",
+        "validation_context_path": "",
         "metadata_path": rel_experiment_path(metadata_path),
         "parent_patch_artifact": parent_patch_artifact or {},
+        "patch_validation_agent_artifact": patch_validation_agent_artifact or {},
         "refix_agent_artifact": refix_agent_artifact or {},
     }
     artifact.update(evaluation_snapshot or {})
@@ -260,6 +273,11 @@ def write_refix_patch_artifact(
         with open(patched_file_path, "w") as f:
             f.write(patched_file)
         artifact["patched_file_path"] = rel_experiment_path(patched_file_path)
+
+    if validation_context:
+        with open(validation_context_path, "w") as f:
+            json.dump(sanitize_evaluation_data(validation_context), f, ensure_ascii=False, indent=2, default=str)
+        artifact["validation_context_path"] = rel_experiment_path(validation_context_path)
 
     with open(metadata_path, "w") as f:
         json.dump(artifact, f, indent=4)

@@ -13,14 +13,23 @@ from core.utils import (
 )
 
 
+# Số tầng include project header tối đa khi lần theo include đệ quy.
 MAX_RECURSIVE_HEADER_DEPTH = 2
+# Số project header tối đa được đọc để tránh collector phình quá lớn.
 MAX_PROJECT_HEADERS = 16
+# Số declaration/API item tối đa lấy từ mỗi header.
 MAX_HEADER_SURFACE_ITEMS = 24
+# Số declaration/helper tối đa lấy từ source file chứa target function.
 MAX_SOURCE_SURFACE_ITEMS = 40
+# Số ví dụ sử dụng API/helper tối đa đưa vào context.
 MAX_USAGE_EXAMPLES = 8
+# Số file source/header tối đa được quét khi tìm ví dụ sử dụng.
 MAX_USAGE_SEARCH_FILES = 80
+# Kích thước tối đa cho text của một declaration/API item.
 MAX_DECLARATION_CHARS = 1600
+# Kích thước tối đa cho snippet ví dụ sử dụng.
 MAX_USAGE_CHARS = 1400
+# Kích thước tối đa của repair evidence pack trước khi compact.
 MAX_REPAIR_EVIDENCE_CHARS = 30000
 
 
@@ -30,6 +39,7 @@ MAX_REPAIR_EVIDENCE_CHARS = 30000
 
 
 def _clip_text(value: Any, max_chars: int) -> str:
+    """Cắt text về giới hạn ký tự để context không vượt budget."""
     text = "" if value is None else str(value).rstrip()
     if len(text) <= max_chars:
         return text
@@ -37,6 +47,7 @@ def _clip_text(value: Any, max_chars: int) -> str:
 
 
 def _dedup_keep_order(values: List[str]) -> List[str]:
+    """Loại giá trị trùng nhưng giữ nguyên thứ tự xuất hiện ban đầu."""
     out = []
     seen = set()
     for value in values:
@@ -49,11 +60,13 @@ def _dedup_keep_order(values: List[str]) -> List[str]:
 
 
 def _source_language_from_path(path: str) -> str:
+    """Suy ra ngôn ngữ parser cần dùng dựa trên phần mở rộng file."""
     ext = os.path.splitext(path or "")[1].lower()
     return "cpp" if ext in (".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx", ".h") else "c"
 
 
 def _nearest_git_root(path: str) -> str:
+    """Tìm thư mục git root gần nhất để làm biên quét project."""
     cur = path if os.path.isdir(path) else os.path.dirname(path)
     while cur and cur != os.path.dirname(cur):
         if os.path.isdir(os.path.join(cur, ".git")):
@@ -63,12 +76,14 @@ def _nearest_git_root(path: str) -> str:
 
 
 def _source_root(source_path: str, context_root: Optional[str]) -> str:
+    """Chọn root dùng cho relpath và tìm file: ưu tiên context_root, rồi git root."""
     if context_root and os.path.isdir(context_root):
         return os.path.normpath(context_root)
     return _nearest_git_root(source_path) or os.path.normpath(os.path.dirname(source_path))
 
 
 def _relpath(path: str, root: str) -> str:
+    """Đổi absolute path sang path tương đối trong project nếu có thể."""
     try:
         rel = os.path.relpath(path, root).replace(os.sep, "/")
     except ValueError:
@@ -77,6 +92,7 @@ def _relpath(path: str, root: str) -> str:
 
 
 def _is_source_like(path: str) -> bool:
+    """Kiểm tra file có phải source/header C/C++ đáng quét hay không."""
     return os.path.splitext(path or "")[1].lower() in {
         ".c",
         ".cc",
@@ -97,6 +113,7 @@ def _is_source_like(path: str) -> bool:
 
 
 def _tree_sitter_language(language: str):
+    """Lấy object ngôn ngữ tree-sitter tương ứng với C hoặc C++."""
     key = (language or "c").strip().lower()
     module = tree_sitter_cpp if key in ("cpp", "c++", "cc", "cxx") else tree_sitter_c
     if module is None or Language is None:
@@ -111,6 +128,7 @@ def _tree_sitter_language(language: str):
 
 
 def _parse_tree(source: str, language: str):
+    """Parse source thành tree-sitter tree; trả None khi parser không khả dụng."""
     if Parser is None:
         return None, None
     lang = _tree_sitter_language(language)
@@ -134,6 +152,7 @@ def _parse_tree(source: str, language: str):
 
 
 def _walk_nodes(root):
+    """Duyệt toàn bộ node của tree-sitter tree theo kiểu depth-first."""
     stack = [root]
     while stack:
         node = stack.pop()
@@ -142,10 +161,12 @@ def _walk_nodes(root):
 
 
 def _node_text(node, source_bytes: bytes) -> str:
+    """Lấy đoạn source text ứng với một tree-sitter node."""
     return source_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
 
 
 def _function_name_from_declarator(declarator, source_bytes: bytes) -> str:
+    """Rút tên hàm từ declarator, kể cả declarator lồng nhau hoặc C++ qualified name."""
     nested = declarator.child_by_field_name("declarator")
     if nested is not None:
         name = _function_name_from_declarator(nested, source_bytes)
@@ -180,6 +201,7 @@ def _function_name_from_declarator(declarator, source_bytes: bytes) -> str:
 
 
 def _call_name_from_node(function_node, source_bytes: bytes) -> str:
+    """Chuẩn hóa tên hàm được gọi từ call_expression."""
     text = _node_text(function_node, source_bytes).strip()
     if not text:
         return ""
@@ -197,6 +219,7 @@ def _call_name_from_node(function_node, source_bytes: bytes) -> str:
 
 
 def _include_records_from_source(source: str, language: str, origin: str) -> List[dict]:
+    """Trích danh sách #include từ một source/header và phân loại system/project."""
     records = []
     tree, source_bytes = _parse_tree(source, language)
     if tree is not None and source_bytes is not None:
@@ -241,6 +264,7 @@ def _resolve_project_include(
     including_dir: str,
     source_root: str,
 ) -> str:
+    """Resolve project include như "foo.h" thành absolute path trong source tree."""
     candidates = [os.path.normpath(os.path.join(including_dir, include_name))]
     root_candidate = os.path.normpath(os.path.join(source_root, include_name))
     if root_candidate not in candidates:
@@ -274,9 +298,14 @@ def _collect_project_headers(
     source_root: str,
     language: str,
 ) -> Tuple[List[dict], List[dict], List[str]]:
+    """Thu thập project headers được include trực tiếp/gián tiếp từ source target."""
+    # queue lưu include cần resolve: (include name, thư mục include hiện tại, depth, file cha).
     queue = []
+    # unresolved lưu các include project không tìm được file thật.
     unresolved = []
+    # seen_paths tránh đọc trùng header khi nhiều include trỏ cùng file.
     seen_paths = set()
+    # headers là payload header đã resolve, gồm metadata và nội dung text.
     headers = []
 
     source_origin = _relpath(source_path, source_root)
@@ -334,6 +363,8 @@ def _build_include_inventory(
     headers: List[dict],
     unresolved: List[str],
 ) -> dict:
+    """Tạo bảng tổng hợp include system/project đã thấy trong source và headers."""
+    # system chứa include dạng <...>; project chứa include dạng "...".
     system = []
     project = []
 
@@ -369,9 +400,14 @@ def _build_include_inventory(
 
 
 def _extract_symbols_from_code(source: str, language: str) -> dict:
+    """Trích symbol từ target function để làm tín hiệu chọn context liên quan."""
+    # calls: tên các hàm/API được gọi trong target function.
     calls = []
+    # types: tên kiểu dữ liệu xuất hiện trong target function.
     types = []
+    # fields: tên field/member được truy cập, ví dụ pkt->length.
     fields = []
+    # identifiers: mọi định danh tree-sitter thấy được, gồm cả biến local như data/ret.
     identifiers = []
 
     tree, source_bytes = _parse_tree(source, language)
@@ -393,6 +429,7 @@ def _extract_symbols_from_code(source: str, language: str) -> dict:
         identifiers.extend(re.findall(r'\b[A-Za-z_]\w*\b', source))
 
     macro_like = re.findall(r'\b[A-Z_][A-Z0-9_]{2,}\b', source)
+    # keywords tránh đưa keyword C/C++ vào symbol set.
     keywords = {
         "if",
         "for",
@@ -414,14 +451,8 @@ def _extract_symbols_from_code(source: str, language: str) -> dict:
     }
 
 
-def _symbol_set(symbols: dict) -> set:
-    out = set()
-    for key in ("calls", "types", "fields", "identifiers", "macro_like"):
-        out.update(symbols.get(key) or [])
-    return {str(item) for item in out if item}
-
-
 def _contains_relevant_symbol(text: str, symbols: set) -> bool:
+    """Kiểm tra text có chứa ít nhất một symbol liên quan theo word-boundary match."""
     if not symbols:
         return False
     for symbol in symbols:
@@ -445,10 +476,14 @@ def _surface_items_from_source(
     target_end: int = -1,
     max_items: int,
 ) -> List[dict]:
+    """Lấy declaration/helper trong một source/header nếu chúng match symbol target."""
+    # items là danh sách API/declaration được chọn để đưa vào collector context.
     items = []
+    # seen tránh ghi trùng cùng một declaration khi tree traversal gặp lại nội dung giống nhau.
     seen = set()
     tree, source_bytes = _parse_tree(source, language)
 
+    # Các loại tree-sitter node được xem là "API surface" hữu ích cho FixAgent.
     interesting_types = {
         "declaration",
         "type_definition",
@@ -467,11 +502,13 @@ def _surface_items_from_source(
             if target_start >= 0 and node.start_byte >= target_start and node.end_byte <= target_end:
                 continue
             text = _node_text(node, source_bytes).strip()
+            # Chỉ giữ declaration có chứa symbol lấy từ target function.
             if not _contains_relevant_symbol(text, symbols):
                 continue
 
             label = node.type
             if node.type == "function_definition":
+                # Với function definition, yêu cầu tên hàm cũng nằm trong symbol set để giảm nhiễu.
                 declarator = node.child_by_field_name("declarator")
                 name = _function_name_from_declarator(declarator, source_bytes) if declarator else ""
                 if name and name not in symbols:
@@ -512,7 +549,9 @@ def _surface_items_from_source(
 
 
 def _build_project_header_api_context(headers: List[dict], symbols: set) -> List[dict]:
+    """Tạo context API từ project headers, có giới hạn tổng kích thước context."""
     out = []
+    # total_chars ước lượng kích thước context header đã tích lũy.
     total_chars = 0
     for header in headers:
         if total_chars >= APR_MAX_LOCAL_HEADER_CONTEXT_CHARS:
@@ -526,6 +565,7 @@ def _build_project_header_api_context(headers: List[dict], symbols: set) -> List
             symbols=symbols,
             max_items=MAX_HEADER_SURFACE_ITEMS,
         )
+        # payload là context cho một header: metadata include và API surface đã lọc.
         payload = {
             "header": header["relpath"],
             "include": header["include"],
@@ -561,7 +601,9 @@ def _build_project_header_api_context(headers: List[dict], symbols: set) -> List
 
 
 def _snippet_from_function_for_calls(function_text: str, call_names: set) -> str:
+    """Cắt snippet quanh các dòng gọi API để làm ví dụ sử dụng ngắn gọn."""
     lines = function_text.splitlines()
+    # selected chứa các dòng quanh call; dấu "..." ngăn cách các cụm dòng rời nhau.
     selected = []
     for idx, line in enumerate(lines):
         if any(re.search(r'\b' + re.escape(name) + r'\s*\(', line) for name in call_names):
@@ -586,6 +628,8 @@ def _usage_examples_from_source(
     target_end: int = -1,
     limit: int,
 ) -> List[dict]:
+    """Tìm các function trong một source có gọi các API trong call_names."""
+    # examples là các ví dụ sử dụng API/helper mà target function cũng gọi.
     examples = []
     tree, source_bytes = _parse_tree(source, language)
     if tree is None or source_bytes is None:
@@ -599,6 +643,7 @@ def _usage_examples_from_source(
         text = _node_text(node, source_bytes)
         declarator = node.child_by_field_name("declarator")
         function_name = _function_name_from_declarator(declarator, source_bytes) if declarator else ""
+        # used_calls là giao giữa call_names và các call thật sự xuất hiện trong function này.
         used_calls = sorted(
             name
             for name in call_names
@@ -620,7 +665,9 @@ def _usage_examples_from_source(
 
 
 def _iter_candidate_project_files(source_root: str, source_path: str):
+    """Sinh các file source/header lân cận để quét ví dụ sử dụng cross-file."""
     source_dir = os.path.dirname(source_path)
+    # yielded tránh trả về cùng một file nhiều lần khi source_dir nằm trong source_root.
     yielded = set()
 
     for root in (source_dir, source_root):
@@ -638,17 +685,18 @@ def _iter_candidate_project_files(source_root: str, source_path: str):
                 return
 
 
-def _build_usage_examples(
+def _build_call_references(
     *,
     source_code: str,
     source_path: str,
     source_root: str,
     language: str,
-    symbols: dict,
+    call_names: set,
     start_idx: int,
     end_idx: int,
 ) -> List[dict]:
-    call_names = set(symbols.get("calls") or [])
+    """Gom các function khác có gọi một trong các tên hàm/API cần tham chiếu."""
+    # call_names có thể là API target đang gọi, hoặc chính tên target function để tìm caller.
     if not call_names:
         return []
 
@@ -688,65 +736,18 @@ def _build_usage_examples(
     return examples[:MAX_USAGE_EXAMPLES]
 
 
-def _build_target_references(
-    *,
-    source_code: str,
-    source_path: str,
-    source_root: str,
-    language: str,
-    func_name: str,
-    start_idx: int,
-    end_idx: int,
-) -> List[dict]:
-    if not func_name:
-        return []
-
-    references = _usage_examples_from_source(
-        source=source_code,
-        source_path=source_path,
-        source_root=source_root,
-        language=language,
-        call_names={func_name},
-        target_start=start_idx,
-        target_end=end_idx,
-        limit=MAX_USAGE_EXAMPLES,
-    )
-    if len(references) >= MAX_USAGE_EXAMPLES:
-        return references
-
-    for path in _iter_candidate_project_files(source_root, source_path):
-        try:
-            with open(path, "r", errors="replace") as f:
-                text = f.read()
-        except OSError:
-            continue
-        if func_name not in text:
-            continue
-        references.extend(
-            _usage_examples_from_source(
-                source=text,
-                source_path=path,
-                source_root=source_root,
-                language=_source_language_from_path(path),
-                call_names={func_name},
-                limit=MAX_USAGE_EXAMPLES - len(references),
-            )
-        )
-        if len(references) >= MAX_USAGE_EXAMPLES:
-            break
-    return references[:MAX_USAGE_EXAMPLES]
-
-
 # =============================================================================
 # Nhóm 7: Source slice và entry point collector
 # =============================================================================
 
 
 def trim_source_for_retrieval_prompt(source_code: str, start_idx: int, end_idx: int) -> str:
+    """Cắt source file dài thành excerpt gồm phần đầu file và vùng quanh target function."""
     start_char, end_char = source_byte_range_to_char_range(source_code, start_idx, end_idx)
     if len(source_code) <= APR_MAX_SOURCE_CHARS or start_char < 0 or end_char < 0:
         return source_code
 
+    # head_budget giữ prelude/include/macro đầu file; neighborhood giữ vùng quanh function lỗi.
     head_budget = min(6000, APR_MAX_SOURCE_CHARS // 4)
     remaining = APR_MAX_SOURCE_CHARS - head_budget
     neighborhood = max(2000, remaining // 2)
@@ -766,10 +767,6 @@ def trim_source_for_retrieval_prompt(source_code: str, start_idx: int, end_idx: 
     return "".join(parts)
 
 
-def _pack_size(pack: dict) -> int:
-    return len(str(pack))
-
-
 def _build_repair_evidence_pack(
     *,
     target_function: dict,
@@ -781,15 +778,19 @@ def _build_repair_evidence_pack(
     target_references: List[dict],
     uncertainties: List[str],
 ) -> dict:
+    """Đóng gói context quan trọng nhất cho FixAgent và compact nếu quá lớn."""
+    # same_file_helpers là các helper definition cùng file được xem là liên quan.
     same_file_helpers = [
         item for item in source_api_surface
         if str(item.get("kind") or "").startswith("function_definition:")
     ]
+    # same_file_declarations là macro/type/prototype/declaration cùng file.
     same_file_declarations = [
         item for item in source_api_surface
         if not str(item.get("kind") or "").startswith("function_definition:")
     ]
 
+    # pack là evidence chính FixAgent dùng để hiểu API, helper, caller và rủi ro context.
     pack = {
         "purpose": (
             "Raw code evidence for FixAgent. Treat this as source-of-truth for "
@@ -806,13 +807,13 @@ def _build_repair_evidence_pack(
         "uncertainties": uncertainties,
     }
 
-    if _pack_size(pack) <= MAX_REPAIR_EVIDENCE_CHARS:
+    if len(str(pack)) <= MAX_REPAIR_EVIDENCE_CHARS:
         return pack
 
     pack["source_excerpt"] = _clip_text(source_context, 9000)
     pack["cross_file_usage_examples"] = usage_examples[:6]
     pack["target_references"] = target_references[:6]
-    if _pack_size(pack) <= MAX_REPAIR_EVIDENCE_CHARS:
+    if len(str(pack)) <= MAX_REPAIR_EVIDENCE_CHARS:
         return pack
 
     compact_headers = []
@@ -826,7 +827,7 @@ def _build_repair_evidence_pack(
     pack["source_excerpt"] = _clip_text(source_context, 5000)
     pack["cross_file_usage_examples"] = usage_examples[:4]
     pack["target_references"] = target_references[:4]
-    if _pack_size(pack) <= MAX_REPAIR_EVIDENCE_CHARS:
+    if len(str(pack)) <= MAX_REPAIR_EVIDENCE_CHARS:
         return pack
 
     pack["source_excerpt"] = _clip_text(source_context, 2500)
@@ -850,19 +851,30 @@ def collect_code_context(
     end_idx: int,
     context_root: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """Thu thập toàn bộ code context cho một target function cần sửa."""
+    # language quyết định parser C/C++; root là biên project để resolve include và relpath.
     language = _source_language_from_path(source_path)
     root = _source_root(source_path, context_root)
     source_label = _relpath(source_path, root)
 
+    # prompt_source là source excerpt đã cắt gọn cho retrieval/fix prompt.
     prompt_source = trim_source_for_retrieval_prompt(source_code, start_idx, end_idx)
+    # symbols là tín hiệu lấy từ target function; symbol_set dùng để match declaration.
     symbols = _extract_symbols_from_code(func_code, language)
-    symbol_set = _symbol_set(symbols)
+    symbol_set = {
+        str(item)
+        for key in ("calls", "types", "fields", "identifiers", "macro_like")
+        for item in (symbols.get(key) or [])
+        if item
+    }
+    # headers là project headers đã resolve; unresolved_headers là include không tìm được.
     headers, unresolved_headers, _ = _collect_project_headers(
         source_code=source_code,
         source_path=source_path,
         source_root=root,
         language=language,
     )
+    # include_inventory tóm tắt include system/project để FixAgent biết dependency hiện có.
     include_inventory = _build_include_inventory(
         source_code=source_code,
         source_path=source_path,
@@ -871,6 +883,7 @@ def collect_code_context(
         headers=headers,
         unresolved=unresolved_headers,
     )
+    # source_api_surface là declaration/helper cùng file có liên quan tới symbol target.
     source_api_surface = _surface_items_from_source(
         source=source_code,
         language=language,
@@ -880,26 +893,30 @@ def collect_code_context(
         target_end=end_idx,
         max_items=MAX_SOURCE_SURFACE_ITEMS,
     )
+    # project_header_api_context là API surface từ project headers đã include.
     project_header_api_context = _build_project_header_api_context(headers, symbol_set)
-    usage_examples = _build_usage_examples(
+    # usage_examples cho FixAgent biết các API target gọi thường được dùng như thế nào.
+    usage_examples = _build_call_references(
         source_code=source_code,
         source_path=source_path,
         source_root=root,
         language=language,
-        symbols=symbols,
+        call_names=set(symbols.get("calls") or []),
         start_idx=start_idx,
         end_idx=end_idx,
     )
-    target_references = _build_target_references(
+    # target_references là caller/call site của chính target function ở nơi khác.
+    target_references = _build_call_references(
         source_code=source_code,
         source_path=source_path,
         source_root=root,
         language=language,
-        func_name=func_name,
+        call_names={func_name} if func_name else set(),
         start_idx=start_idx,
         end_idx=end_idx,
     )
 
+    # uncertainties ghi lại các giới hạn khi collector thiếu parser hoặc thiếu header.
     uncertainties = []
     if Parser is None or _tree_sitter_language(language) is None:
         uncertainties.append("tree-sitter is unavailable; symbol extraction used regex fallback")
@@ -911,6 +928,7 @@ def collect_code_context(
     if len(headers) >= MAX_PROJECT_HEADERS:
         uncertainties.append(f"project header traversal stopped at {MAX_PROJECT_HEADERS} headers")
 
+    # target_function là metadata định danh function/file đang được APR sửa.
     target_function = {
         "name": func_name,
         "source_file": cand_label,
@@ -919,6 +937,7 @@ def collect_code_context(
         "start_byte": start_idx,
         "end_byte": end_idx,
     }
+    # repair_evidence_pack là bản context compact hơn dành riêng cho FixAgent.
     repair_evidence_pack = _build_repair_evidence_pack(
         target_function=target_function,
         source_context=prompt_source,
@@ -959,6 +978,8 @@ def run_code_context_collector_agent(
     end_idx: int,
     context_root: Optional[str] = None,
 ) -> Tuple[dict, dict]:
+    """Entry point của agent: collect context rồi ghi artifact ra experiments."""
+    # collector_context là context đầy đủ; artifact là metadata/path sau khi persist.
     collector_context = collect_code_context(
         func_name=func_name,
         cand_label=cand_label,
@@ -969,6 +990,7 @@ def run_code_context_collector_agent(
         end_idx=end_idx,
         context_root=context_root,
     )
+    # repair_evidence_pack được ghi riêng để các bước sau đọc context đã nén.
     repair_evidence_pack = collector_context.get("repair_evidence_pack") or {}
     artifact = write_code_context_collector_artifact(
         bug_id=bug_id,

@@ -124,6 +124,10 @@ def build_validation_snapshot(
         comparison_post_failed = full_post_failed
         excluded = []
 
+    if error and not comparison_post_failed and not full_post_failed:
+        comparison_post_failed = list(initial.get("comparison_failed", []))
+        full_post_failed = list(initial.get("full_failed", []))
+
     status = classify_patch_outcome(
         initial.get("comparison_failed", []),
         comparison_post_failed,

@@ -84,3 +84,24 @@ def classify_patch_outcome(init_failed, post_failed, validation_error: str = "")
 def is_plausible_status(status: object) -> bool:
     """Accept both the current outcome label and legacy APR success records."""
     return str(status or "").strip().lower() in {"plausible", "success"}
+
+
+def candidate_list_len(candidate: dict, key: str, default: int = 10**9) -> int:
+    """Return the length of a stored test-list field for candidate ranking."""
+    candidate = candidate or {}
+    values = candidate.get(key)
+    return len(values) if isinstance(values, list) else default
+
+
+def candidate_quality_key(candidate: dict) -> tuple:
+    """Lower is better when comparing Fix/ReFix candidates or artifacts."""
+    status = str((candidate or {}).get("status") or "").strip().lower()
+    return (
+        0 if is_plausible_status(status) else 1,
+        1 if status == "invalid" else 0,
+        candidate_list_len(candidate, "post_failed_tests"),
+        candidate_list_len(candidate, "full_post_failed_tests"),
+        -candidate_list_len(candidate, "post_passed_tests", default=0),
+        -candidate_list_len(candidate, "full_post_passed_tests", default=0),
+        1 if str((candidate or {}).get("validation_error") or "").strip() else 0,
+    )
