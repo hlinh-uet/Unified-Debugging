@@ -33,7 +33,6 @@ def build_retrieval_context_prompt(
     collector_context: dict,
 ) -> str:
     summary_context = dict(collector_context)
-    summary_context.pop("repair_evidence_pack", None)
     context_json = json.dumps(summary_context, ensure_ascii=False, indent=2, default=str)
     return f"""RETRIEVAL CONTEXT TASK
 Bug ID: {bug_id}

@@ -25,6 +25,10 @@ from evaluation.eval_apr import evaluate_apr
 from configs.path import EXPERIMENTS_DIR
 
 
+VALID_FL_RESULTS_FILENAME = "fault_localization_results_valid.json"
+VALID_APR_RESULTS_FILENAME = "apr_results_valid.json"
+
+
 def _extract_file_from_gt(gt_key):
     """
     Trích xuất tên file từ ground truth key.
@@ -230,6 +234,66 @@ def run_fl(dataset: str = "codeflaws", exclude_fixed_fail_tests: bool = True):
     print(f"[FL] Final FL scores (file→class→function IR rerank) → {combined_file}")
 
 
+def run_valid_fl(dataset: str = "codeflaws", exclude_fixed_fail_tests: bool = True) -> str:
+    """
+    Oracle FL cho kịch bản APR-only: đưa ground-truth function lên top 1.
+    File này tách khỏi FL thường để không trộn kết quả Tarantula/IR.
+    """
+    print(f"[FL-valid] Đang load bugs từ dataset '{dataset}'...")
+    loader = get_loader(dataset)
+    bugs = loader.load_all()
+    print(f"[FL-valid] Đã load {len(bugs)} bugs.")
+
+    os.makedirs(EXPERIMENTS_DIR, exist_ok=True)
+    valid_results = {}
+    total_excluded_fixed_fail = 0
+    missing_gt = 0
+
+    for bug in bugs:
+        _, excluded_fixed_fail = filtered_bug_record_for_pipeline(
+            bug,
+            exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+        )
+        total_excluded_fixed_fail += len(excluded_fixed_fail)
+
+        gt_functions = list(dict.fromkeys(bug.ground_truth or []))
+        oracle_top1 = gt_functions[0] if gt_functions else ""
+        if not oracle_top1:
+            missing_gt += 1
+
+        test_filter_info = {
+            "exclude_fixed_fail_tests": exclude_fixed_fail_tests,
+            "excluded_fixed_fail_count": len(excluded_fixed_fail),
+            "excluded_fixed_fail_tests": list(excluded_fixed_fail),
+        }
+        scores = {oracle_top1: 1.0} if oracle_top1 else {}
+        valid_results[bug.bug_id] = {
+            "dataset": dataset,
+            "formula": "oracle",
+            "reranker": "ground_truth_top1",
+            "scores": scores,
+            "tarantula_scores": {},
+            "ground_truth": gt_functions,
+            "oracle_top1": oracle_top1,
+            "valid_mode": True,
+            "test_filter": test_filter_info,
+        }
+
+    if exclude_fixed_fail_tests:
+        print(
+            f"[FL-valid] Đã ghi metadata lọc cho {total_excluded_fixed_fail} "
+            "test buggy+fixed đều FAIL."
+        )
+    if missing_gt:
+        print(f"[FL-valid] Cảnh báo: {missing_gt} bugs không có ground-truth function.")
+
+    out_file = os.path.join(EXPERIMENTS_DIR, VALID_FL_RESULTS_FILENAME)
+    with open(out_file, "w") as f:
+        json.dump(valid_results, f, indent=4)
+    print(f"[FL-valid] Oracle top-1 FL → {out_file}")
+    return out_file
+
+
 def main():
     parser = argparse.ArgumentParser(description="Unified Debugging Pipeline")
     parser.add_argument(
@@ -242,6 +306,14 @@ def main():
     parser.add_argument("--refix",        action="store_true", help="Chạy ReFix từ llm_patches đã lưu")
     parser.add_argument("--eval",         action="store_true", help="Chỉ chạy Evaluation")
     parser.add_argument("--all",          action="store_true", help="Chạy toàn bộ: FL → APR → Evaluation")
+    parser.add_argument(
+        "--valid",
+        action="store_true",
+        help=(
+            "Chạy kịch bản APR với FL oracle: ground-truth function ở top 1, "
+            "lưu vào fault_localization_results_valid.json và APR chỉ thử top 1."
+        ),
+    )
     parser.add_argument("--bug-id",       default=None, help="Chỉ chạy trên một bug cụ thể, ví dụ CVE-2018-7584")
     parser.add_argument(
         "--with-refix",
@@ -259,10 +331,11 @@ def main():
     parser.add_argument(
         "--fl-eval-level",
         default="combined",
-        choices=["combined", "apr_feedback", "function", "file", "class", "all"],
+        choices=["combined", "valid", "apr_feedback", "function", "file", "class", "all"],
         help=(
             "Mức kết quả FL dùng khi evaluation: combined "
-            "(fault_localization_results.json), apr_feedback "
+            "(fault_localization_results.json), valid "
+            "(fault_localization_results_valid.json), apr_feedback "
             "(fault_localization_apr_feedback_results.json), function "
             "(fault_localization_function_results.json), file "
             "(fault_localization_file_results.json), class "
@@ -280,7 +353,7 @@ def main():
 
     dataset      = args.dataset
     llm_provider = args.llm   # None → đọc từ LLM_PROVIDER trong .env
-    fl_eval_level = args.fl_eval_level
+    fl_eval_level = "valid" if args.valid and args.fl_eval_level == "combined" else args.fl_eval_level
     exclude_fixed_fail_tests = not args.include_fixed_fail_tests
 
     if not (args.all or args.fl or args.apr or args.apr_validate or args.refix or args.eval):
@@ -290,11 +363,18 @@ def main():
 
     if run_all:
         print(f"[Pipeline] Chạy toàn bộ quy trình trên dataset '{dataset}' (FL → APR LLM → Evaluation)...")
-        run_fl(dataset, exclude_fixed_fail_tests=exclude_fixed_fail_tests)
+        if args.valid:
+            run_valid_fl(dataset, exclude_fixed_fail_tests=exclude_fixed_fail_tests)
+        else:
+            run_fl(dataset, exclude_fixed_fail_tests=exclude_fixed_fail_tests)
         run_apr_pipeline(
             dataset,
             llm_provider=llm_provider,
             exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+            fl_results_filename=VALID_FL_RESULTS_FILENAME if args.valid else "fault_localization_results.json",
+            apr_results_filename=VALID_APR_RESULTS_FILENAME if args.valid else "apr_results.json",
+            apr_top_k=1 if args.valid else None,
+            valid_mode=args.valid,
         )
         if args.with_refix:
             run_refix_from_saved_artifacts(
@@ -302,21 +382,40 @@ def main():
                 bug_id=args.bug_id,
                 llm_provider=llm_provider,
                 exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+                apr_results_filename=VALID_APR_RESULTS_FILENAME if args.valid else "apr_results.json",
             )
         evaluate_fl(dataset, level=fl_eval_level)
-        evaluate_apr(dataset)
+        evaluate_apr(
+            dataset,
+            results_filename=VALID_APR_RESULTS_FILENAME if args.valid else "apr_results.json",
+            label="LLM-based APR (valid FL)" if args.valid else "LLM-based APR",
+        )
     else:
         if args.fl:
             print(f"[Pipeline] Chạy Fault Localization trên dataset '{dataset}'...")
-            run_fl(dataset, exclude_fixed_fail_tests=exclude_fixed_fail_tests)
+            if args.valid:
+                run_valid_fl(dataset, exclude_fixed_fail_tests=exclude_fixed_fail_tests)
+            else:
+                run_fl(dataset, exclude_fixed_fail_tests=exclude_fixed_fail_tests)
             evaluate_fl(dataset, level=fl_eval_level)
 
         if args.apr:
-            print(f"[Pipeline] Chạy APR (LLM: {llm_provider or 'default'}) trên dataset '{dataset}'...")
+            if args.valid:
+                print(
+                    f"[Pipeline] Chạy APR-valid (LLM: {llm_provider or 'default'}) "
+                    f"trên dataset '{dataset}'..."
+                )
+                run_valid_fl(dataset, exclude_fixed_fail_tests=exclude_fixed_fail_tests)
+            else:
+                print(f"[Pipeline] Chạy APR (LLM: {llm_provider or 'default'}) trên dataset '{dataset}'...")
             run_apr_pipeline(
                 dataset,
                 llm_provider=llm_provider,
                 exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+                fl_results_filename=VALID_FL_RESULTS_FILENAME if args.valid else "fault_localization_results.json",
+                apr_results_filename=VALID_APR_RESULTS_FILENAME if args.valid else "apr_results.json",
+                apr_top_k=1 if args.valid else None,
+                valid_mode=args.valid,
             )
             if args.with_refix:
                 run_refix_from_saved_artifacts(
@@ -324,8 +423,13 @@ def main():
                     bug_id=args.bug_id,
                     llm_provider=llm_provider,
                     exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+                    apr_results_filename=VALID_APR_RESULTS_FILENAME if args.valid else "apr_results.json",
                 )
-            evaluate_apr(dataset)
+            evaluate_apr(
+                dataset,
+                results_filename=VALID_APR_RESULTS_FILENAME if args.valid else "apr_results.json",
+                label="LLM-based APR (valid FL)" if args.valid else "LLM-based APR",
+            )
 
         if args.apr_validate:
             print(f"[Pipeline] Validate lại APR artifacts trên dataset '{dataset}'...")
@@ -333,8 +437,13 @@ def main():
                 dataset,
                 bug_id=args.bug_id,
                 exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+                apr_results_filename=VALID_APR_RESULTS_FILENAME if args.valid else "apr_results.json",
             )
-            evaluate_apr(dataset)
+            evaluate_apr(
+                dataset,
+                results_filename=VALID_APR_RESULTS_FILENAME if args.valid else "apr_results.json",
+                label="LLM-based APR (valid FL)" if args.valid else "LLM-based APR",
+            )
 
         if args.refix:
             print(f"[Pipeline] Chạy ReFix từ artifacts đã lưu trên dataset '{dataset}'...")
@@ -343,13 +452,22 @@ def main():
                 bug_id=args.bug_id,
                 llm_provider=llm_provider,
                 exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+                apr_results_filename=VALID_APR_RESULTS_FILENAME if args.valid else "apr_results.json",
             )
-            evaluate_apr(dataset)
+            evaluate_apr(
+                dataset,
+                results_filename=VALID_APR_RESULTS_FILENAME if args.valid else "apr_results.json",
+                label="LLM-based APR (valid FL)" if args.valid else "LLM-based APR",
+            )
 
         if args.eval:
             print("[Pipeline] Chạy Evaluation...")
             evaluate_fl(dataset, level=fl_eval_level)
-            evaluate_apr(dataset)
+            evaluate_apr(
+                dataset,
+                results_filename=VALID_APR_RESULTS_FILENAME if args.valid else "apr_results.json",
+                label="LLM-based APR (valid FL)" if args.valid else "LLM-based APR",
+            )
 
 
 if __name__ == "__main__":

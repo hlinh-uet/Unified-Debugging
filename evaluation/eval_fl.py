@@ -6,6 +6,7 @@ from configs.path import EXPERIMENTS_DIR
 
 FL_RESULT_FILES = {
     "combined": "fault_localization_results.json",
+    "valid": "fault_localization_results_valid.json",
     "apr_feedback": "fault_localization_apr_feedback_results.json",
     "function": "fault_localization_function_results.json",
     "file": "fault_localization_file_results.json",
@@ -25,14 +26,14 @@ def evaluate_fl(dataset: str = "", level: str = "combined", results_dir: str = N
     (tất cả hàm cùng điểm được gán rank = vị trí cuối cùng trong nhóm).
     """
     if level == "all":
-        for one_level in ("combined", "apr_feedback", "function", "file", "class"):
+        for one_level in ("combined", "valid", "apr_feedback", "function", "file", "class"):
             evaluate_fl(dataset, level=one_level, results_dir=results_dir)
         return
 
     if level not in FL_RESULT_FILES:
         raise ValueError(
             f"FL evaluation level không hợp lệ: {level}. "
-            "Chọn một trong: combined, apr_feedback, function, file, class, all."
+            "Chọn một trong: combined, valid, apr_feedback, function, file, class, all."
         )
 
     print(f"\n--- Báo cáo Đánh giá Fault Localization (FL - {level}) ---")

@@ -21,9 +21,14 @@ def run_apr_validation_only(
     dataset: str = "codeflaws",
     bug_id: Optional[str] = None,
     exclude_fixed_fail_tests: bool = True,
+    apr_results_filename: str = "apr_results.json",
 ):
     """Re-run validation for saved LLM patch artifacts without calling an LLM."""
-    apr_results_file = os.path.join(EXPERIMENTS_DIR, "apr_results.json")
+    apr_results_file = (
+        apr_results_filename
+        if os.path.isabs(apr_results_filename)
+        else os.path.join(EXPERIMENTS_DIR, apr_results_filename)
+    )
     apr_results = _load_json(apr_results_file, default={})
 
     loader = get_loader(dataset)

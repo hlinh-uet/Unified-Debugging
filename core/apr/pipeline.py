@@ -5,9 +5,10 @@ from typing import Optional
 
 from configs.path import EXPERIMENTS_DIR, PATCHES_DIR
 from core.apr.agent import (
-    run_code_context_collector_agent,
     run_fail_context_agent,
     run_fix_agent,
+    run_related_code_context_agent,
+    run_target_code_context_agent,
 )
 from core.apr.apr_utils import (
     candidate_relpath_from_buggy_tree,
@@ -54,7 +55,8 @@ def _build_patch_validation_context(
     snapshot: dict,
     validation_details: dict,
     fail_context_agent_artifact: dict,
-    code_context_collector_agent_artifact: dict,
+    target_code_context_agent_artifact: dict,
+    related_code_context_agent_artifact: dict,
     fix_agent_artifact: dict,
 ) -> dict:
     """Build rich validation feedback for ReFix/debug artifacts."""
@@ -69,9 +71,76 @@ def _build_patch_validation_context(
         "raw_patch_excerpt": (raw_patch or "")[:8000],
         "patched_function_excerpt": (patched_function or "")[:8000],
         "fail_context_agent_artifact": fail_context_agent_artifact or {},
-        "code_context_collector_agent_artifact": code_context_collector_agent_artifact or {},
+        "target_code_context_agent_artifact": target_code_context_agent_artifact or {},
+        "related_code_context_agent_artifact": related_code_context_agent_artifact or {},
         "fix_agent_artifact": fix_agent_artifact or {},
     }
+
+
+def _target_replacement_unit(target_code_context: dict, fallback_code: str) -> str:
+    envelope = (target_code_context or {}).get("target_envelope") or {}
+    return envelope.get("replacement_unit") or fallback_code or ""
+
+
+def _target_replacement_range(target_code_context: dict, fallback_start: int, fallback_end: int) -> tuple:
+    envelope = (target_code_context or {}).get("target_envelope") or {}
+    replacement_range = envelope.get("replacement_range") or {}
+    try:
+        start = int(replacement_range.get("start_byte", fallback_start))
+        end = int(replacement_range.get("end_byte", fallback_end))
+    except Exception:
+        return fallback_start, fallback_end
+    if start < 0 or end < start:
+        return fallback_start, fallback_end
+    return start, end
+
+
+def _target_replacement_requires_raw_unit(
+    target_code_context: dict,
+    fallback_start: int,
+) -> bool:
+    envelope = (target_code_context or {}).get("target_envelope") or {}
+    replacement_range = envelope.get("replacement_range") or {}
+    try:
+        replacement_start = int(replacement_range.get("start_byte", fallback_start))
+    except Exception:
+        replacement_start = fallback_start
+    return bool(envelope.get("replacement_includes_prefix")) or replacement_start != fallback_start
+
+
+def _normalize_llm_replacement(
+    *,
+    raw_patch: str,
+    target_code_context: dict,
+    fallback_start: int,
+    source_func_name: str,
+    source_language: str,
+) -> tuple:
+    """Return (replacement_text, validation_error) for the target replacement range."""
+    replacement = (raw_patch or "").strip()
+    if "```" in replacement or "<fixed_code" in replacement.lower():
+        return "", "wrapped_response"
+    if not replacement:
+        return "", "empty_response"
+
+    if _target_replacement_requires_raw_unit(target_code_context, fallback_start):
+        envelope = (target_code_context or {}).get("target_envelope") or {}
+        prefix = str(envelope.get("replacement_prefix") or "")
+        first_prefix_line = prefix.strip().splitlines()[0] if prefix.strip() else ""
+        if first_prefix_line and first_prefix_line not in replacement[: max(300, len(first_prefix_line) + 20)]:
+            replacement = prefix + replacement
+
+    reparsed_func, _, _ = extract_function_code(
+        replacement,
+        source_func_name,
+        language=source_language,
+    )
+    if not reparsed_func:
+        return "", "malformed_function"
+
+    if _target_replacement_requires_raw_unit(target_code_context, fallback_start):
+        return replacement, ""
+    return reparsed_func, ""
 
 
 def _candidate_trace_record(candidate: Optional[dict], *, agent: str) -> dict:
@@ -96,6 +165,10 @@ def run_apr_pipeline(
     dataset: str = "codeflaws",
     llm_provider: Optional[str] = None,
     exclude_fixed_fail_tests: bool = True,
+    fl_results_filename: str = "fault_localization_results.json",
+    apr_results_filename: str = "apr_results.json",
+    apr_top_k: Optional[int] = None,
+    valid_mode: bool = False,
 ):
     """
     Pipeline APR (LLM-based).
@@ -108,13 +181,18 @@ def run_apr_pipeline(
     """
     os.makedirs(EXPERIMENTS_DIR, exist_ok=True)
 
-    fl_results_file = os.path.join(EXPERIMENTS_DIR, "fault_localization_results.json")
+    fl_results_file = (
+        fl_results_filename
+        if os.path.isabs(fl_results_filename)
+        else os.path.join(EXPERIMENTS_DIR, fl_results_filename)
+    )
     if not os.path.exists(fl_results_file):
         print(f"[APR] Lỗi: {fl_results_file} chưa tồn tại. Hãy chạy FL trước.")
         return
 
     with open(fl_results_file, "r") as f:
         fl_results = json.load(f)
+    top_k = APR_TOP_K if apr_top_k is None else apr_top_k
 
     ds_lc = (dataset or "").lower()
     if is_defects4c_dataset(ds_lc):
@@ -162,7 +240,11 @@ def run_apr_pipeline(
         )
 
     apr_results = {}
-    apr_results_file = os.path.join(EXPERIMENTS_DIR, "apr_results.json")
+    apr_results_file = (
+        apr_results_filename
+        if os.path.isabs(apr_results_filename)
+        else os.path.join(EXPERIMENTS_DIR, apr_results_filename)
+    )
     if os.path.exists(apr_results_file):
         try:
             with open(apr_results_file, "r") as f:
@@ -184,7 +266,10 @@ def run_apr_pipeline(
     for bug_id, result_data in fl_results.items():
         if bug_id in apr_results:
             if APR_SKIP_EXISTING:
-                print(f"[APR] Bỏ qua bug {bug_id} vì đã có record trong apr_results.json.")
+                print(
+                    f"[APR] Bỏ qua bug {bug_id} vì đã có record trong "
+                    f"{os.path.basename(apr_results_file)}."
+                )
                 continue
             if is_plausible_status(apr_results[bug_id].get("status")):
                 print(f"[APR] Bỏ qua bug {bug_id} vì đã có patch plausible.")
@@ -199,6 +284,8 @@ def run_apr_pipeline(
             )
             apr_results[bug_id] = {
                 "dataset": dataset,
+                "valid_mode": valid_mode,
+                "fl_results_file": os.path.basename(fl_results_file),
                 "status": "skipped",
                 "real_status": "skipped",
                 "validation_error": "no_actionable_failed_tests_after_fixed_fail_filter",
@@ -213,8 +300,8 @@ def run_apr_pipeline(
             continue
 
         sorted_funcs = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        top_funcs = sorted_funcs[:APR_TOP_K] if APR_TOP_K > 0 else sorted_funcs
-        print(f"[APR] Xử lý bug {bug_id}... (top-{APR_TOP_K if APR_TOP_K > 0 else 'all'})")
+        top_funcs = sorted_funcs[:top_k] if top_k > 0 else sorted_funcs
+        print(f"[APR] Xử lý bug {bug_id}... (top-{top_k if top_k > 0 else 'all'})")
 
         try:
             adapter = get_sandbox_adapter(dataset, bug_id)
@@ -304,7 +391,22 @@ def run_apr_pipeline(
             if isinstance(raw_meta, dict):
                 header_context_root = raw_meta.get("buggy_tree_dir") or raw_meta.get("source_repo_dir") or ""
             llm_patch_attempt_index += 1
-            collector_context, code_context_collector_agent_artifact = run_code_context_collector_agent(
+            target_code_context, target_code_context_agent_artifact = run_target_code_context_agent(
+                bug_id=bug_id,
+                attempt_index=llm_patch_attempt_index,
+                qualified_name=qualified_name,
+                candidate_relpath=candidate_relpath,
+                func_name=source_func_name,
+                cand_label=cand_label,
+                func_code=func_code,
+                source_code=source_code,
+                source_path=candidate_path,
+                start_idx=start_idx,
+                end_idx=end_idx,
+                language=source_language,
+                failed_tests_context=failed_tests_context,
+            )
+            related_code_context, related_code_context_agent_artifact = run_related_code_context_agent(
                 bug_id=bug_id,
                 attempt_index=llm_patch_attempt_index,
                 qualified_name=qualified_name,
@@ -317,8 +419,14 @@ def run_apr_pipeline(
                 start_idx=start_idx,
                 end_idx=end_idx,
                 context_root=header_context_root,
+                target_code_context=target_code_context,
             )
-            repair_evidence_pack = collector_context.get("repair_evidence_pack") or {}
+            target_replacement_unit = _target_replacement_unit(target_code_context, func_code)
+            replacement_start_idx, replacement_end_idx = _target_replacement_range(
+                target_code_context,
+                start_idx,
+                end_idx,
+            )
 
             raw_patch, fix_agent_artifact = run_fix_agent(
                 bug_id=bug_id,
@@ -328,8 +436,9 @@ def run_apr_pipeline(
                 llm_provider=llm_provider,
                 func_name=source_func_name,
                 cand_label=cand_label,
-                func_code=func_code,
-                repair_evidence_pack=repair_evidence_pack,
+                func_code=target_replacement_unit,
+                target_code_context=target_code_context,
+                related_code_context=related_code_context,
                 failed_tests_context=failed_tests_context,
             )
             if not raw_patch:
@@ -337,20 +446,18 @@ def run_apr_pipeline(
                 continue
 
             llm_attempted = True
-            candidate_patched_func = raw_patch.strip()
-            if "```" in candidate_patched_func or "<fixed_code" in candidate_patched_func.lower():
-                print("    [ERROR] LLM trả về markdown/XML wrapper thay vì raw function.")
-                candidate_patched_func = ""
-            reparsed_func, _, _ = extract_function_code(
-                candidate_patched_func,
-                source_func_name,
-                language=source_language,
+            candidate_patched_func, normalize_error = _normalize_llm_replacement(
+                raw_patch=raw_patch,
+                target_code_context=target_code_context,
+                fallback_start=start_idx,
+                source_func_name=source_func_name,
+                source_language=source_language,
             )
-            if not reparsed_func:
+            if normalize_error:
                 print("    [ERROR] LLM trả về function không hoàn chỉnh/không parse được. Bỏ qua validate.")
                 snapshot = build_invalid_snapshot(
                     initial,
-                    validation_error="malformed_function",
+                    validation_error=normalize_error,
                     exclude_fixed_fail_tests=exclude_fixed_fail_tests,
                 )
                 llm_patch_artifact = write_llm_patch_artifact(
@@ -375,11 +482,13 @@ def run_apr_pipeline(
                         snapshot=snapshot,
                         validation_details=snapshot.get("validation_details") or {},
                         fail_context_agent_artifact=fail_context_agent_artifact,
-                        code_context_collector_agent_artifact=code_context_collector_agent_artifact,
+                        target_code_context_agent_artifact=target_code_context_agent_artifact,
+                        related_code_context_agent_artifact=related_code_context_agent_artifact,
                         fix_agent_artifact=fix_agent_artifact,
                     ),
                     fail_context_agent_artifact=fail_context_agent_artifact,
-                    code_context_collector_agent_artifact=code_context_collector_agent_artifact,
+                    target_code_context_agent_artifact=target_code_context_agent_artifact,
+                    related_code_context_agent_artifact=related_code_context_agent_artifact,
                     fix_agent_artifact=fix_agent_artifact,
                 )
                 candidate_results.append({
@@ -394,16 +503,15 @@ def run_apr_pipeline(
                     **snapshot,
                 })
                 continue
-            candidate_patched_func = reparsed_func
 
             candidate_patched_source = replace_source_range_bytes(
                 source_code,
-                start_idx,
-                end_idx,
+                replacement_start_idx,
+                replacement_end_idx,
                 candidate_patched_func,
             )
 
-            orig_norm = normalize_code_for_edit_distance(func_code)
+            orig_norm = normalize_code_for_edit_distance(target_replacement_unit)
             patched_norm = normalize_code_for_edit_distance(candidate_patched_func)
             if not patched_norm or candidate_patched_source == source_code:
                 print("    [NO-OP] Patch không thay đổi hàm nguồn, bỏ qua candidate này.")
@@ -435,11 +543,13 @@ def run_apr_pipeline(
                         snapshot=snapshot,
                         validation_details=snapshot.get("validation_details") or {},
                         fail_context_agent_artifact=fail_context_agent_artifact,
-                        code_context_collector_agent_artifact=code_context_collector_agent_artifact,
+                        target_code_context_agent_artifact=target_code_context_agent_artifact,
+                        related_code_context_agent_artifact=related_code_context_agent_artifact,
                         fix_agent_artifact=fix_agent_artifact,
                     ),
                     fail_context_agent_artifact=fail_context_agent_artifact,
-                    code_context_collector_agent_artifact=code_context_collector_agent_artifact,
+                    target_code_context_agent_artifact=target_code_context_agent_artifact,
+                    related_code_context_agent_artifact=related_code_context_agent_artifact,
                     fix_agent_artifact=fix_agent_artifact,
                 )
                 candidate_results.append({
@@ -512,11 +622,13 @@ def run_apr_pipeline(
                     snapshot=snapshot,
                     validation_details=validation_details,
                     fail_context_agent_artifact=fail_context_agent_artifact,
-                    code_context_collector_agent_artifact=code_context_collector_agent_artifact,
+                    target_code_context_agent_artifact=target_code_context_agent_artifact,
+                    related_code_context_agent_artifact=related_code_context_agent_artifact,
                     fix_agent_artifact=fix_agent_artifact,
                 ),
                 fail_context_agent_artifact=fail_context_agent_artifact,
-                code_context_collector_agent_artifact=code_context_collector_agent_artifact,
+                target_code_context_agent_artifact=target_code_context_agent_artifact,
+                related_code_context_agent_artifact=related_code_context_agent_artifact,
                 fix_agent_artifact=fix_agent_artifact,
             )
             candidate_result["fix_agent_evaluation"] = extract_evaluation_snapshot(snapshot)
@@ -629,6 +741,8 @@ def run_apr_pipeline(
             )
             apr_results[bug_id] = {
                 "dataset": dataset,
+                "valid_mode": valid_mode,
+                "fl_results_file": os.path.basename(fl_results_file),
                 "patched_function": best_candidate.get("patched_function"),
                 "patched_file": best_candidate.get("patched_file"),
                 "llm_patch_artifact": best_candidate.get("llm_patch_artifact") or {},
@@ -658,6 +772,8 @@ def run_apr_pipeline(
         else:
             apr_results[bug_id] = {
                 "dataset": dataset,
+                "valid_mode": valid_mode,
+                "fl_results_file": os.path.basename(fl_results_file),
                 "status": "llm_failed" if attempted and not llm_attempted else "skipped",
                 "real_status": "llm_failed" if attempted and not llm_attempted else "skipped",
                 "validation_error": "",

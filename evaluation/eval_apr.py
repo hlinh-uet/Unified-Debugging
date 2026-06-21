@@ -60,7 +60,11 @@ def _classify_fix(init_failed: list, post_failed: list) -> str:
     }[outcome]
 
 
-def evaluate_apr(dataset: str = "codeflaws"):
+def evaluate_apr(
+    dataset: str = "codeflaws",
+    results_filename: str = "apr_results.json",
+    label: str = "LLM-based APR",
+):
     """
     Evaluate APR results across all engines found in experiments/.
 
@@ -82,7 +86,7 @@ def evaluate_apr(dataset: str = "codeflaws"):
         print("         Install with: pip install python-Levenshtein")
 
     apr_files = [
-        ("LLM-based APR", "apr_results.json"),
+        (label, results_filename),
     ]
 
     for label, filename in apr_files:

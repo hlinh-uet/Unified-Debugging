@@ -101,8 +101,8 @@ python3 main.py --apr --dataset tcpdump --llm openrouter
 python3 main.py --apr --dataset tcpdump --llm openai
 python3 main.py --apr --dataset tcpdump    # dùng LLM_PROVIDER trong .env
 
-# APR trên một bug cụ thể chưa được hỗ trợ trực tiếp bởi --apr.
-# Nếu muốn chạy một bug, lọc FL input/result trước hoặc chạy ReFix/APR-validate với --bug-id.
+# APR-valid: giả định FL đúng 100%, đưa ground-truth lên top 1 rồi chỉ chạy APR trên top 1 đó.
+python3 main.py --apr --dataset fmt --llm openrouter --valid
 
 # Bước 3 (optional) Validate riêng lại patch do APR sinh ra 
 python3 main.py --apr-validate --dataset php
@@ -203,6 +203,16 @@ Lưu toàn bộ output/log/context của từng lần sinh patch:
 | `*.json` | Metadata artifact: status, path, agent artifact, evaluation snapshot |
 | `*__patch_validation_agent.response.txt` | Critique JSON cho patch FixAgent fail, dùng làm input cho ReFix |
 
+#### APR-valid (`--valid`)
+
+`--valid` dùng cho kịch bản thiết kế riêng APR khi biết FL ban đầu đã hoàn toàn
+chính xác:
+
+- tạo `experiments/fault_localization_results_valid.json`;
+- mỗi bug có `scores` chỉ gồm ground-truth function ở top 1 với score `1.0`;
+- APR đọc file valid này và ép `top-k = 1`;
+- manifest APR được ghi riêng vào `experiments/apr_results_valid.json`.
+
 #### `experiments/apr_results.json`
 
 Đây là manifest/kết quả tổng hợp cuối cho từng bug. Các field quan trọng:
@@ -234,10 +244,11 @@ Lưu toàn bộ output/log/context của từng lần sinh patch:
 | `--refix`       | Chạy ReFix standalone từ `experiments/llm_patches/` đã lưu |
 | `--bug-id`      | Giới hạn một bug khi dùng `--apr-validate`, `--refix`, hoặc `--with-refix`, ví dụ `CVE-2018-7584` |
 | `--with-refix`  | Sau APR hoặc `--all`, chạy thêm ReFix standalone từ artifact đã lưu |
+| `--valid`       | Dùng oracle FL: ground-truth top 1, APR chỉ thử top 1; đọc/ghi `fault_localization_results_valid.json` và `apr_results_valid.json` |
 | `--eval`        | Chỉ chạy Evaluation (FL + APR), lọc theo dataset   |
 | `--all`         | Chạy FL → APR pipeline mới → Evaluation            |
 | `--include-fixed-fail-tests` | Không loại test có `outcome=FAIL` và `outcome_fixed=FAIL`; mặc định các test này bị loại khỏi FL/APR/validation |
-| `--fl-eval-level` | Chọn file FL để tính Top-K: `combined`, `apr_feedback`, `function`, `file`, `class`, hoặc `all` |
+| `--fl-eval-level` | Chọn file FL để tính Top-K: `combined`, `valid`, `apr_feedback`, `function`, `file`, `class`, hoặc `all` |
 | `--llm`         | Provider APR: `openai` hoặc `openrouter` |
 
 ### Biến môi trường APR

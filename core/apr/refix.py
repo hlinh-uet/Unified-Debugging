@@ -115,6 +115,7 @@ def run_refix_from_saved_artifacts(
     llm_provider: Optional[str] = None,
     exclude_fixed_fail_tests: bool = True,
     refix_round: int = 1,
+    apr_results_filename: str = "apr_results.json",
 ):
     """
     Run ReFix from saved APR artifacts under experiments/llm_patches.
@@ -149,7 +150,11 @@ def run_refix_from_saved_artifacts(
         print(f"[REFIX] Không tìm thấy bug phù hợp cho dataset '{dataset}'.")
         return
 
-    apr_results_file = os.path.join(EXPERIMENTS_DIR, "apr_results.json")
+    apr_results_file = (
+        apr_results_filename
+        if os.path.isabs(apr_results_filename)
+        else os.path.join(EXPERIMENTS_DIR, apr_results_filename)
+    )
     apr_results = _load_json(apr_results_file, default={})
 
     updated = 0
@@ -763,7 +768,8 @@ def _prior_context_from_artifact(artifact: dict) -> dict:
         "repair_target_relpath": artifact.get("repair_target_relpath"),
         "validation_context": validation_context,
         "fail_context_agent_artifact": artifact.get("fail_context_agent_artifact") or {},
-        "code_context_collector_agent_artifact": artifact.get("code_context_collector_agent_artifact") or {},
+        "target_code_context_agent_artifact": artifact.get("target_code_context_agent_artifact") or {},
+        "related_code_context_agent_artifact": artifact.get("related_code_context_agent_artifact") or {},
         "retrieval_context_agent_artifact": artifact.get("retrieval_context_agent_artifact") or {},
         "fix_agent_artifact": artifact.get("fix_agent_artifact") or {},
         "patch_validation_agent_artifact": artifact.get("patch_validation_agent_artifact") or {},
