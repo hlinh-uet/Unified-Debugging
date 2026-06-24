@@ -1,7 +1,13 @@
 import difflib
 import json
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
+from core.apr.agent.correctness_repair.profile import (
+    refix_policy_rules as correctness_refix_policy_rules,
+)
+from core.apr.agent.security_repair.profile import (
+    refix_policy_rules as security_refix_policy_rules,
+)
 from core.apr.artifacts import write_llm_step_artifact
 from core.apr.llm import call_llm
 
@@ -40,7 +46,7 @@ def build_refix_prompt(
         default=str,
     )
     prior_context_json = json.dumps(
-        prior_context or {},
+        _compact_prior_context_for_prompt(prior_context or {}),
         ensure_ascii=False,
         indent=2,
         default=str,
@@ -48,6 +54,8 @@ def build_refix_prompt(
     patch_validation_text = (patch_validation_analysis or "").strip() or (
         "No PatchValidationAgent analysis was available. Rely on validation feedback and patch delta."
     )
+    route_rules = _route_refix_policy_rules(prior_context)
+    route_rules_text = "\n".join(f"- {rule}" for rule in route_rules) or "- No route-specific ReFix rules were inferred."
     return f"""REFIX TASK
 Bug ID: {bug_id}
 The previous APR patch was generated for the right repair target but did not validate.
@@ -112,6 +120,9 @@ BEGIN PRIOR APR CONTEXT JSON
 {prior_context_json}
 END PRIOR APR CONTEXT JSON
 
+ROUTE-SPECIFIC REFIX POLICY
+{route_rules_text}
+
 REFIX POLICY
 1. Treat PREVIOUS PATCHED FUNCTION as the baseline to improve, not as disposable text.
 2. Preserve any useful checks, bounds, conversions, helper calls, and style choices from the previous patch.
@@ -134,6 +145,67 @@ OUTPUT CONTRACT
 
 REFINED FIXED FUNCTION
 """
+
+
+def _route_refix_policy_rules(prior_context: dict) -> List[str]:
+    route = _repair_route_from_prior_context(prior_context)
+    if route == "security_repair":
+        return security_refix_policy_rules()
+    if route == "correctness_repair":
+        return correctness_refix_policy_rules()
+    return []
+
+
+def _repair_route_from_prior_context(prior_context: dict) -> str:
+    validation_context = (prior_context or {}).get("validation_context") or {}
+    objective = validation_context.get("repair_objective") or {}
+    route = str(objective.get("route") or "").strip()
+    if route:
+        return route
+    objective = (prior_context or {}).get("repair_objective") or {}
+    return str(objective.get("route") or "").strip()
+
+
+def _compact_prior_context_for_prompt(prior_context: dict) -> dict:
+    prior_context = prior_context or {}
+    validation_context = prior_context.get("validation_context") or {}
+    out = {
+        key: prior_context.get(key)
+        for key in ("function", "status", "validation_error", "repair_target_relpath")
+        if prior_context.get(key)
+    }
+    objective = validation_context.get("repair_objective") or prior_context.get("repair_objective") or {}
+    if objective:
+        out["repair_objective"] = _compact_repair_objective_for_prompt(objective)
+    snapshot = validation_context.get("evaluation_snapshot") or {}
+    if snapshot:
+        out["evaluation_snapshot"] = {
+            key: snapshot.get(key)
+            for key in ("status", "real_status", "validation_error", "post_failed_tests", "full_post_failed_tests")
+            if snapshot.get(key)
+        }
+    for key in (
+        "fail_context_agent_artifact_response_excerpt",
+        "fix_agent_artifact_response_excerpt",
+        "patch_validation_agent_artifact_response_excerpt",
+    ):
+        text = str(prior_context.get(key) or "").strip()
+        if text:
+            out[key] = text[:3000]
+    return out
+
+
+def _compact_repair_objective_for_prompt(objective: dict) -> dict:
+    return {
+        "bug_kind": objective.get("bug_kind"),
+        "metadata_label": objective.get("metadata_label"),
+        "validation_oracle": objective.get("validation_oracle"),
+        "oracle_subkind": objective.get("oracle_subkind"),
+        "route": objective.get("route"),
+        "confidence": objective.get("confidence"),
+        "repair_goal": objective.get("repair_goal"),
+        "failure_categories": (objective.get("failure_categories") or [])[:8],
+    }
 
 
 def _focused_validation_feedback(validation_details: dict, prior_context: dict) -> str:

@@ -1,6 +1,6 @@
 import os
 import re
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from core.utils import (
     Language,
@@ -90,6 +90,23 @@ def tree_sitter_language(language: str):
             return None
 
 
+def parser_diagnostics(language: str) -> Dict[str, Any]:
+    key = (language or "c").strip().lower()
+    wants_cpp = key in ("cpp", "c++", "cc", "cxx")
+    module = tree_sitter_cpp if wants_cpp else tree_sitter_c
+    grammar = "tree_sitter_cpp" if wants_cpp else "tree_sitter_c"
+    available = Parser is not None and Language is not None and module is not None
+    lang = tree_sitter_language(language) if available else None
+    return {
+        "parser_package_available": Parser is not None and Language is not None,
+        "grammar": grammar,
+        "grammar_available": module is not None,
+        "language_object_available": lang is not None,
+        "ast_preferred": True,
+        "fallback_policy": "Use regex only when tree-sitter grammar/parser is unavailable or the source fragment cannot be parsed.",
+    }
+
+
 def parse_tree(source: str, language: str):
     if Parser is None:
         return None, None
@@ -109,6 +126,154 @@ def parse_tree(source: str, language: str):
         return parser.parse(source_bytes), source_bytes
     except Exception:
         return None, None
+
+
+def constructor_initializer_names(source: str, language: str = "cpp") -> List[str]:
+    names = _constructor_initializer_names_ast(source, language)
+    if names:
+        return names
+    initializer_text = _constructor_initializer_text(source)
+    if not initializer_text:
+        return []
+    out = []
+    for part in split_top_level_commas(initializer_text):
+        match = re.match(r"\s*([A-Za-z_]\w*)\s*(?:\(|\{)", part)
+        if match:
+            out.append(match.group(1))
+    return dedup_keep_order(out)
+
+
+def signature_without_constructor_initializers(source: str) -> str:
+    header = str(source or "").split("{", 1)[0]
+    close = _find_first_parameter_list_close(header)
+    if close >= 0:
+        suffix = header[close + 1 :]
+        colon = _find_top_level_constructor_colon(suffix)
+        if colon >= 0:
+            header = header[: close + 1] + suffix[:colon]
+    return re.sub(r"\s+", " ", header).strip()
+
+
+def split_top_level_commas(text: str) -> List[str]:
+    parts = []
+    start = 0
+    depth = 0
+    quote = ""
+    escaped = False
+    for idx, ch in enumerate(text or ""):
+        if quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = ""
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+        elif ch in "([{<":
+            depth += 1
+        elif ch in ")]}>":
+            depth = max(0, depth - 1)
+        elif ch == "," and depth == 0:
+            parts.append(text[start:idx])
+            start = idx + 1
+    parts.append((text or "")[start:])
+    return parts
+
+
+def _constructor_initializer_names_ast(source: str, language: str) -> List[str]:
+    tree, source_bytes = parse_tree(source or "", language)
+    if tree is None or source_bytes is None:
+        return []
+    names = []
+    for node in walk_nodes(tree.root_node):
+        if node.type != "field_initializer":
+            continue
+        field = None
+        try:
+            field = node.child_by_field_name("field")
+        except Exception:
+            field = None
+        if field is not None:
+            text = node_text(field, source_bytes).strip()
+            if text:
+                names.append(text)
+                continue
+        for child in node.children:
+            if child.type == "field_identifier":
+                text = node_text(child, source_bytes).strip()
+                if text:
+                    names.append(text)
+                    break
+    return dedup_keep_order(names)
+
+
+def _constructor_initializer_text(source: str) -> str:
+    header = str(source or "").split("{", 1)[0]
+    if not header:
+        return ""
+    close = _find_first_parameter_list_close(header)
+    if close < 0:
+        return ""
+    suffix = header[close + 1 :]
+    colon = _find_top_level_constructor_colon(suffix)
+    return suffix[colon + 1 :].strip() if colon >= 0 else ""
+
+
+def _find_first_parameter_list_close(header: str) -> int:
+    open_idx = header.find("(")
+    if open_idx < 0:
+        return -1
+    depth = 0
+    quote = ""
+    escaped = False
+    for idx in range(open_idx, len(header)):
+        ch = header[idx]
+        if quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = ""
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return idx
+    return -1
+
+
+def _find_top_level_constructor_colon(text: str) -> int:
+    depth = 0
+    quote = ""
+    escaped = False
+    for idx, ch in enumerate(text or ""):
+        if quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = ""
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+        elif ch in "([{<":
+            depth += 1
+        elif ch in ")]}>":
+            depth = max(0, depth - 1)
+        elif ch == ":" and depth == 0:
+            prev_ch = text[idx - 1] if idx > 0 else ""
+            next_ch = text[idx + 1] if idx + 1 < len(text) else ""
+            if prev_ch != ":" and next_ch != ":":
+                return idx
+    return -1
 
 
 def walk_nodes(root):
@@ -136,7 +301,7 @@ def function_name_from_declarator(declarator, source_bytes: bytes) -> str:
         except Exception:
             child = None
         if child is not None:
-            return _clean_function_name(node_text(child, source_bytes))
+            return _clean_qualified_name(node_text(child, source_bytes))
 
     if declarator.type in (
         "identifier",
@@ -144,10 +309,10 @@ def function_name_from_declarator(declarator, source_bytes: bytes) -> str:
         "destructor_name",
         "operator_name",
     ):
-        return _clean_function_name(node_text(declarator, source_bytes))
+        return _clean_qualified_name(node_text(declarator, source_bytes))
 
     if declarator.type in ("qualified_identifier", "template_function"):
-        return _clean_function_name(node_text(declarator, source_bytes))
+        return _clean_qualified_name(node_text(declarator, source_bytes))
 
     for child in declarator.children:
         name = function_name_from_declarator(child, source_bytes)
@@ -175,7 +340,7 @@ def function_matches(actual: str, requested: str) -> bool:
         return True
     if "::" not in requested and actual.rsplit("::", 1)[-1] == requested:
         return True
-    return actual.rsplit("::", 1)[-1] == requested.rsplit("::", 1)[-1]
+    return False
 
 
 def find_function_node(source: str, func_name: str, language: str):
@@ -189,9 +354,40 @@ def find_function_node(source: str, func_name: str, language: str):
         if declarator is None:
             continue
         actual = function_name_from_declarator(declarator, source_bytes)
-        if function_matches(actual, func_name):
+        candidate_names = _function_candidate_names(node, actual, source_bytes)
+        if any(function_matches(name, func_name) for name in candidate_names):
             return node, tree, source_bytes
     return None, tree, source_bytes
+
+
+def _function_candidate_names(node, actual: str, source_bytes: bytes) -> List[str]:
+    actual = _clean_qualified_name(actual)
+    names = [actual] if actual else []
+    if actual and "::" not in actual:
+        scopes = _enclosing_cpp_scopes(node, source_bytes)
+        if scopes:
+            names.append("::".join([*scopes, actual]))
+    return dedup_keep_order(names)
+
+
+def _enclosing_cpp_scopes(node, source_bytes: bytes) -> List[str]:
+    scopes = []
+    cur = getattr(node, "parent", None)
+    while cur is not None:
+        if cur.type in ("class_specifier", "struct_specifier", "union_specifier"):
+            name_node = cur.child_by_field_name("name")
+            if name_node is not None:
+                name = _clean_function_name(node_text(name_node, source_bytes))
+                if name:
+                    scopes.append(name)
+        elif cur.type == "namespace_definition":
+            name_node = cur.child_by_field_name("name")
+            if name_node is not None:
+                name = _clean_function_name(node_text(name_node, source_bytes))
+                if name:
+                    scopes.append(name)
+        cur = getattr(cur, "parent", None)
+    return list(reversed(scopes))
 
 
 def source_slice_by_byte_range(source: str, start_byte: int, end_byte: int) -> str:

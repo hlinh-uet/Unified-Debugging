@@ -7,6 +7,7 @@ from configs.path import EXPERIMENTS_DIR, LLM_PATCHES_DIR, PATCHES_DIR
 from core.apr.agent import run_patch_validation_agent, run_refix_agent
 from core.apr.apr_utils import (
     candidate_relpath_from_buggy_tree,
+    candidate_is_strictly_better,
     candidate_quality_key,
     is_plausible_status,
     is_defects4c_dataset,
@@ -183,7 +184,7 @@ def run_refix_from_saved_artifacts(
         existing_result = apr_results.get(cur_bug_id) if isinstance(apr_results, dict) else {}
         if not isinstance(existing_result, dict):
             existing_result = {}
-        refix_is_better = candidate_quality_key(result) < candidate_quality_key(best_fix_artifact)
+        refix_is_better = candidate_is_strictly_better(result, best_fix_artifact)
         if refix_is_better:
             apr_results[cur_bug_id] = {
                 **result,
@@ -387,6 +388,13 @@ def _run_one_refix_candidate(
     if not original_function:
         print(f"    [SKIP] Không trích xuất được function gốc {source_func_name}.")
         return None
+    target_code_context = _target_code_context_from_artifact(artifact)
+    original_replacement_unit = _target_replacement_unit(target_code_context, original_function)
+    replacement_start_idx, replacement_end_idx = _target_replacement_range(
+        target_code_context,
+        start_idx,
+        end_idx,
+    )
 
     previous_validation = _validation_feedback_from_artifact(artifact)
     if not previous_validation and os.path.isfile(previous_patched_file):
@@ -407,7 +415,7 @@ def _run_one_refix_candidate(
         llm_provider=llm_provider,
         func_name=source_func_name,
         cand_label=target_relpath or os.path.basename(original_path),
-        original_function=original_function,
+        original_function=original_replacement_unit,
         patched_function=previous_function,
         validation_details=previous_validation,
         prior_context=prior_context,
@@ -424,7 +432,7 @@ def _run_one_refix_candidate(
         llm_provider=llm_provider,
         func_name=source_func_name,
         cand_label=target_relpath or os.path.basename(original_path),
-        original_function=original_function,
+        original_function=original_replacement_unit,
         previous_patched_function=previous_function,
         validation_details=previous_validation,
         patch_validation_analysis=patch_validation_analysis,
@@ -458,26 +466,27 @@ def _run_one_refix_candidate(
             raw_patch=raw_patch,
         )
 
-    reparsed_func, _, _ = extract_function_code(
-        candidate_patched_func,
-        source_func_name,
-        language=source_language,
+    candidate_patched_func, normalize_error = _normalize_refix_replacement(
+        raw_patch=candidate_patched_func,
+        target_code_context=target_code_context,
+        fallback_start=start_idx,
+        source_func_name=source_func_name,
+        source_language=source_language,
     )
-    if not reparsed_func:
+    if normalize_error:
         return _failed_refix_candidate(
             bug=bug,
             artifact=artifact,
             qualified_name=qualified_name,
             target_relpath=target_relpath,
             original_path=original_path,
-            validation_error="malformed_function",
+            validation_error=normalize_error,
             initial=initial,
             exclude_fixed_fail_tests=exclude_fixed_fail_tests,
             refix_agent_artifact=refix_agent_artifact,
             raw_patch=raw_patch,
             patched_function=candidate_patched_func,
         )
-    candidate_patched_func = reparsed_func
 
     if normalize_code_for_edit_distance(candidate_patched_func) == normalize_code_for_edit_distance(previous_function):
         return _failed_refix_candidate(
@@ -496,8 +505,8 @@ def _run_one_refix_candidate(
 
     candidate_patched_source = replace_source_range_bytes(
         source_code,
-        start_idx,
-        end_idx,
+        replacement_start_idx,
+        replacement_end_idx,
         candidate_patched_func,
     )
 
@@ -588,12 +597,23 @@ def _failed_refix_candidate(
     refix_agent_artifact: dict,
     raw_patch: str = "",
     patched_function: str = "",
+    validation_details: Optional[dict] = None,
 ) -> dict:
-    snapshot = build_invalid_snapshot(
-        initial,
-        validation_error=validation_error,
-        exclude_fixed_fail_tests=exclude_fixed_fail_tests,
-    )
+    if validation_details:
+        snapshot = build_validation_snapshot(
+            initial,
+            validation_details=validation_details,
+            post_passed=[],
+            post_failed=[],
+            validation_error=validation_error,
+            exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+        )
+    else:
+        snapshot = build_invalid_snapshot(
+            initial,
+            validation_error=validation_error,
+            exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+        )
     refix_patch_artifact = write_refix_patch_artifact(
         bug_id=bug.bug_id,
         attempt_index=int(artifact.get("attempt_index") or 0),
@@ -759,6 +779,81 @@ def _validation_feedback_from_artifact(artifact: dict) -> dict:
     return details
 
 
+def _target_code_context_from_artifact(artifact: dict) -> dict:
+    target_artifact = artifact.get("target_code_context_agent_artifact") or {}
+    path_value = target_artifact.get("target_code_context_path")
+    if not path_value:
+        validation_context = _artifact_validation_context(artifact)
+        target_artifact = validation_context.get("target_code_context_agent_artifact") or {}
+        path_value = target_artifact.get("target_code_context_path")
+    if not path_value:
+        return {}
+    data = _load_json(_experiment_path(str(path_value)), default={})
+    return data if isinstance(data, dict) else {}
+
+
+def _target_replacement_unit(target_code_context: dict, fallback_code: str) -> str:
+    envelope = (target_code_context or {}).get("target_envelope") or {}
+    return envelope.get("replacement_unit") or fallback_code or ""
+
+
+def _target_replacement_range(target_code_context: dict, fallback_start: int, fallback_end: int) -> tuple:
+    envelope = (target_code_context or {}).get("target_envelope") or {}
+    replacement_range = envelope.get("replacement_range") or {}
+    try:
+        start = int(replacement_range.get("start_byte", fallback_start))
+        end = int(replacement_range.get("end_byte", fallback_end))
+    except Exception:
+        return fallback_start, fallback_end
+    if start < 0 or end < start:
+        return fallback_start, fallback_end
+    return start, end
+
+
+def _target_replacement_requires_raw_unit(target_code_context: dict, fallback_start: int) -> bool:
+    envelope = (target_code_context or {}).get("target_envelope") or {}
+    replacement_range = envelope.get("replacement_range") or {}
+    try:
+        replacement_start = int(replacement_range.get("start_byte", fallback_start))
+    except Exception:
+        replacement_start = fallback_start
+    return bool(envelope.get("replacement_includes_prefix")) or replacement_start != fallback_start
+
+
+def _normalize_refix_replacement(
+    *,
+    raw_patch: str,
+    target_code_context: dict,
+    fallback_start: int,
+    source_func_name: str,
+    source_language: str,
+) -> tuple:
+    replacement = (raw_patch or "").strip()
+    if "```" in replacement or "<fixed_code" in replacement.lower():
+        return "", "wrapped_response"
+    if not replacement:
+        return "", "empty_response"
+
+    if _target_replacement_requires_raw_unit(target_code_context, fallback_start):
+        envelope = (target_code_context or {}).get("target_envelope") or {}
+        prefix = str(envelope.get("replacement_prefix") or "")
+        first_prefix_line = prefix.strip().splitlines()[0] if prefix.strip() else ""
+        if first_prefix_line and first_prefix_line not in replacement[: max(300, len(first_prefix_line) + 20)]:
+            replacement = prefix + replacement
+
+    reparsed_func, _, _ = extract_function_code(
+        replacement,
+        source_func_name,
+        language=source_language,
+    )
+    if not reparsed_func:
+        return "", "malformed_function"
+
+    if _target_replacement_requires_raw_unit(target_code_context, fallback_start):
+        return replacement, ""
+    return reparsed_func, ""
+
+
 def _prior_context_from_artifact(artifact: dict) -> dict:
     validation_context = _artifact_validation_context(artifact)
     out = {
@@ -768,6 +863,7 @@ def _prior_context_from_artifact(artifact: dict) -> dict:
         "repair_target_relpath": artifact.get("repair_target_relpath"),
         "validation_context": validation_context,
         "fail_context_agent_artifact": artifact.get("fail_context_agent_artifact") or {},
+        "repair_objective_classifier_artifact": artifact.get("repair_objective_classifier_artifact") or {},
         "target_code_context_agent_artifact": artifact.get("target_code_context_agent_artifact") or {},
         "related_code_context_agent_artifact": artifact.get("related_code_context_agent_artifact") or {},
         "retrieval_context_agent_artifact": artifact.get("retrieval_context_agent_artifact") or {},

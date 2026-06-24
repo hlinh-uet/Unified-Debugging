@@ -1,15 +1,12 @@
 import os
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-from core.apr.artifacts import write_related_code_context_artifact
-from core.apr.config import APR_MAX_LOCAL_HEADER_CONTEXT_CHARS, APR_MAX_SOURCE_CHARS
+from core.apr.config import APR_MAX_LOCAL_HEADER_CONTEXT_CHARS
 from core.apr.agent.context_common import (
-    call_name_from_node,
     clip_text,
     contains_symbol,
     dedup_keep_order,
-    extract_symbols_from_code,
     function_name_from_declarator,
     include_records_from_source,
     iter_candidate_project_files,
@@ -18,182 +15,21 @@ from core.apr.agent.context_common import (
     relpath,
     source_byte_range_to_char_range,
     source_language_from_path,
-    source_root,
     walk_nodes,
 )
 
-
-MAX_RECURSIVE_HEADER_DEPTH = 2
-MAX_PROJECT_HEADERS = 16
-MAX_HEADER_SURFACE_ITEMS = 24
-MAX_SOURCE_SURFACE_ITEMS = 40
-MAX_USAGE_EXAMPLES = 8
-MAX_USAGE_SEARCH_FILES = 80
-MAX_DECLARATION_CHARS = 1600
-MAX_USAGE_CHARS = 1400
-MAX_SOURCE_EXCERPT_CHARS = APR_MAX_SOURCE_CHARS
-
-
-def collect_related_code_context(
-    *,
-    func_name: str,
-    cand_label: str,
-    func_code: str,
-    source_code: str,
-    source_path: str,
-    start_idx: int,
-    end_idx: int,
-    context_root: Optional[str],
-    target_code_context: dict,
-) -> Dict[str, Any]:
-    language = source_language_from_path(source_path)
-    root = source_root(source_path, context_root)
-    source_label = relpath(source_path, root)
-    target_unit = (
-        (target_code_context.get("target_envelope") or {}).get("replacement_unit")
-        or func_code
-        or ""
-    )
-    symbols = extract_symbols_from_code(target_unit, language)
-    symbol_set = {
-        str(item)
-        for key in ("calls", "types", "fields", "identifiers", "macro_like")
-        for item in (symbols.get(key) or [])
-        if item
-    }
-
-    headers, unresolved_headers = _collect_project_headers(
-        source_code=source_code,
-        source_path=source_path,
-        source_root=root,
-        language=language,
-    )
-    include_inventory = _build_include_inventory(
-        source_code=source_code,
-        source_path=source_path,
-        source_root=root,
-        language=language,
-        headers=headers,
-        unresolved=unresolved_headers,
-    )
-    source_excerpt = trim_source_for_context(source_code, start_idx, end_idx)
-    source_api_surface = _surface_items_from_source(
-        source=source_code,
-        language=language,
-        source_label=source_label,
-        symbols=symbol_set,
-        target_start=start_idx,
-        target_end=end_idx,
-        max_items=MAX_SOURCE_SURFACE_ITEMS,
-    )
-    same_file_helpers = [
-        item for item in source_api_surface
-        if str(item.get("kind") or "").startswith("function_definition:")
-    ]
-    same_file_declarations = [
-        item for item in source_api_surface
-        if not str(item.get("kind") or "").startswith("function_definition:")
-    ]
-    header_context = _build_project_header_context(headers, symbol_set)
-    usage_examples = _build_call_references(
-        source_code=source_code,
-        source_path=source_path,
-        source_root=root,
-        language=language,
-        call_names=set(symbols.get("calls") or []),
-        start_idx=start_idx,
-        end_idx=end_idx,
-    )
-    target_references = _build_call_references(
-        source_code=source_code,
-        source_path=source_path,
-        source_root=root,
-        language=language,
-        call_names={func_name} if func_name else set(),
-        start_idx=start_idx,
-        end_idx=end_idx,
-    )
-    external_contracts = _infer_external_contracts(
-        target_code=target_unit,
-        same_file_helpers=same_file_helpers,
-        usage_examples=usage_examples,
-        target_references=target_references,
-    )
-    project_idioms = _project_idioms(
-        source_api_surface=source_api_surface,
-        header_context=header_context,
-        usage_examples=usage_examples,
-    )
-    ranked_context = _rank_context(
-        same_file_helpers=same_file_helpers,
-        same_file_declarations=same_file_declarations,
-        header_context=header_context,
-        usage_examples=usage_examples,
-        target_references=target_references,
-        external_contracts=external_contracts,
-    )
-    uncertainties = []
-    if include_inventory["unresolved_project_includes"]:
-        uncertainties.append(
-            "some project includes could not be resolved: "
-            + ", ".join(include_inventory["unresolved_project_includes"])
-        )
-    if len(headers) >= MAX_PROJECT_HEADERS:
-        uncertainties.append(f"project header traversal stopped at {MAX_PROJECT_HEADERS} headers")
-
-    return {
-        "related_code_map": {
-            "target_source_excerpt": source_excerpt,
-            "include_inventory": include_inventory,
-            "same_file_helpers": same_file_helpers,
-            "same_file_declarations": same_file_declarations,
-            "header_context": header_context,
-            "cross_file_usage_examples": usage_examples,
-            "caller_context": target_references,
-        },
-        "external_behavioral_contracts": external_contracts,
-        "project_idioms": project_idioms,
-        "ranked_context": ranked_context,
-        "uncertainties": uncertainties,
-    }
-
-
-def run_related_code_context_agent(
-    *,
-    bug_id: str,
-    attempt_index: int,
-    qualified_name: str,
-    candidate_relpath: str,
-    func_name: str,
-    cand_label: str,
-    func_code: str,
-    source_code: str,
-    source_path: str,
-    start_idx: int,
-    end_idx: int,
-    context_root: Optional[str],
-    target_code_context: dict,
-) -> Tuple[dict, dict]:
-    context = collect_related_code_context(
-        func_name=func_name,
-        cand_label=cand_label,
-        func_code=func_code,
-        source_code=source_code,
-        source_path=source_path,
-        start_idx=start_idx,
-        end_idx=end_idx,
-        context_root=context_root,
-        target_code_context=target_code_context,
-    )
-    artifact = write_related_code_context_artifact(
-        bug_id=bug_id,
-        attempt_index=attempt_index,
-        qualified_name=qualified_name,
-        candidate_relpath=candidate_relpath,
-        related_code_context=context,
-    )
-    return context, artifact
-
+from .support import (
+    MAX_DECLARATION_CHARS,
+    MAX_HEADER_SURFACE_ITEMS,
+    MAX_PROJECT_HEADERS,
+    MAX_RECURSIVE_HEADER_DEPTH,
+    MAX_SOURCE_EXCERPT_CHARS,
+    MAX_SOURCE_SURFACE_ITEMS,
+    MAX_USAGE_CHARS,
+    MAX_USAGE_EXAMPLES,
+    MAX_USAGE_SEARCH_FILES,
+    _dedup_contracts,
+)
 
 def trim_source_for_context(source_code: str, start_idx: int, end_idx: int) -> str:
     start_char, end_char = source_byte_range_to_char_range(source_code, start_idx, end_idx)
@@ -212,7 +48,6 @@ def trim_source_for_context(source_code: str, start_idx: int, end_idx: int) -> s
     if func_hi < len(source_code):
         parts.append("\n\n/* ... [source truncated - tail omitted] ... */\n")
     return "".join(parts)
-
 
 def _resolve_project_include(include_name: str, including_dir: str, root: str) -> str:
     candidates = [os.path.normpath(os.path.join(including_dir, include_name))]
@@ -235,7 +70,6 @@ def _resolve_project_include(include_name: str, including_dir: str, root: str) -
             if len(matches) > 1:
                 break
     return matches[0] if len(matches) == 1 else ""
-
 
 def _collect_project_headers(
     *,
@@ -288,7 +122,6 @@ def _collect_project_headers(
                 queue.append((record["name"], os.path.dirname(header_path), depth + 1, rel))
     return headers, dedup_keep_order(unresolved)
 
-
 def _build_include_inventory(
     *,
     source_code: str,
@@ -318,7 +151,6 @@ def _build_include_inventory(
         "resolved_project_headers": dedup_keep_order([h["relpath"] for h in headers]),
         "unresolved_project_includes": dedup_keep_order(unresolved),
     }
-
 
 def _surface_items_from_source(
     *,
@@ -391,7 +223,6 @@ def _surface_items_from_source(
             break
     return items
 
-
 def _build_project_header_context(headers: List[dict], symbols: set) -> List[dict]:
     out = []
     total_chars = 0
@@ -428,7 +259,6 @@ def _build_project_header_context(headers: List[dict], symbols: set) -> List[dic
         total_chars += len(str(payload))
         out.append(payload)
     return out
-
 
 def _usage_examples_from_source(
     *,
@@ -472,7 +302,6 @@ def _usage_examples_from_source(
             break
     return examples
 
-
 def _snippet_from_function_for_calls(function_text: str, call_names: set) -> str:
     lines = function_text.splitlines()
     selected = []
@@ -486,7 +315,6 @@ def _snippet_from_function_for_calls(function_text: str, call_names: set) -> str
     if not selected:
         return clip_text(function_text, MAX_USAGE_CHARS)
     return clip_text("\n".join(selected), MAX_USAGE_CHARS)
-
 
 def _build_call_references(
     *,
@@ -533,7 +361,6 @@ def _build_call_references(
         if len(examples) >= MAX_USAGE_EXAMPLES:
             break
     return examples[:MAX_USAGE_EXAMPLES]
-
 
 def _infer_external_contracts(
     *,
@@ -601,7 +428,6 @@ def _infer_external_contracts(
         )
     return _dedup_contracts(contracts)[:20]
 
-
 def _project_idioms(
     *,
     source_api_surface: List[dict],
@@ -637,7 +463,6 @@ def _project_idioms(
             )
     return idioms
 
-
 def _rank_context(
     *,
     same_file_helpers: List[dict],
@@ -646,8 +471,29 @@ def _rank_context(
     usage_examples: List[dict],
     target_references: List[dict],
     external_contracts: List[dict],
+    contract_engine: Optional[Dict[str, Any]] = None,
 ) -> dict:
+    contract_engine = contract_engine or {}
     must_read = []
+    contract_brief = contract_engine.get("contract_brief") or {}
+    for group in (contract_brief.get("high_priority_contract_groups") or [])[:6]:
+        must_read.append(
+            {
+                "type": "contract_group",
+                "kind": group.get("kind"),
+                "summary": group.get("policy") or group.get("name") or group.get("expression"),
+                "allowed_constants": (group.get("allowed_constants") or group.get("constants") or [])[:12],
+            }
+        )
+    for sig in ((contract_engine.get("api_contract_inventory") or {}).get("function_signatures") or [])[:4]:
+        must_read.append(
+            {
+                "type": "api_signature",
+                "symbol": sig.get("name"),
+                "source": sig.get("source"),
+                "signature": sig.get("signature"),
+            }
+        )
     for item in external_contracts[:8]:
         must_read.append({"type": "external_contract", "summary": item.get("contract"), "symbol": item.get("symbol")})
     for item in target_references[:5]:
@@ -667,15 +513,3 @@ def _rank_context(
         "likely_relevant": likely[:14],
         "background_only": background[:16],
     }
-
-
-def _dedup_contracts(contracts: List[dict]) -> List[dict]:
-    out = []
-    seen = set()
-    for contract in contracts:
-        key = (contract.get("symbol"), contract.get("kind"), contract.get("contract"))
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(contract)
-    return out

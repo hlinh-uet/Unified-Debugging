@@ -105,3 +105,33 @@ def candidate_quality_key(candidate: dict) -> tuple:
         -candidate_list_len(candidate, "full_post_passed_tests", default=0),
         1 if str((candidate or {}).get("validation_error") or "").strip() else 0,
     )
+
+
+def candidate_is_strictly_better(candidate: dict, baseline: dict) -> bool:
+    """Return True only when candidate improves baseline without adding failures.
+
+    ReFix is useful only when it beats the FixAgent result on the same validation
+    surface. A patch that fixes one failing test while adding a full-suite
+    regression should not replace the original FixAgent patch.
+    """
+    if not candidate:
+        return False
+    if not baseline:
+        return True
+
+    candidate_key = candidate_quality_key(candidate)
+    baseline_key = candidate_quality_key(baseline)
+    if candidate_key >= baseline_key:
+        return False
+
+    candidate_patch_failed = candidate_list_len(candidate, "post_failed_tests")
+    baseline_patch_failed = candidate_list_len(baseline, "post_failed_tests")
+    candidate_full_failed = candidate_list_len(candidate, "full_post_failed_tests")
+    baseline_full_failed = candidate_list_len(baseline, "full_post_failed_tests")
+
+    if candidate_patch_failed > baseline_patch_failed:
+        return False
+    if candidate_full_failed > baseline_full_failed:
+        return False
+
+    return True

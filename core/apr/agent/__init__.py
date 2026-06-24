@@ -8,18 +8,30 @@ from core.apr.agent.related_code_context_agent import (
     collect_related_code_context,
     run_related_code_context_agent,
 )
-from core.apr.agent.target_code_context_agent import (
+from core.apr.agent.repair_suggester_agent import (
+    build_repair_suggestion,
+    run_repair_suggester_agent,
+)
+from core.apr.agent.repair_objective_classifier_agent import (
+    classify_repair_objective,
+    run_repair_objective_classifier_agent,
+)
+from core.apr.agent.target_code_contex_agent import (
     collect_target_code_context,
     run_target_code_context_agent,
 )
 
 __all__ = [
+    "classify_repair_objective",
     "collect_related_code_context",
     "collect_target_code_context",
+    "build_repair_suggestion",
     "run_fail_context_agent",
     "run_fix_agent",
     "run_patch_validation_agent",
     "run_refix_agent",
     "run_related_code_context_agent",
+    "run_repair_suggester_agent",
+    "run_repair_objective_classifier_agent",
     "run_target_code_context_agent",
 ]

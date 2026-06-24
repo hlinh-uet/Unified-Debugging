@@ -1,7 +1,13 @@
 import difflib
 import json
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
+from core.apr.agent.correctness_repair.profile import (
+    patch_validation_rules as correctness_patch_validation_rules,
+)
+from core.apr.agent.security_repair.profile import (
+    patch_validation_rules as security_patch_validation_rules,
+)
 from core.apr.artifacts import write_llm_step_artifact
 from core.apr.llm import call_llm
 
@@ -35,6 +41,8 @@ def build_patch_validation_prompt(
         default=str,
     )
     patch_delta = _patch_delta_summary(original_function, patched_function)
+    route_rules = _route_patch_validation_rules(prior_context)
+    route_rules_text = "\n".join(f"- {rule}" for rule in route_rules) or "- No route-specific critic rules were inferred."
     return f"""PATCH VALIDATION TASK
 Bug ID: {bug_id}
 Analyze the failed FixAgent patch for this C/C++ function. Do not produce code.
@@ -68,6 +76,9 @@ BEGIN PRIOR CONTEXT JSON
 {prior_context_json}
 END PRIOR CONTEXT JSON
 
+ROUTE-SPECIFIC CRITIC RULES
+{route_rules_text}
+
 CRITIC RULES
 - Do not invent new APIs, helpers, error codes, tests, or behavior.
 - Ground every claim in validation details, prior context, original function, or patch delta.
@@ -92,6 +103,25 @@ Return exactly one JSON object with these keys:
   "confidence": "low | medium | high"
 }}
 """
+
+
+def _route_patch_validation_rules(prior_context: dict) -> List[str]:
+    route = _repair_route_from_prior_context(prior_context)
+    if route == "security_repair":
+        return security_patch_validation_rules()
+    if route == "correctness_repair":
+        return correctness_patch_validation_rules()
+    return []
+
+
+def _repair_route_from_prior_context(prior_context: dict) -> str:
+    validation_context = (prior_context or {}).get("validation_context") or {}
+    objective = validation_context.get("repair_objective") or {}
+    route = str(objective.get("route") or "").strip()
+    if route:
+        return route
+    objective = (prior_context or {}).get("repair_objective") or {}
+    return str(objective.get("route") or "").strip()
 
 
 def run_patch_validation_agent(
@@ -177,6 +207,7 @@ def _compact_validation_details(details: dict) -> dict:
 
 def _compact_prior_context(prior_context: dict) -> dict:
     prior_context = prior_context or {}
+    validation_context = prior_context.get("validation_context") or {}
     keys = (
         "function",
         "status",
@@ -185,4 +216,22 @@ def _compact_prior_context(prior_context: dict) -> dict:
         "fail_context_agent_artifact_response_excerpt",
         "fix_agent_artifact_response_excerpt",
     )
-    return {key: prior_context.get(key) for key in keys if prior_context.get(key)}
+    out = {key: prior_context.get(key) for key in keys if prior_context.get(key)}
+    if validation_context.get("repair_objective"):
+        out["repair_objective"] = _compact_repair_objective_for_prompt(
+            validation_context.get("repair_objective") or {}
+        )
+    return out
+
+
+def _compact_repair_objective_for_prompt(objective: dict) -> dict:
+    return {
+        "bug_kind": objective.get("bug_kind"),
+        "metadata_label": objective.get("metadata_label"),
+        "validation_oracle": objective.get("validation_oracle"),
+        "oracle_subkind": objective.get("oracle_subkind"),
+        "route": objective.get("route"),
+        "confidence": objective.get("confidence"),
+        "repair_goal": objective.get("repair_goal"),
+        "failure_categories": (objective.get("failure_categories") or [])[:8],
+    }

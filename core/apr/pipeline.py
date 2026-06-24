@@ -7,11 +7,14 @@ from configs.path import EXPERIMENTS_DIR, PATCHES_DIR
 from core.apr.agent import (
     run_fail_context_agent,
     run_fix_agent,
-    run_related_code_context_agent,
-    run_target_code_context_agent,
+    run_repair_suggester_agent,
+    run_repair_objective_classifier_agent,
 )
+from core.apr.agent.related_code_context_agent import run_related_code_context_agent
+from core.apr.agent.target_code_contex_agent import run_target_code_context_agent
 from core.apr.apr_utils import (
     candidate_relpath_from_buggy_tree,
+    candidate_is_strictly_better,
     candidate_quality_key,
     is_plausible_status,
     is_defects4c_dataset,
@@ -55,8 +58,11 @@ def _build_patch_validation_context(
     snapshot: dict,
     validation_details: dict,
     fail_context_agent_artifact: dict,
+    repair_objective: dict,
+    repair_objective_classifier_artifact: dict,
     target_code_context_agent_artifact: dict,
     related_code_context_agent_artifact: dict,
+    repair_suggester_agent_artifact: dict,
     fix_agent_artifact: dict,
 ) -> dict:
     """Build rich validation feedback for ReFix/debug artifacts."""
@@ -71,8 +77,11 @@ def _build_patch_validation_context(
         "raw_patch_excerpt": (raw_patch or "")[:8000],
         "patched_function_excerpt": (patched_function or "")[:8000],
         "fail_context_agent_artifact": fail_context_agent_artifact or {},
+        "repair_objective": repair_objective or {},
+        "repair_objective_classifier_artifact": repair_objective_classifier_artifact or {},
         "target_code_context_agent_artifact": target_code_context_agent_artifact or {},
         "related_code_context_agent_artifact": related_code_context_agent_artifact or {},
+        "repair_suggester_agent_artifact": repair_suggester_agent_artifact or {},
         "fix_agent_artifact": fix_agent_artifact or {},
     }
 
@@ -265,15 +274,15 @@ def run_apr_pipeline(
 
     for bug_id, result_data in fl_results.items():
         if bug_id in apr_results:
-            if APR_SKIP_EXISTING:
-                print(
-                    f"[APR] Bỏ qua bug {bug_id} vì đã có record trong "
-                    f"{os.path.basename(apr_results_file)}."
-                )
-                continue
             if is_plausible_status(apr_results[bug_id].get("status")):
                 print(f"[APR] Bỏ qua bug {bug_id} vì đã có patch plausible.")
                 continue
+            if APR_SKIP_EXISTING:
+                print(
+                    f"[APR] Retry bug {bug_id}: record cũ trong "
+                    f"{os.path.basename(apr_results_file)} chưa plausible "
+                    f"(status={apr_results[bug_id].get('status')})."
+                )
 
         bug_record = bug_map.get(bug_id)
         excluded_fixed_fail_tests = excluded_fixed_fail_by_bug.get(bug_id, [])
@@ -326,6 +335,18 @@ def run_apr_pipeline(
         if not failed_tests_context:
             print(f"    [ERROR] FailContextAgent trả về None. Bỏ qua bug {bug_id}.")
             continue
+        repair_objective, repair_objective_classifier_artifact = run_repair_objective_classifier_agent(
+            bug=bug_record,
+            bug_id=bug_id,
+            dataset=dataset,
+            failed_tests_context=failed_tests_context,
+        )
+        print(
+            "    [ROUTE] "
+            f"{repair_objective.get('bug_kind')} -> {repair_objective.get('route')} "
+            f"(oracle={repair_objective.get('validation_oracle')}, "
+            f"confidence={repair_objective.get('confidence')})"
+        )
         initial = build_initial_test_snapshot(
             bug_record.tests if bug_record else [],
             exclude_fixed_fail_tests=exclude_fixed_fail_tests,
@@ -405,6 +426,7 @@ def run_apr_pipeline(
                 end_idx=end_idx,
                 language=source_language,
                 failed_tests_context=failed_tests_context,
+                repair_objective=repair_objective,
             )
             related_code_context, related_code_context_agent_artifact = run_related_code_context_agent(
                 bug_id=bug_id,
@@ -420,6 +442,18 @@ def run_apr_pipeline(
                 end_idx=end_idx,
                 context_root=header_context_root,
                 target_code_context=target_code_context,
+                repair_objective=repair_objective,
+            )
+            repair_suggestion, repair_suggester_agent_artifact = run_repair_suggester_agent(
+                bug_id=bug_id,
+                attempt_index=llm_patch_attempt_index,
+                qualified_name=qualified_name,
+                candidate_relpath=candidate_relpath,
+                func_name=source_func_name,
+                target_code_context=target_code_context,
+                related_code_context=related_code_context,
+                failed_tests_context=failed_tests_context,
+                repair_objective=repair_objective,
             )
             target_replacement_unit = _target_replacement_unit(target_code_context, func_code)
             replacement_start_idx, replacement_end_idx = _target_replacement_range(
@@ -437,9 +471,9 @@ def run_apr_pipeline(
                 func_name=source_func_name,
                 cand_label=cand_label,
                 func_code=target_replacement_unit,
-                target_code_context=target_code_context,
-                related_code_context=related_code_context,
                 failed_tests_context=failed_tests_context,
+                repair_objective=repair_objective,
+                repair_suggestion=repair_suggestion,
             )
             if not raw_patch:
                 print("    [ERROR] LLM trả về None. Bỏ qua hàm này.")
@@ -482,13 +516,18 @@ def run_apr_pipeline(
                         snapshot=snapshot,
                         validation_details=snapshot.get("validation_details") or {},
                         fail_context_agent_artifact=fail_context_agent_artifact,
+                        repair_objective=repair_objective,
+                        repair_objective_classifier_artifact=repair_objective_classifier_artifact,
                         target_code_context_agent_artifact=target_code_context_agent_artifact,
                         related_code_context_agent_artifact=related_code_context_agent_artifact,
+                        repair_suggester_agent_artifact=repair_suggester_agent_artifact,
                         fix_agent_artifact=fix_agent_artifact,
                     ),
                     fail_context_agent_artifact=fail_context_agent_artifact,
+                    repair_objective_classifier_artifact=repair_objective_classifier_artifact,
                     target_code_context_agent_artifact=target_code_context_agent_artifact,
                     related_code_context_agent_artifact=related_code_context_agent_artifact,
+                    repair_suggester_agent_artifact=repair_suggester_agent_artifact,
                     fix_agent_artifact=fix_agent_artifact,
                 )
                 candidate_results.append({
@@ -543,13 +582,18 @@ def run_apr_pipeline(
                         snapshot=snapshot,
                         validation_details=snapshot.get("validation_details") or {},
                         fail_context_agent_artifact=fail_context_agent_artifact,
+                        repair_objective=repair_objective,
+                        repair_objective_classifier_artifact=repair_objective_classifier_artifact,
                         target_code_context_agent_artifact=target_code_context_agent_artifact,
                         related_code_context_agent_artifact=related_code_context_agent_artifact,
+                        repair_suggester_agent_artifact=repair_suggester_agent_artifact,
                         fix_agent_artifact=fix_agent_artifact,
                     ),
                     fail_context_agent_artifact=fail_context_agent_artifact,
+                    repair_objective_classifier_artifact=repair_objective_classifier_artifact,
                     target_code_context_agent_artifact=target_code_context_agent_artifact,
                     related_code_context_agent_artifact=related_code_context_agent_artifact,
+                    repair_suggester_agent_artifact=repair_suggester_agent_artifact,
                     fix_agent_artifact=fix_agent_artifact,
                 )
                 candidate_results.append({
@@ -622,13 +666,18 @@ def run_apr_pipeline(
                     snapshot=snapshot,
                     validation_details=validation_details,
                     fail_context_agent_artifact=fail_context_agent_artifact,
+                    repair_objective=repair_objective,
+                    repair_objective_classifier_artifact=repair_objective_classifier_artifact,
                     target_code_context_agent_artifact=target_code_context_agent_artifact,
                     related_code_context_agent_artifact=related_code_context_agent_artifact,
+                    repair_suggester_agent_artifact=repair_suggester_agent_artifact,
                     fix_agent_artifact=fix_agent_artifact,
                 ),
                 fail_context_agent_artifact=fail_context_agent_artifact,
+                repair_objective_classifier_artifact=repair_objective_classifier_artifact,
                 target_code_context_agent_artifact=target_code_context_agent_artifact,
                 related_code_context_agent_artifact=related_code_context_agent_artifact,
+                repair_suggester_agent_artifact=repair_suggester_agent_artifact,
                 fix_agent_artifact=fix_agent_artifact,
             )
             candidate_result["fix_agent_evaluation"] = extract_evaluation_snapshot(snapshot)
@@ -685,7 +734,7 @@ def run_apr_pipeline(
                     refix_round=1,
                 )
                 if refix_result:
-                    if candidate_quality_key(refix_result) < candidate_quality_key(best_candidate):
+                    if candidate_is_strictly_better(refix_result, best_candidate):
                         best_candidate = refix_result
                         refix_selected = True
                         print(
@@ -743,6 +792,8 @@ def run_apr_pipeline(
                 "dataset": dataset,
                 "valid_mode": valid_mode,
                 "fl_results_file": os.path.basename(fl_results_file),
+                "repair_objective": repair_objective,
+                "repair_objective_classifier_artifact": repair_objective_classifier_artifact,
                 "patched_function": best_candidate.get("patched_function"),
                 "patched_file": best_candidate.get("patched_file"),
                 "llm_patch_artifact": best_candidate.get("llm_patch_artifact") or {},
@@ -774,6 +825,8 @@ def run_apr_pipeline(
                 "dataset": dataset,
                 "valid_mode": valid_mode,
                 "fl_results_file": os.path.basename(fl_results_file),
+                "repair_objective": repair_objective,
+                "repair_objective_classifier_artifact": repair_objective_classifier_artifact,
                 "status": "llm_failed" if attempted and not llm_attempted else "skipped",
                 "real_status": "llm_failed" if attempted and not llm_attempted else "skipped",
                 "validation_error": "",

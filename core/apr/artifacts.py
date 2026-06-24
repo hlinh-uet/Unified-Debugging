@@ -175,6 +175,52 @@ def write_related_code_context_artifact(
     )
 
 
+def write_repair_suggestion_artifact(
+    *,
+    bug_id: str,
+    attempt_index: int,
+    qualified_name: str,
+    candidate_relpath: str,
+    repair_suggestion: dict,
+    status: str = "generated",
+    error: str = "",
+) -> dict:
+    return _write_deterministic_context_artifact(
+        bug_id=bug_id,
+        attempt_index=attempt_index,
+        qualified_name=qualified_name,
+        candidate_relpath=candidate_relpath,
+        step_name="repair_suggester_agent",
+        payload=repair_suggestion,
+        payload_suffix="repair_suggestion",
+        status=status,
+        error=error,
+    )
+
+
+def write_repair_objective_artifact(
+    *,
+    bug_id: str,
+    attempt_index: int,
+    qualified_name: str,
+    candidate_relpath: str,
+    repair_objective: dict,
+    status: str = "generated",
+    error: str = "",
+) -> dict:
+    return _write_deterministic_context_artifact(
+        bug_id=bug_id,
+        attempt_index=attempt_index,
+        qualified_name=qualified_name,
+        candidate_relpath=candidate_relpath,
+        step_name="repair_objective_classifier_agent",
+        payload=repair_objective,
+        payload_suffix="repair_objective",
+        status=status,
+        error=error,
+    )
+
+
 def write_llm_patch_artifact(
     *,
     bug_id: str,
@@ -190,8 +236,10 @@ def write_llm_patch_artifact(
     evaluation_snapshot: Optional[dict] = None,
     validation_context: Optional[dict] = None,
     fail_context_agent_artifact: Optional[dict] = None,
+    repair_objective_classifier_artifact: Optional[dict] = None,
     target_code_context_agent_artifact: Optional[dict] = None,
     related_code_context_agent_artifact: Optional[dict] = None,
+    repair_suggester_agent_artifact: Optional[dict] = None,
     retrieval_context_agent_artifact: Optional[dict] = None,
     fix_agent_artifact: Optional[dict] = None,
 ) -> dict:
@@ -226,8 +274,10 @@ def write_llm_patch_artifact(
         "validation_context_path": "",
         "metadata_path": rel_experiment_path(metadata_path),
         "fail_context_agent_artifact": fail_context_agent_artifact or {},
+        "repair_objective_classifier_artifact": repair_objective_classifier_artifact or {},
         "target_code_context_agent_artifact": target_code_context_agent_artifact or {},
         "related_code_context_agent_artifact": related_code_context_agent_artifact or {},
+        "repair_suggester_agent_artifact": repair_suggester_agent_artifact or {},
         "retrieval_context_agent_artifact": retrieval_context_agent_artifact or {},
         "fix_agent_artifact": fix_agent_artifact or {},
     }
