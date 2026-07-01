@@ -16,7 +16,7 @@ import os
 import re
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
@@ -29,7 +29,7 @@ from core.dynamic_failure_rerank import parse_structured_failure
 
 
 DEFAULT_OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "google/gemini-2.5-flash"
+DEFAULT_MODEL = "openai/gpt-4o"
 
 
 @dataclass
@@ -37,9 +37,12 @@ class LlmSemanticConfig:
     dataset: str = "fmt"
     experiments_dir: str = ""
     results_file: str = ""
+    metadata_dir: str = ""
     runtime_evidence_dir: str = ""
     evidence_output_dir: str = ""
     output_file: str = ""
+    context_output_dir: str = ""
+    context_summary_file: str = ""
     source_root: str = ""
     bug_id_filter: str = ""
     score_field: str = "tarantula_scores"
@@ -54,6 +57,8 @@ class LlmSemanticConfig:
     max_code_chars: int = 3500
     test_context_radius: int = 12
     dry_run: bool = False
+    context_only: bool = False
+    code_source: str = "docker"
     keep_prompts: bool = True
     search_runtime_evidence_dirs: bool = True
     request_interval_seconds: float = 0.0
@@ -91,14 +96,41 @@ def _resolve_paths(config: LlmSemanticConfig) -> LlmSemanticConfig:
     dataset_dir = os.path.join(experiments_dir, config.dataset)
     if not config.results_file:
         config.results_file = os.path.join(dataset_dir, "fault_localization_function_results.json")
+    if not config.metadata_dir:
+        container_metadata_dir = os.path.join(
+            os.sep,
+            "out",
+            "unified_debugging",
+            config.dataset,
+            "metadata",
+        )
+        workspace_root = os.path.abspath(os.path.join(experiments_dir, "..", ".."))
+        host_metadata_dir = os.path.join(
+            workspace_root,
+            "defects4c",
+            "out_tmp_dirs",
+            "unified_debugging",
+            config.dataset,
+            "metadata",
+        )
+        config.metadata_dir = (
+            container_metadata_dir
+            if os.path.isdir(container_metadata_dir)
+            else host_metadata_dir
+        )
     if not config.runtime_evidence_dir:
         config.runtime_evidence_dir = os.path.join(dataset_dir, "dynamic_failure_evidence")
     if not config.evidence_output_dir:
         config.evidence_output_dir = os.path.join(dataset_dir, "llm_semantic_evidence")
     if not config.output_file:
         config.output_file = os.path.join(dataset_dir, "llm_semantic_function_results.json")
+    if not config.context_output_dir:
+        config.context_output_dir = os.path.join(dataset_dir, "llm_semantic_context")
+    if not config.context_summary_file:
+        config.context_summary_file = os.path.join(dataset_dir, "llm_semantic_context_summary.json")
     if config.source_root:
         config.source_root = os.path.abspath(config.source_root)
+    config.code_source = str(config.code_source or "docker").lower()
     config.experiments_dir = experiments_dir
     return config
 
@@ -137,8 +169,40 @@ def _candidate_functions(scores: Dict[str, float], limit: int) -> List[str]:
     ][: max(1, limit)]
 
 
+def _metadata_path(metadata_dir: str, bug_id: str) -> str:
+    if not metadata_dir or not os.path.isdir(metadata_dir) or not bug_id:
+        return ""
+    exact = os.path.join(metadata_dir, f"{bug_id}_meta.json")
+    if os.path.exists(exact):
+        return exact
+    candidates = sorted(glob.glob(os.path.join(metadata_dir, f"{glob.escape(bug_id)}*_meta.json")))
+    return candidates[0] if candidates else ""
+
+
+def _metadata_id_from_path(path: str) -> str:
+    name = os.path.basename(path)
+    return name[:-10] if name.endswith("_meta.json") else os.path.splitext(name)[0]
+
+
+def _metadata_bug_ids(metadata_dir: str) -> List[str]:
+    if not metadata_dir or not os.path.isdir(metadata_dir):
+        return []
+    return [
+        _metadata_id_from_path(path)
+        for path in sorted(glob.glob(os.path.join(metadata_dir, "*_meta.json")))
+    ]
+
+
 def _clean_text(text: object) -> str:
     return str(text or "").replace("\x00", "")
+
+
+def _truncate_text(text: object, max_chars: int) -> str:
+    cleaned = _clean_text(text)
+    if max_chars <= 0 or len(cleaned) <= max_chars:
+        return cleaned
+    half = max_chars // 2
+    return cleaned[:half].rstrip() + "\n...\n" + cleaned[-half:].lstrip()
 
 
 def _runtime_output(test: dict) -> str:
@@ -206,6 +270,211 @@ def _trace_maps(evidence: dict) -> Tuple[Dict[str, int], Dict[str, int]]:
     return last_hit, hit_count
 
 
+def _metadata_failing_tests(metadata: dict) -> List[dict]:
+    tests = metadata.get("tests") if isinstance(metadata, dict) else []
+    if not isinstance(tests, list):
+        return []
+
+    def outcome(test: dict, key: str) -> str:
+        return str(test.get(key) or "").upper()
+
+    primary = [
+        test
+        for test in tests
+        if isinstance(test, dict)
+        and outcome(test, "outcome") == "FAIL"
+        and outcome(test, "outcome_fixed") == "PASS"
+    ]
+    if primary:
+        return primary
+    return [
+        test
+        for test in tests
+        if isinstance(test, dict) and outcome(test, "outcome") == "FAIL"
+    ]
+
+
+def _metadata_test_output(test: dict) -> str:
+    runtime = test.get("runtime") if isinstance(test, dict) else {}
+    if not isinstance(runtime, dict):
+        runtime = {}
+    parts: List[str] = []
+    for value in (
+        test.get("actual_output"),
+        test.get("fail_reason"),
+        runtime.get("stdout"),
+        runtime.get("stderr"),
+        test.get("expected_output"),
+    ):
+        cleaned = _clean_text(value).strip()
+        if cleaned and cleaned not in parts:
+            parts.append(cleaned)
+    return "\n".join(parts)
+
+
+def _exception_message(output: str) -> str:
+    patterns = (
+        r'C\+\+ exception with description "([^"]+)"',
+        r"exception with description '([^']+)'",
+        r"\b(?:Exception|exception):\s*([^\n]+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, output)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+def _metadata_failure_context(metadata: dict, failing_tests: Sequence[dict]) -> dict:
+    first_test = failing_tests[0] if failing_tests else {}
+    runtime = first_test.get("runtime") if isinstance(first_test, dict) else {}
+    if not isinstance(runtime, dict):
+        runtime = {}
+    output = _metadata_test_output(first_test)
+    exit_code = runtime.get("exit_code")
+    failure = parse_structured_failure(
+        output,
+        bool(runtime.get("timed_out")),
+        exit_code if isinstance(exit_code, int) else None,
+    )
+    expected_output = _clean_text(first_test.get("expected_output")).strip()
+    expected = failure.get("expected_value", "")
+    if not expected and expected_output:
+        expected = _truncate_text(expected_output, 500)
+    signal_lines = failure.get("signal_lines") or []
+    if not signal_lines and output:
+        signal_lines = [line for line in output.splitlines() if line.strip()][:12]
+    return {
+        "test_id": first_test.get("test_id", "") if isinstance(first_test, dict) else "",
+        "failure_type": failure.get("type", "unknown"),
+        "assertion_location": failure.get("assertion_location", ""),
+        "observed_expression": failure.get("observed_expression", ""),
+        "actual": failure.get("actual_value", ""),
+        "expected": expected,
+        "exception_message": _exception_message(output),
+        "signal_lines": signal_lines,
+        "raw_failure": _truncate_text(output, 3000),
+    }
+
+
+def _metadata_trace_maps(tests: Sequence[dict]) -> Tuple[Dict[str, int], Dict[str, int]]:
+    last_hit: Dict[str, int] = {}
+    hit_count: Dict[str, int] = {}
+    for test in tests:
+        trace = test.get("dynamic_trace") if isinstance(test, dict) else {}
+        if not isinstance(trace, dict) or not trace.get("available"):
+            continue
+        for key, value in (trace.get("function_last_hit_order") or {}).items():
+            try:
+                last_hit[str(key)] = max(last_hit.get(str(key), 0), int(value))
+            except (TypeError, ValueError):
+                continue
+        for key, value in (trace.get("function_hit_counts") or {}).items():
+            try:
+                hit_count[str(key)] = max(hit_count.get(str(key), 0), int(value))
+            except (TypeError, ValueError):
+                continue
+    return last_hit, hit_count
+
+
+def _merge_int_maps(primary: Dict[str, int], secondary: Dict[str, int]) -> Dict[str, int]:
+    merged = dict(primary)
+    for key, value in secondary.items():
+        merged[key] = max(merged.get(key, 0), value)
+    return merged
+
+
+def _coverage_counts(metadata: dict) -> Tuple[Dict[str, int], Dict[str, int]]:
+    failing: Dict[str, int] = {}
+    passing: Dict[str, int] = {}
+    tests = metadata.get("tests") if isinstance(metadata, dict) else []
+    if not isinstance(tests, list):
+        return failing, passing
+    for test in tests:
+        if not isinstance(test, dict):
+            continue
+        bucket = failing if str(test.get("outcome") or "").upper() == "FAIL" else passing
+        covered = test.get("covered_functions") or []
+        if not isinstance(covered, list):
+            continue
+        for function in covered:
+            key = str(function)
+            bucket[key] = bucket.get(key, 0) + 1
+    return failing, passing
+
+
+def _covered_function_set(tests: Sequence[dict]) -> set:
+    covered = set()
+    for test in tests:
+        values = test.get("covered_functions") if isinstance(test, dict) else []
+        if isinstance(values, list):
+            covered.update(str(value) for value in values)
+    return covered
+
+
+def _metadata_test_records(tests: Sequence[dict]) -> List[dict]:
+    records: List[dict] = []
+    for test in tests[:5]:
+        runtime = test.get("runtime") if isinstance(test, dict) else {}
+        stack = test.get("stack") if isinstance(test, dict) else {}
+        trace = test.get("dynamic_trace") if isinstance(test, dict) else {}
+        if not isinstance(runtime, dict):
+            runtime = {}
+        if not isinstance(stack, dict):
+            stack = {}
+        if not isinstance(trace, dict):
+            trace = {}
+        frames = stack.get("frames") or []
+        records.append({
+            "test_id": test.get("test_id", ""),
+            "outcome": test.get("outcome", ""),
+            "outcome_fixed": test.get("outcome_fixed", ""),
+            "exit_code": runtime.get("exit_code"),
+            "timed_out": bool(runtime.get("timed_out")),
+            "covered_function_count": len(test.get("covered_functions") or []),
+            "stack_frames": frames[:10] if isinstance(frames, list) else [],
+            "top_candidate_frame": stack.get("top_candidate_frame", ""),
+            "dynamic_trace_available": bool(trace.get("available")),
+            "raw_failure": _truncate_text(_metadata_test_output(test), 3000),
+        })
+    return records
+
+
+def _docker_repo_root_from_metadata(metadata: dict, failing_tests: Sequence[dict]) -> str:
+    texts: List[str] = []
+    for test in failing_tests:
+        runtime = test.get("runtime") if isinstance(test, dict) else {}
+        if isinstance(runtime, dict):
+            texts.extend([
+                _clean_text(runtime.get("replay_command")),
+                _clean_text(runtime.get("cwd")),
+                _clean_text(runtime.get("stdout")),
+                _clean_text(runtime.get("stderr")),
+            ])
+        texts.extend([
+            _clean_text(test.get("actual_output")) if isinstance(test, dict) else "",
+            _clean_text(test.get("fail_reason")) if isinstance(test, dict) else "",
+        ])
+    texts.append(_clean_text(metadata.get("compile_cmd") if isinstance(metadata, dict) else ""))
+    pattern = re.compile(r"(/out/[^\s'\";&]+?/git_repo_dir_[A-Za-z0-9._-]+)")
+    for text in texts:
+        match = pattern.search(text)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _docker_code_lookup(metadata: dict, failing_tests: Sequence[dict], config: LlmSemanticConfig) -> Tuple[Optional[SourceLookup], str, str]:
+    if config.code_source == "none":
+        return None, "", "disabled"
+    docker_root = _docker_repo_root_from_metadata(metadata, failing_tests)
+    if not docker_root:
+        return None, "", "docker_root_not_found_in_metadata"
+    if not os.path.isdir(docker_root):
+        return None, docker_root, "docker_root_missing"
+    return SourceLookup(root=docker_root, by_basename={}), docker_root, "available"
+
+
 def _runtime_evidence_score(path: str) -> float:
     try:
         evidence = _load_json(path)
@@ -250,14 +519,9 @@ def _index_source_root(lookup: SourceLookup, source_root: str) -> None:
         dirs[:] = [
             d
             for d in dirs
-            if d not in {
-                ".git",
-                "build",
-                "build_meta_fmt",
-                "cmake-build-debug",
-                "cmake-build-release",
-                "__pycache__",
-            }
+            if d not in {".git", "build", "__pycache__"}
+            and not d.startswith("build_")
+            and not d.startswith("cmake-build")
         ]
         for name in files:
             if name.endswith((".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx")):
@@ -579,12 +843,50 @@ def _function_code(
     }
 
 
+def _candidate_code_record(
+    lookup: Optional[SourceLookup],
+    function_key: str,
+    max_chars: int,
+    source_cache: Dict[str, str],
+    docker_root_status: str,
+) -> dict:
+    file_part, function_name = _split_function_key(function_key)
+    if not lookup:
+        return {
+            "file": file_part,
+            "function_name": function_name,
+            "source_path": "",
+            "code": "",
+            "code_kind": "missing",
+            "code_status": docker_root_status or "missing_source",
+            "code_error": docker_root_status or "source unavailable",
+        }
+    record = _function_code(
+        lookup,
+        function_key,
+        max_chars,
+        source_cache,
+        preferred_root=lookup.root,
+    )
+    if record.get("code"):
+        record["code_status"] = record.get("code_kind") or "body"
+    elif record.get("code_error") == "source file not found":
+        record["code_status"] = "missing_source"
+    elif record.get("code_error") == "function name not found":
+        record["code_status"] = "missing_function"
+    else:
+        record["code_status"] = record.get("code_error") or "missing"
+    return record
+
+
 def _build_prompt_input(
     bug_id: str,
     score_field: str,
     failure: dict,
     test_context: str,
     candidates: Sequence[dict],
+    failing_tests: Sequence[dict] = (),
+    context_quality: Optional[dict] = None,
 ) -> dict:
     return {
         "bug_id": bug_id,
@@ -595,6 +897,8 @@ def _build_prompt_input(
         ),
         "failure": failure,
         "test_source_context": test_context,
+        "failing_tests": list(failing_tests),
+        "context_quality": context_quality or {},
         "candidates": list(candidates),
         "output_schema": {
             "ranked": [
@@ -851,6 +1155,63 @@ def _parse_llm_scores(response_text: str, candidates: Sequence[str]) -> Tuple[Di
     return scores, normalized_ranked, parse_error if parse_error else ""
 
 
+def _context_summary(context_record: dict) -> dict:
+    failure = context_record.get("failure") or {}
+    candidates = context_record.get("candidate_contexts") or []
+    dynamic = context_record.get("dynamic_evidence_used") or {}
+    metadata_available = bool(context_record.get("metadata_path"))
+    failing_test_count = len(context_record.get("failing_tests") or [])
+    candidate_count = len(candidates)
+    code_body_count = sum(1 for item in candidates if item.get("code_status") == "body")
+    code_snippet_count = sum(1 for item in candidates if item.get("code_status") == "snippet")
+    covered_count = sum(1 for item in candidates if item.get("covered_by_failing_test"))
+    has_failure_text = bool(
+        failure.get("raw_failure")
+        or failure.get("signal_lines")
+        or failure.get("exception_message")
+    )
+    parsed_assertion = bool(failure.get("assertion_location"))
+    parsed_actual_expected = bool(failure.get("actual") or failure.get("expected"))
+    has_hit_order = bool(dynamic.get("has_last_hit"))
+    if not metadata_available or failing_test_count == 0 or not has_failure_text:
+        grade = "missing"
+    elif candidate_count == 0:
+        grade = "weak"
+    elif (parsed_assertion or parsed_actual_expected or failure.get("exception_message")) and covered_count > 0:
+        grade = "rich" if (code_body_count or code_snippet_count or has_hit_order) else "usable"
+    else:
+        grade = "weak"
+    return {
+        "metadata_available": metadata_available,
+        "failing_test_count": failing_test_count,
+        "parsed_assertion": parsed_assertion,
+        "parsed_actual_expected": parsed_actual_expected,
+        "has_exception_or_raw_failure": has_failure_text,
+        "candidate_count": candidate_count,
+        "candidates_covered_by_failing_test": covered_count,
+        "code_body_count": code_body_count,
+        "code_snippet_count": code_snippet_count,
+        "code_missing_count": candidate_count - code_body_count - code_snippet_count,
+        "has_dynamic_trace": bool(dynamic.get("has_dynamic_trace")),
+        "has_hit_order": has_hit_order,
+        "context_grade": grade,
+    }
+
+
+def _code_extraction_summary(candidates: Sequence[dict], docker_root: str, root_status: str, code_source: str) -> dict:
+    statuses: Dict[str, int] = {}
+    for item in candidates:
+        status = str(item.get("code_status") or "unknown")
+        statuses[status] = statuses.get(status, 0) + 1
+    return {
+        "code_source": code_source,
+        "docker_repo_root": docker_root,
+        "docker_root_status": root_status,
+        "candidate_count": len(candidates),
+        "status_counts": statuses,
+    }
+
+
 def _write_json(path: str, data: dict) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -891,55 +1252,122 @@ def _prepare_bug(
     entry: dict,
     config: LlmSemanticConfig,
     source_lookup: Optional[SourceLookup],
-) -> Tuple[dict, dict, Dict[str, float]]:
+) -> Tuple[dict, dict, Dict[str, float], dict]:
     scores = _scores_for_entry(entry, config.score_field)
     candidates = _candidate_functions(scores, config.candidate_limit)
+    metadata_path = _metadata_path(config.metadata_dir, bug_id)
+    metadata = _load_json(metadata_path) if metadata_path else {}
+    failing_tests = _metadata_failing_tests(metadata)
     evidence_path = _runtime_evidence_path(config, bug_id)
     evidence = _load_json(evidence_path) if evidence_path else {}
-    failure = _failure_context(evidence)
-    last_hit, hit_count = _trace_maps(evidence)
-    test_context, test_source_path, test_source_error = _source_context(
-        source_lookup,
-        failure.get("assertion_location", ""),
-        config.test_context_radius,
+
+    if metadata:
+        failure = _metadata_failure_context(metadata, failing_tests)
+        failing_test_records = _metadata_test_records(failing_tests)
+    else:
+        failure = _failure_context(evidence)
+        failing_test_records = []
+
+    metadata_last_hit, metadata_hit_count = _metadata_trace_maps(failing_tests)
+    evidence_last_hit, evidence_hit_count = _trace_maps(evidence)
+    last_hit = _merge_int_maps(metadata_last_hit, evidence_last_hit)
+    hit_count = _merge_int_maps(metadata_hit_count, evidence_hit_count)
+    failing_counts, passing_counts = _coverage_counts(metadata)
+    failing_covered = _covered_function_set(failing_tests)
+
+    docker_lookup, docker_root, docker_root_status = (
+        _docker_code_lookup(metadata, failing_tests, config)
+        if metadata
+        else (None, "", "metadata_missing")
     )
-    preferred_source_root = _infer_repo_root(test_source_path)
+    effective_lookup = docker_lookup if config.code_source in {"docker", "none"} else source_lookup
+    if not effective_lookup and config.code_source not in {"docker", "none"}:
+        docker_root_status = "unsupported_code_source"
+
+    if effective_lookup:
+        test_context, test_source_path, test_source_error = _source_context(
+            effective_lookup,
+            failure.get("assertion_location", ""),
+            config.test_context_radius,
+        )
+    else:
+        test_context = ""
+        test_source_path = ""
+        test_source_error = docker_root_status or "source unavailable"
+
     source_cache: Dict[str, str] = {}
     candidate_records: List[dict] = []
     for rank, function in enumerate(candidates, start=1):
-        code_record = _function_code(
-            source_lookup,
+        code_record = _candidate_code_record(
+            effective_lookup,
             function,
             config.max_code_chars,
             source_cache,
-            preferred_root=preferred_source_root,
+            docker_root_status,
         )
         candidate_records.append({
             "rank": rank,
             "function": function,
             "sbfl_score": scores.get(function, 0.0),
+            "covered_by_failing_test": function in failing_covered,
+            "failing_covered_count": failing_counts.get(function, 0),
+            "passing_covered_count": passing_counts.get(function, 0),
             "last_hit_order": last_hit.get(function),
             "hit_count": hit_count.get(function),
             **code_record,
         })
+
+    dynamic_info = {
+        "path": evidence_path,
+        "has_dynamic_trace": bool(metadata_last_hit or metadata_hit_count or evidence_last_hit or evidence_hit_count),
+        "has_last_hit": bool(last_hit),
+        "has_hit_count": bool(hit_count),
+        "metadata_trace_available": bool(metadata_last_hit or metadata_hit_count),
+        "runtime_evidence_trace_available": bool(evidence_last_hit or evidence_hit_count),
+    }
+    context_record = {
+        "bug_id": bug_id,
+        "dataset": config.dataset,
+        "project": metadata.get("project", "") if metadata else "",
+        "metadata_path": metadata_path,
+        "failure": failure,
+        "failing_tests": failing_test_records,
+        "candidate_contexts": candidate_records,
+        "dynamic_evidence_used": dynamic_info,
+        "code_extraction_summary": _code_extraction_summary(
+            candidate_records,
+            docker_root,
+            docker_root_status,
+            config.code_source,
+        ),
+    }
+    context_quality = _context_summary(context_record)
+    context_record["context_quality"] = context_quality
     prompt_input = _build_prompt_input(
         bug_id=bug_id,
         score_field=config.score_field,
         failure=failure,
         test_context=test_context,
         candidates=candidate_records,
+        failing_tests=failing_test_records,
+        context_quality=context_quality,
     )
+    context_record["prompt_input"] = prompt_input
     prep_meta = {
         "bug_id": bug_id,
+        "metadata_path": metadata_path,
         "runtime_evidence_path": evidence_path,
         "test_source_path": test_source_path,
         "test_source_error": test_source_error,
-        "preferred_source_root": preferred_source_root,
+        "docker_repo_root": docker_root,
+        "docker_root_status": docker_root_status,
         "candidate_count": len(candidate_records),
         "candidates_with_code": sum(1 for item in candidate_records if item.get("code")),
+        "candidates_covered_by_failing_test": sum(1 for item in candidate_records if item.get("covered_by_failing_test")),
         "candidates_with_last_hit": sum(1 for item in candidate_records if item.get("last_hit_order") is not None),
+        "context_grade": context_quality.get("context_grade"),
     }
-    return prompt_input, prep_meta, scores
+    return prompt_input, prep_meta, scores, context_record
 
 
 def rerank_bug_with_llm(
@@ -948,7 +1376,7 @@ def rerank_bug_with_llm(
     config: LlmSemanticConfig,
     source_lookup: Optional[SourceLookup],
 ) -> Tuple[dict, dict]:
-    prompt_input, prep_meta, scores = _prepare_bug(bug_id, entry, config, source_lookup)
+    prompt_input, prep_meta, scores, context_record = _prepare_bug(bug_id, entry, config, source_lookup)
     candidate_names = [item["function"] for item in prompt_input["candidates"]]
     messages = _messages(prompt_input)
     response_text = ""
@@ -977,6 +1405,7 @@ def rerank_bug_with_llm(
         "config": asdict(config),
         "prep": prep_meta,
         "prompt_input": prompt_input,
+        "context_record": context_record,
         "llm_response_text": response_text,
         "llm_ranked": llm_ranked,
         "llm_scores": llm_scores,
@@ -1009,19 +1438,65 @@ def rerank_bug_with_llm(
     return result_record, evidence_record
 
 
+def _load_results_for_run(config: LlmSemanticConfig) -> Dict[str, dict]:
+    if os.path.exists(config.results_file):
+        return _load_json(config.results_file)
+    if config.context_only:
+        return {}
+    raise FileNotFoundError(f"LLM semantic results file not found: {config.results_file}")
+
+
+def _bug_ids_for_run(results: Dict[str, dict], config: LlmSemanticConfig) -> List[str]:
+    bug_filter = _bug_filter(config)
+    if results:
+        bug_ids = sorted(results)
+    elif config.context_only:
+        bug_ids = _metadata_bug_ids(config.metadata_dir)
+    else:
+        bug_ids = []
+    if bug_filter:
+        bug_ids = [bug_id for bug_id in bug_ids if bug_id in bug_filter]
+    return bug_ids
+
+
+def build_llm_semantic_contexts(config: LlmSemanticConfig) -> Dict[str, dict]:
+    config = _resolve_paths(config)
+    results = _load_results_for_run(config)
+    source_lookup = _build_source_lookup(config.source_root)
+    os.makedirs(config.context_output_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(config.context_summary_file), exist_ok=True)
+
+    contexts: Dict[str, dict] = {}
+    summary: Dict[str, dict] = {}
+    for bug_id in _bug_ids_for_run(results, config):
+        entry = results.get(bug_id, {})
+        _, _, _, context_record = _prepare_bug(bug_id, entry, config, source_lookup)
+        context_path = os.path.join(config.context_output_dir, f"{bug_id}.json")
+        _write_json(context_path, context_record)
+        contexts[bug_id] = {
+            "context_path": context_path,
+            "context_quality": context_record.get("context_quality", {}),
+        }
+        summary[bug_id] = context_record.get("context_quality", {})
+    _write_json(config.context_summary_file, summary)
+    return contexts
+
+
 def run_llm_semantic_rerank(config: LlmSemanticConfig) -> Dict[str, dict]:
     config = _resolve_paths(config)
-    results = _load_json(config.results_file)
-    bug_filter = _bug_filter(config)
+    if config.context_only:
+        return build_llm_semantic_contexts(config)
+    results = _load_results_for_run(config)
     source_lookup = _build_source_lookup(config.source_root)
     os.makedirs(os.path.dirname(config.output_file), exist_ok=True)
     if config.keep_prompts:
         os.makedirs(config.evidence_output_dir, exist_ok=True)
+    os.makedirs(config.context_output_dir, exist_ok=True)
 
     output: Dict[str, dict] = {}
-    for bug_id, entry in results.items():
-        if bug_filter and bug_id not in bug_filter:
-            continue
+    context_summary: Dict[str, dict] = {}
+    for bug_id in _bug_ids_for_run(results, config):
+        entry = results.get(bug_id, {})
         result_record, evidence_record = rerank_bug_with_llm(
             bug_id,
             entry,
@@ -1029,6 +1504,12 @@ def run_llm_semantic_rerank(config: LlmSemanticConfig) -> Dict[str, dict]:
             source_lookup,
         )
         output[bug_id] = result_record
+        context_record = evidence_record.get("context_record") or {}
+        if context_record:
+            context_path = os.path.join(config.context_output_dir, f"{bug_id}.json")
+            _write_json(context_path, context_record)
+            context_summary[bug_id] = context_record.get("context_quality", {})
+            output[bug_id]["llm_semantic_context_path"] = context_path
         if config.keep_prompts:
             evidence_path = os.path.join(config.evidence_output_dir, f"{bug_id}.json")
             _write_json(evidence_path, evidence_record)
@@ -1037,6 +1518,7 @@ def run_llm_semantic_rerank(config: LlmSemanticConfig) -> Dict[str, dict]:
         if config.request_interval_seconds > 0 and not config.dry_run:
             time.sleep(config.request_interval_seconds)
 
+    _write_json(config.context_summary_file, context_summary)
     _write_json(config.output_file, output)
     return output
 
@@ -1136,13 +1618,34 @@ def print_llm_semantic_summary(results: Dict[str, dict]) -> None:
         print(f"  {row['bug_id']:<25} {before!s:>4} -> {after!s:<4} {delta!s:>5}   {status}")
 
 
+def print_llm_context_summary(contexts: Dict[str, dict], summary_file: str = "") -> None:
+    if not contexts:
+        print("No LLM semantic contexts to summarize.")
+        return
+    counts: Dict[str, int] = {}
+    for entry in contexts.values():
+        quality = entry.get("context_quality") or {}
+        grade = str(quality.get("context_grade") or "unknown")
+        counts[grade] = counts.get(grade, 0) + 1
+    print("\nLLM semantic context audit:")
+    print(f"  bugs: {len(contexts)}")
+    for grade in ("rich", "usable", "weak", "missing", "unknown"):
+        if grade in counts:
+            print(f"  {grade:<8} {counts[grade]}")
+    if summary_file:
+        print(f"  summary: {summary_file}")
+
+
 def add_llm_semantic_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--llm-semantic-rerank", action="store_true", help="Run OpenRouter LLM semantic function reranking.")
     parser.add_argument("--llm-semantic-dataset", default="fmt", help="Experiment dataset folder, e.g. fmt or libyang.")
     parser.add_argument("--llm-semantic-results-file", default="", help="Path to function FL results JSON.")
+    parser.add_argument("--llm-semantic-metadata-dir", default="", help="Directory containing Defects4C *_meta.json files.")
     parser.add_argument("--llm-semantic-runtime-evidence-dir", default="", help="Directory containing dynamic_failure_evidence JSON files.")
     parser.add_argument("--llm-semantic-evidence-output-dir", default="", help="Directory for per-bug LLM prompt/response JSON.")
     parser.add_argument("--llm-semantic-output-file", default="", help="Output JSON path for LLM semantic rerank results.")
+    parser.add_argument("--llm-semantic-context-output-dir", default="", help="Directory for per-bug context/audit payload JSON.")
+    parser.add_argument("--llm-semantic-context-summary-file", default="", help="Output JSON path for context completeness summary.")
     parser.add_argument("--llm-semantic-source-root", default="", help="Checkout/source root used to extract test context and function code.")
     parser.add_argument("--llm-semantic-bug-id", default="", help="Optional comma-separated bug ids, e.g. A.2,B__...")
     parser.add_argument("--llm-semantic-score-field", default="tarantula_scores", help="Entry score field used as the SBFL prior.")
@@ -1157,6 +1660,8 @@ def add_llm_semantic_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--llm-semantic-max-code-chars", type=int, default=3500, help="Max characters of code per candidate.")
     parser.add_argument("--llm-semantic-test-context-radius", type=int, default=12, help="Lines before/after failing assertion.")
     parser.add_argument("--llm-semantic-dry-run", action="store_true", help="Build prompt/evidence files without calling OpenRouter.")
+    parser.add_argument("--llm-semantic-context-only", action="store_true", help="Build context/audit payloads without calling OpenRouter or reranking.")
+    parser.add_argument("--llm-semantic-code-source", choices=("docker", "none"), default="docker", help="Source-code body policy for context building.")
     parser.add_argument("--llm-semantic-no-keep-prompts", action="store_true", help="Do not write per-bug prompt/response evidence JSON.")
     parser.add_argument("--llm-semantic-no-search-evidence-dirs", action="store_true", help="Use only the runtime evidence dir instead of searching siblings.")
     parser.add_argument("--llm-semantic-request-interval", type=float, default=0.0, help="Seconds to sleep between OpenRouter requests.")
@@ -1173,9 +1678,12 @@ def llm_semantic_config_from_args(args: argparse.Namespace) -> LlmSemanticConfig
     return LlmSemanticConfig(
         dataset=args.llm_semantic_dataset,
         results_file=args.llm_semantic_results_file,
+        metadata_dir=args.llm_semantic_metadata_dir,
         runtime_evidence_dir=args.llm_semantic_runtime_evidence_dir,
         evidence_output_dir=args.llm_semantic_evidence_output_dir,
         output_file=args.llm_semantic_output_file,
+        context_output_dir=args.llm_semantic_context_output_dir,
+        context_summary_file=args.llm_semantic_context_summary_file,
         source_root=args.llm_semantic_source_root,
         bug_id_filter=args.llm_semantic_bug_id,
         score_field=args.llm_semantic_score_field,
@@ -1190,6 +1698,8 @@ def llm_semantic_config_from_args(args: argparse.Namespace) -> LlmSemanticConfig
         max_code_chars=args.llm_semantic_max_code_chars,
         test_context_radius=args.llm_semantic_test_context_radius,
         dry_run=args.llm_semantic_dry_run,
+        context_only=args.llm_semantic_context_only,
+        code_source=args.llm_semantic_code_source,
         keep_prompts=not args.llm_semantic_no_keep_prompts,
         search_runtime_evidence_dirs=not args.llm_semantic_no_search_evidence_dirs,
         request_interval_seconds=args.llm_semantic_request_interval,

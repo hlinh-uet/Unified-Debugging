@@ -1,6 +1,7 @@
 import os
 import json
 import argparse
+import sys
 from data_loaders.codeflaws_loader import load_all_bugs
 from core.fl_tarantula import calculate_tarantula
 from core.dynamic_failure_rerank import (
@@ -14,10 +15,63 @@ from core.dynamic_failure_rerank import (
 from core.llm_semantic_rerank import (
     add_llm_semantic_args,
     llm_semantic_config_from_args,
+    print_llm_context_summary,
     print_llm_semantic_summary,
     run_llm_semantic_rerank,
 )
+from core.codebert_semantic_rerank import (
+    add_codebert_semantic_args,
+    codebert_semantic_config_from_args,
+    print_codebert_semantic_summary,
+    run_codebert_semantic_rerank,
+)
+from core.fl_dstar import (
+    add_dstar_args,
+    dstar_config_from_args,
+    print_dstar_summary,
+    run_dstar_fault_localization,
+)
+from core.fl_dg_slice_dstar import (
+    add_dg_slice_dstar_args,
+    dg_slice_dstar_config_from_args,
+    print_dg_slice_dstar_summary,
+    run_dg_slice_dstar_fault_localization,
+)
+from core.fl_jaccard_ochiai import (
+    add_jaccard_ochiai_args,
+    jaccard_ochiai_config_from_args,
+    print_jaccard_ochiai_summary,
+    run_jaccard_ochiai_fault_localization,
+)
+from core.fl_codebert_ochiai import (
+    add_codebert_ochiai_args,
+    codebert_ochiai_config_from_args,
+    print_codebert_ochiai_summary,
+    run_codebert_ochiai_fault_localization,
+)
+from core.localization_agent_tools import (
+    add_localization_agent_args,
+    localization_agent_llm_config_from_args,
+    localization_agent_config_from_args,
+    print_localization_agent_llm_summary,
+    print_localization_agent_summary,
+    run_localization_agent_llm,
+    run_localization_agent_tools,
+)
+from core.localization_kg_agent import (
+    add_localization_kg_agent_args,
+    build_localization_evidence_kg,
+    localization_kg_build_config_from_args,
+    localization_kg_explore_config_from_args,
+    print_localization_explore_summary,
+    print_localization_kg_summary,
+    run_localization_kg_explorer,
+)
 from configs.path import EXPERIMENTS_DIR
+
+for stream in (sys.stdout, sys.stderr):
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8")
 
 def run_fl():
     print("Loading bugs from Codeflaws...")
@@ -78,13 +132,91 @@ def main():
     parser.add_argument('--all', action='store_true', help='Chạy toàn bộ quy trình: FL -> APR -> Evaluation')
     add_dynamic_rerank_args(parser)
     add_llm_semantic_args(parser)
+    add_codebert_semantic_args(parser)
+    add_dstar_args(parser)
+    add_dg_slice_dstar_args(parser)
+    add_jaccard_ochiai_args(parser)
+    add_codebert_ochiai_args(parser)
+    add_localization_agent_args(parser)
+    add_localization_kg_agent_args(parser)
     args = parser.parse_args()
 
+    if args.localization_agent_build_kg:
+        config = localization_kg_build_config_from_args(args)
+        print("Building localization Evidence KG...")
+        output = build_localization_evidence_kg(config)
+        print_localization_kg_summary(output, config.kg_file)
+        return
+
+    if args.localization_agent_explore:
+        config = localization_kg_explore_config_from_args(args)
+        print("Running KG-exploration localization agent...")
+        output = run_localization_kg_explorer(config)
+        print_localization_explore_summary(output, config.output_file)
+        return
+
+    if args.localization_agent_llm:
+        config = localization_agent_llm_config_from_args(args)
+        print("Running OpenRouter localization agent over tool payloads...")
+        output = run_localization_agent_llm(config)
+        print_localization_agent_llm_summary(output, config.output_file)
+        return
+
+    if args.localization_agent:
+        config = localization_agent_config_from_args(args)
+        print("Building function-centric localization agent tool payloads...")
+        output = run_localization_agent_tools(config)
+        print_localization_agent_summary(output, config.output_file)
+        return
+
+    if args.fl_dg_slice_dstar:
+        config = dg_slice_dstar_config_from_args(args)
+        print("Running LLVM/DG-slice DStar function-level fault localization...")
+        output = run_dg_slice_dstar_fault_localization(config)
+        print_dg_slice_dstar_summary(output, config.output_file)
+        return
+
+    if args.fl_codebert_ochiai:
+        config = codebert_ochiai_config_from_args(args)
+        print("Running CodeBERT test-code similarity reduced Ochiai function-level fault localization...")
+        output = run_codebert_ochiai_fault_localization(config)
+        print_codebert_ochiai_summary(output, config.output_file)
+        return
+
+    if args.codebert_semantic_rerank:
+        config = codebert_semantic_config_from_args(args)
+        print("Running CodeBERT semantic embedding function rerank...")
+        output = run_codebert_semantic_rerank(config)
+        print(f"CodeBERT semantic rerank finished for {len(output)} bugs.")
+        print_codebert_semantic_summary(output, config.output_file)
+        return
+
+    if args.fl_jaccard_ochiai:
+        config = jaccard_ochiai_config_from_args(args)
+        print("Running Defects4C Jaccard-reduced Ochiai function-level fault localization...")
+        output = run_jaccard_ochiai_fault_localization(config)
+        print_jaccard_ochiai_summary(output, config.output_file)
+        return
+
+    if args.fl_dstar:
+        config = dstar_config_from_args(args)
+        print("Running Defects4C DStar function-level fault localization...")
+        output = run_dstar_fault_localization(config)
+        print_dstar_summary(output, config.output_file)
+        return
+
     if args.llm_semantic_rerank:
-        print("Running OpenRouter LLM Semantic Function Rerank...")
-        output = run_llm_semantic_rerank(llm_semantic_config_from_args(args))
-        print(f"LLM semantic rerank finished for {len(output)} bugs.")
-        print_llm_semantic_summary(output)
+        config = llm_semantic_config_from_args(args)
+        if config.context_only:
+            print("Building LLM Semantic context/audit payloads...")
+            output = run_llm_semantic_rerank(config)
+            print(f"LLM semantic context audit finished for {len(output)} bugs.")
+            print_llm_context_summary(output, config.context_summary_file)
+        else:
+            print("Running OpenRouter LLM Semantic Function Rerank...")
+            output = run_llm_semantic_rerank(config)
+            print(f"LLM semantic rerank finished for {len(output)} bugs.")
+            print_llm_semantic_summary(output)
         return
 
     if args.dynamic_collect_data:
@@ -102,7 +234,19 @@ def main():
         return
 
     # Nếu chọn --all hoặc không truyền tham số nào thì chạy toàn bộ pipeline (ưu tiên LLM cho luồng chính)
-    if args.all or (not args.fl and not args.apr and not args.apr_mutation and not args.eval):
+    if args.all or (
+        not args.fl
+        and not args.apr
+        and not args.apr_mutation
+        and not args.eval
+        and not args.codebert_semantic_rerank
+        and not args.fl_dstar
+        and not args.fl_dg_slice_dstar
+        and not args.fl_jaccard_ochiai
+        and not args.fl_codebert_ochiai
+        and not args.localization_agent
+        and not args.localization_agent_llm
+    ):
         print("Đang chạy toàn bộ quy trình gốc (FL -> APR với LLM -> Evaluation)...")
         run_fl()
         _run_apr_pipeline()

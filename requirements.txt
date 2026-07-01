@@ -3,3 +3,6 @@ python-dotenv
 pytest
 requests
 Levenshtein
+numpy
+torch
+transformers
