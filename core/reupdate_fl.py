@@ -10,6 +10,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from configs.path import EXPERIMENTS_DIR
+from core.apr.common import filter_zero_test_artifact_failures
 from evaluation.eval_fl import evaluate_fl
 
 
@@ -79,7 +80,10 @@ def apr_feedback_signal(
     status = str(apr_record.get("status") or "").strip().lower()
     validation_error = str(apr_record.get("validation_error") or "").strip()
     init_failed = test_set(apr_record, "init_failed_tests")
-    post_failed = test_set(apr_record, "post_failed_tests")
+    post_failed = set(filter_zero_test_artifact_failures(
+        test_set(apr_record, "post_failed_tests"),
+        apr_record.get("validation_details") if isinstance(apr_record.get("validation_details"), dict) else {},
+    ))
 
     fixed = init_failed - post_failed
     still_failed = init_failed & post_failed

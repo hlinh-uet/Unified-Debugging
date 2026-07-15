@@ -15,8 +15,10 @@ from core.fault_localization import (
 )
 from core.apr_baseline import run_apr_pipeline
 from core.apr.revalidate import run_apr_validation_only
-from core.apr.refix import run_refix_from_saved_artifacts
+from core.apr.agent.refix import run_refix_from_saved_artifacts
+from core.apr.oracle_target_identity import build_valid_oracle_targets
 from core.test_filtering import (
+    filter_zero_coverage_pass_tests,
     filtered_bug_record_for_pipeline,
     has_failed_tests,
 )
@@ -85,6 +87,7 @@ def run_fl(dataset: str = "codeflaws", exclude_fixed_fail_tests: bool = True):
     combined_results = {}
 
     total_excluded_fixed_fail = 0
+    total_excluded_zero_coverage = 0
 
     for bug in bugs:
         print(f"[FL] Tính điểm Tarantula cho {bug.bug_id}...")
@@ -92,14 +95,32 @@ def run_fl(dataset: str = "codeflaws", exclude_fixed_fail_tests: bool = True):
             bug,
             exclude_fixed_fail_tests=exclude_fixed_fail_tests,
         )
+        zero_test_noop_excluded = (
+            (bug_for_fl.raw or {}).get("pipeline_excluded_zero_test_noop_tests", [])
+            if bug_for_fl and isinstance(bug_for_fl.raw, dict)
+            else []
+        )
+        fl_tests, fl_zero_coverage_excluded = filter_zero_coverage_pass_tests(
+            bug_for_fl.tests if bug_for_fl else []
+        )
+        zero_coverage_excluded = list(dict.fromkeys([
+            *zero_test_noop_excluded,
+            *fl_zero_coverage_excluded,
+        ]))
         total_excluded_fixed_fail += len(excluded_fixed_fail)
+        total_excluded_zero_coverage += len(zero_coverage_excluded)
         if excluded_fixed_fail:
             print(
                 f"    [FL] Loại {len(excluded_fixed_fail)} test buggy+fixed đều FAIL "
                 "khỏi FL."
             )
+        if zero_coverage_excluded:
+            print(
+                f"    [FL] Loại {len(zero_coverage_excluded)} test PASS nhưng coverage rỗng "
+                "khỏi FL/APR scope."
+            )
 
-        tests_for_fl = bug_for_fl.tests
+        tests_for_fl = fl_tests
         if exclude_fixed_fail_tests and not has_failed_tests(tests_for_fl):
             print("    [FL] Không còn failed test actionable sau khi lọc; ghi score rỗng.")
             tarantula_func_scores = {}
@@ -159,6 +180,8 @@ def run_fl(dataset: str = "codeflaws", exclude_fixed_fail_tests: bool = True):
             "exclude_fixed_fail_tests": exclude_fixed_fail_tests,
             "excluded_fixed_fail_count": len(excluded_fixed_fail),
             "excluded_fixed_fail_tests": list(excluded_fixed_fail),
+            "excluded_zero_coverage_pass_count": len(zero_coverage_excluded),
+            "excluded_zero_coverage_pass_tests": list(zero_coverage_excluded),
         }
 
         func_results[bug.bug_id] = {
@@ -208,6 +231,7 @@ def run_fl(dataset: str = "codeflaws", exclude_fixed_fail_tests: bool = True):
 
     if exclude_fixed_fail_tests:
         print(f"[FL] Đã loại tổng cộng {total_excluded_fixed_fail} test buggy+fixed đều FAIL.")
+    print(f"[FL] Đã loại tổng cộng {total_excluded_zero_coverage} test PASS có coverage rỗng.")
 
     # --- Ghi file function-level ---
     func_file = os.path.join(EXPERIMENTS_DIR, "fault_localization_function_results.json")
@@ -247,24 +271,54 @@ def run_valid_fl(dataset: str = "codeflaws", exclude_fixed_fail_tests: bool = Tr
     os.makedirs(EXPERIMENTS_DIR, exist_ok=True)
     valid_results = {}
     total_excluded_fixed_fail = 0
+    total_excluded_zero_coverage = 0
     missing_gt = 0
+    exact_target_count = 0
+    unresolved_exact_target_count = 0
 
     for bug in bugs:
-        _, excluded_fixed_fail = filtered_bug_record_for_pipeline(
+        bug_for_valid, excluded_fixed_fail = filtered_bug_record_for_pipeline(
             bug,
             exclude_fixed_fail_tests=exclude_fixed_fail_tests,
         )
+        zero_test_noop_excluded = (
+            (bug_for_valid.raw or {}).get("pipeline_excluded_zero_test_noop_tests", [])
+            if bug_for_valid and isinstance(bug_for_valid.raw, dict)
+            else []
+        )
+        _valid_tests, valid_zero_coverage_excluded = filter_zero_coverage_pass_tests(
+            bug_for_valid.tests if bug_for_valid else []
+        )
+        zero_coverage_excluded = list(dict.fromkeys([
+            *zero_test_noop_excluded,
+            *valid_zero_coverage_excluded,
+        ]))
         total_excluded_fixed_fail += len(excluded_fixed_fail)
+        total_excluded_zero_coverage += len(zero_coverage_excluded)
 
         gt_functions = list(dict.fromkeys(bug.ground_truth or []))
         oracle_top1 = gt_functions[0] if gt_functions else ""
         if not oracle_top1:
             missing_gt += 1
+        oracle_resolution = build_valid_oracle_targets(
+            bug,
+            ground_truth_groups=[oracle_top1] if oracle_top1 else [],
+        )
+        exact_targets = list(oracle_resolution.get("targets") or [])
+        exact_target_count += len(exact_targets)
+        if oracle_top1 and not exact_targets:
+            unresolved_exact_target_count += 1
+            print(
+                f"    [FL-valid] {bug.bug_id}: không resolve được exact AST oracle target "
+                f"({', '.join(oracle_resolution.get('diagnostics') or ['unknown'])})."
+            )
 
         test_filter_info = {
             "exclude_fixed_fail_tests": exclude_fixed_fail_tests,
             "excluded_fixed_fail_count": len(excluded_fixed_fail),
             "excluded_fixed_fail_tests": list(excluded_fixed_fail),
+            "excluded_zero_coverage_pass_count": len(zero_coverage_excluded),
+            "excluded_zero_coverage_pass_tests": list(zero_coverage_excluded),
         }
         scores = {oracle_top1: 1.0} if oracle_top1 else {}
         valid_results[bug.bug_id] = {
@@ -275,6 +329,8 @@ def run_valid_fl(dataset: str = "codeflaws", exclude_fixed_fail_tests: bool = Tr
             "tarantula_scores": {},
             "ground_truth": gt_functions,
             "oracle_top1": oracle_top1,
+            "exact_targets": exact_targets,
+            "exact_target_resolution": oracle_resolution,
             "valid_mode": True,
             "test_filter": test_filter_info,
         }
@@ -284,8 +340,16 @@ def run_valid_fl(dataset: str = "codeflaws", exclude_fixed_fail_tests: bool = Tr
             f"[FL-valid] Đã ghi metadata lọc cho {total_excluded_fixed_fail} "
             "test buggy+fixed đều FAIL."
         )
+    print(
+        f"[FL-valid] Đã ghi metadata lọc cho {total_excluded_zero_coverage} "
+        "test PASS có coverage rỗng."
+    )
     if missing_gt:
         print(f"[FL-valid] Cảnh báo: {missing_gt} bugs không có ground-truth function.")
+    print(
+        f"[FL-valid] Exact AST oracle targets: {exact_target_count}; "
+        f"unresolved bugs: {unresolved_exact_target_count}."
+    )
 
     out_file = os.path.join(EXPERIMENTS_DIR, VALID_FL_RESULTS_FILENAME)
     with open(out_file, "w") as f:
@@ -310,7 +374,7 @@ def main():
         "--valid",
         action="store_true",
         help=(
-            "Chạy kịch bản APR với FL oracle: ground-truth function ở top 1, "
+            "Chạy kịch bản APR với FL oracle: exact changed AST target ở top 1, "
             "lưu vào fault_localization_results_valid.json và APR chỉ thử top 1."
         ),
     )
@@ -319,6 +383,14 @@ def main():
         "--with-refix",
         action="store_true",
         help="Sau APR, chạy thêm ReFix trên các patch LLM đã fail rồi mới evaluation.",
+    )
+    parser.add_argument(
+        "--only-missing",
+        action="store_true",
+        help=(
+            "APR chỉ chạy bug chưa có thư mục experiments/llm_patches/<bug-id>; "
+            "giữ nguyên và không retry artifact đã tồn tại."
+        ),
     )
     parser.add_argument(
         "--include-fixed-fail-tests",
@@ -375,6 +447,7 @@ def main():
             apr_results_filename=VALID_APR_RESULTS_FILENAME if args.valid else "apr_results.json",
             apr_top_k=1 if args.valid else None,
             valid_mode=args.valid,
+            only_missing=args.only_missing,
         )
         if args.with_refix:
             run_refix_from_saved_artifacts(
@@ -416,6 +489,7 @@ def main():
                 apr_results_filename=VALID_APR_RESULTS_FILENAME if args.valid else "apr_results.json",
                 apr_top_k=1 if args.valid else None,
                 valid_mode=args.valid,
+                only_missing=args.only_missing,
             )
             if args.with_refix:
                 run_refix_from_saved_artifacts(

@@ -3,7 +3,12 @@ import json
 from typing import Tuple
 
 from configs.path import EXPERIMENTS_DIR, CODEFLAWS_SOURCE_DIR
-from core.apr.apr_utils import classify_patch_outcome
+from core.apr.common import (
+    classify_patch_outcome,
+    filter_zero_test_artifact_failures,
+    source_language_from_path,
+)
+from core.test_filtering import filter_zero_test_noop_pass_tests
 from core.utils import (
     extract_function_code,
     get_codeflaws_accepted_cfile,
@@ -232,7 +237,9 @@ def _build_test_eval_context(bug_id: str, dataset: str) -> Tuple[dict, str]:
     if err:
         return {}, err
 
-    tests = getattr(record, "tests", None) or []
+    tests, _zero_test_noop_excluded = filter_zero_test_noop_pass_tests(
+        getattr(record, "tests", None) or []
+    )
     test_ids = []
     init_failed = set()
     fixed_fail_excluded = set()
@@ -337,7 +344,8 @@ def _post_failed_ids_from_result(bug_res: dict) -> Tuple[set, str]:
         return set(), "post_failed_tests_invalid"
     if any(_is_compaction_marker(v) for v in values):
         return set(), "post_failed_tests_compacted"
-    failed = {str(v).strip() for v in values if str(v).strip()}
+    details = bug_res.get("validation_details") if isinstance(bug_res.get("validation_details"), dict) else {}
+    failed = set(filter_zero_test_artifact_failures(values, details))
     return failed, ""
 
 
@@ -483,11 +491,17 @@ def _calc_func_edit_distance(bug_id: str, bug_res: dict, dataset: str) -> Tuple[
     if not patched_func or not patched_func.strip():
         return -1, "patched_function_missing"
 
-    accepted_code, _, accepted_func_name, err = _get_accepted_bug_code_and_function(bug_id, dataset)
+    accepted_code, accepted_path, accepted_func_name, err = _get_accepted_bug_code_and_function(
+        bug_id, dataset
+    )
     if err:
         return -1, err
 
-    accepted_func, _, _ = extract_function_code(accepted_code, accepted_func_name)
+    accepted_func, _, _ = extract_function_code(
+        accepted_code,
+        accepted_func_name,
+        language=source_language_from_path(accepted_path),
+    )
     if not accepted_func or not accepted_func.strip():
         return -1, f"accepted_function_not_found:{accepted_func_name}"
 

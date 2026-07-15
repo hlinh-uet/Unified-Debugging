@@ -435,50 +435,8 @@ def extract_function_code(
     func_name: str,
     language: str = "c",
 ) -> Tuple[Optional[str], int, int]:
-    """
-    Trích xuất mã nguồn của một hàm C/C++ từ chuỗi source_code.
-
-    Thuật toán mặc định:
-      1. Parse source bằng tree-sitter (C/C++).
-      2. Duyệt các node ``function_definition``.
-      3. Lấy tên hàm từ declarator và so khớp với ``func_name``.
-      4. Trả về source slice theo ``start_byte``/``end_byte`` của node.
-
-    Nếu tree-sitter không khả dụng hoặc không tìm thấy hàm, fallback về
-    extractor cũ dựa trên regex + counter:
-      1. Tìm mọi lần xuất hiện ``<func_name>(`` (word-boundary).
-      2. Tìm ngoặc tròn đóng tương ứng – có cân bằng paren lồng nhau
-         (xử lý được function-pointer parameter, e.g. ``void (*cb)(int)``).
-      3. Sau dấu ``)`` bỏ qua whitespace + attribute ``__attribute__((...))``,
-         nếu gặp ``{`` thì coi đó là định nghĩa hàm; ngược lại là khai báo/gọi
-         hàm – bỏ qua và tiếp tục tìm.
-      4. Tìm ``}`` đóng bằng counter (bỏ qua comments / strings / chars).
-
-    Args:
-        source_code: Toàn bộ nội dung file mã nguồn.
-        func_name:   Tên hàm cần trích xuất.
-        language:    ``"c"`` hoặc ``"cpp"``/``"c++"``.
-
-    Returns:
-        Tuple (func_code, start_idx, end_idx):
-            - func_code:  Chuỗi mã nguồn của hàm, hoặc None nếu không tìm thấy.
-            - start_idx:  Vị trí byte bắt đầu (return type) trong source_code.
-            - end_idx:    Vị trí ngay sau ``}`` đóng (exclusive).
-    """
-    ts_result = _extract_function_code_tree_sitter(source_code, func_name, language)
-    if ts_result[0] is not None:
-        return ts_result
-    if _is_scoped_cpp_name(func_name):
-        scoped_result = _extract_scoped_function_code_regex(source_code, func_name)
-        if scoped_result[0] is not None:
-            return scoped_result
-    regex_result = _extract_function_code_regex(source_code, func_name)
-    if regex_result[0] is not None:
-        return regex_result
-    leaf_name = _function_name_leaf(func_name)
-    if leaf_name != func_name and _allow_unscoped_fallback(source_code, func_name):
-        return _extract_function_code_regex(source_code, leaf_name)
-    return regex_result
+    """Return one tree-sitter function definition and its UTF-8 byte range."""
+    return _extract_function_code_tree_sitter(source_code, func_name, language)
 
 
 def replace_source_range_bytes(
@@ -586,16 +544,6 @@ def _normalize_qualified_function_symbol(value: str) -> str:
     )
 
 
-def _function_scope_parts(func_name: str) -> list:
-    if not _is_scoped_cpp_name(func_name):
-        return []
-    return [
-        _normalize_function_symbol(part)
-        for part in func_name.split("::")[:-1]
-        if part.strip()
-    ]
-
-
 def _is_scoped_cpp_name(func_name: str) -> bool:
     return bool(func_name and "::" in func_name)
 
@@ -605,24 +553,19 @@ def _function_name_matches(actual: str, requested: str) -> bool:
     requested_norm = _normalize_qualified_function_symbol(requested)
     if actual_norm == requested_norm:
         return True
+    # Coverage/debug symbols commonly omit leading namespaces while preserving
+    # the enclosing type (for example ``basic_writer::write`` versus
+    # ``fmt::v8::detail::basic_writer::write``).  A qualified suffix is still a
+    # scoped match; a leaf-only match is deliberately not accepted here.
+    if (
+        _is_scoped_cpp_name(requested_norm)
+        and actual_norm.endswith("::" + requested_norm)
+    ):
+        return True
     return (
         not _is_scoped_cpp_name(requested_norm)
         and _function_name_leaf(actual_norm) == _function_name_leaf(requested_norm)
     )
-
-
-def _allow_unscoped_fallback(source_code: str, func_name: str) -> bool:
-    """
-    Scoped FL keys must not silently bind to an unrelated free function in a full
-    C++ file. The fallback is still useful for validating LLM-returned snippets,
-    which normally no longer include the surrounding class body.
-    """
-    scopes = _function_scope_parts(func_name)
-    if not scopes:
-        return True
-    if _scoped_name_pattern(scopes, _function_name_leaf(func_name)).search(source_code):
-        return False
-    return not any(_class_body_ranges(source_code, scope) for scope in scopes)
 
 
 def _tree_sitter_language(language: str):
@@ -705,10 +648,28 @@ def _tree_sitter_function_candidate_names(node, declarator, source_bytes: bytes)
 
     names = [name]
     if "::" not in name:
+        code = source_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+        header_qualified = _qualified_name_from_header(code, name)
+        if header_qualified:
+            names.append(header_qualified)
         scopes = _tree_sitter_enclosing_type_scopes(node, source_bytes)
         if scopes:
             names.append("::".join([*scopes, name]))
     return list(dict.fromkeys(names))
+
+
+def _qualified_name_from_header(code: str, leaf_name: str) -> str:
+    header = str(code or "").split("{", 1)[0]
+    leaf = _function_name_leaf(leaf_name)
+    if not header or not leaf:
+        return ""
+    pattern = re.compile(r"((?:[A-Za-z_]\w*(?:\s*<[^<>;{}()]*>)?\s*::\s*)+)" + re.escape(leaf) + r"\s*\(")
+    matches = list(pattern.finditer(header))
+    if not matches:
+        return ""
+    scope = re.sub(r"<[^<>]*>", "", matches[-1].group(1))
+    scope = re.sub(r"\s+", "", scope).strip(":")
+    return _normalize_qualified_function_symbol(scope + "::" + leaf)
 
 
 def _tree_sitter_enclosing_type_scopes(node, source_bytes: bytes) -> list:
@@ -727,549 +688,6 @@ def _tree_sitter_enclosing_type_scopes(node, source_bytes: bytes) -> list:
                     scopes.append(name)
         cur = getattr(cur, "parent", None)
     return list(reversed(scopes))
-
-
-def _extract_scoped_function_code_regex(
-    source_code: str,
-    func_name: str,
-) -> Tuple[Optional[str], int, int]:
-    scopes = _function_scope_parts(func_name)
-    leaf_name = _function_name_leaf(func_name)
-    if not scopes or not leaf_name:
-        return None, -1, -1
-
-    out_of_class = _extract_function_code_regex(
-        source_code,
-        leaf_name,
-        name_pattern=_scoped_name_pattern(scopes, leaf_name),
-    )
-    if out_of_class[0] is not None:
-        return out_of_class
-
-    for scope in reversed(scopes):
-        for body_start, body_end in _class_body_ranges(source_code, scope):
-            inline_method = _extract_function_code_regex(
-                source_code,
-                leaf_name,
-                start=body_start,
-                end=body_end,
-            )
-            if inline_method[0] is not None:
-                return inline_method
-
-    return None, -1, -1
-
-
-def _scoped_name_pattern(scopes: list, leaf_name: str):
-    scoped = []
-    for scope in scopes:
-        scoped.append(re.escape(scope) + r'\s*(?:<[^;{}()]*>)?\s*::\s*')
-    return re.compile("".join(scoped) + _function_name_call_pattern(leaf_name))
-
-
-def _function_name_call_pattern(func_name: str) -> str:
-    if func_name.startswith("operator"):
-        op = func_name[len("operator"):].strip()
-        if op:
-            return r'operator\s*' + re.escape(op) + r'\s*\('
-        return r'operator\s*\('
-    if func_name.startswith("~"):
-        return re.escape(func_name) + r'\s*\('
-    return r'\b' + re.escape(func_name) + r'\s*\('
-
-
-def _php_macro_name_call_patterns(func_name: str):
-    """Return source-level PHP extension macro spellings for generated symbols."""
-    name = _normalize_function_symbol(func_name)
-    patterns = []
-
-    if name.startswith("zif_") and len(name) > 4:
-        php_name = name[4:]
-        macro_names = (
-            "PHP_FUNCTION",
-            "ZEND_FUNCTION",
-            "ZEND_NAMED_FUNCTION",
-            "PHP_NAMED_FUNCTION",
-        )
-        patterns.extend(
-            r'\b' + macro + r'\s*\(\s*' + re.escape(php_name) + r'\s*\)'
-            for macro in macro_names
-        )
-
-    if name.startswith("zim_") and len(name) > 4:
-        rest = name[4:]
-        parts = rest.split("_")
-        for split_at in range(1, len(parts)):
-            class_name = "_".join(parts[:split_at])
-            method_name = "_".join(parts[split_at:])
-            if not class_name or not method_name:
-                continue
-            macro_names = ("PHP_METHOD", "ZEND_METHOD", "SPL_METHOD")
-            patterns.extend(
-                r'\b' + macro + r'\s*\(\s*'
-                + re.escape(class_name)
-                + r'\s*,\s*'
-                + re.escape(method_name)
-                + r'\s*\)'
-                for macro in macro_names
-            )
-
-    if name.startswith("zim_spl_") and len(name) > 8:
-        rest = name[8:]
-        parts = rest.split("_")
-        for split_at in range(1, len(parts)):
-            class_name = "_".join(parts[:split_at])
-            method_name = "_".join(parts[split_at:])
-            if not class_name or not method_name:
-                continue
-            patterns.append(
-                r'\bSPL_METHOD\s*\(\s*'
-                + re.escape(class_name)
-                + r'\s*,\s*'
-                + re.escape(method_name)
-                + r'\s*\)'
-            )
-
-    return [re.compile(pattern) for pattern in patterns]
-
-
-def _looks_like_php_extension_source(source_code: str) -> bool:
-    return any(
-        marker in source_code
-        for marker in (
-            "PHP_FUNCTION",
-            "ZEND_FUNCTION",
-            "PHP_METHOD",
-            "ZEND_METHOD",
-            "SPL_METHOD",
-            "TSRMLS",
-            "zend_",
-        )
-    )
-
-
-def _class_body_ranges(source_code: str, class_name: str):
-    if not class_name:
-        return []
-
-    ranges = []
-    pattern = re.compile(r'\b(?:class|struct|union)\s+' + re.escape(class_name) + r'\b')
-    for m in pattern.finditer(source_code):
-        brace = source_code.find('{', m.end())
-        semi = source_code.find(';', m.end())
-        if brace < 0 or (semi >= 0 and semi < brace):
-            continue
-        end = _find_matching_brace(source_code, brace)
-        if end < 0:
-            continue
-        ranges.append((brace + 1, end - 1))
-    return ranges
-
-
-def _extract_function_code_regex(
-    source_code: str,
-    func_name: str,
-    *,
-    start: int = 0,
-    end: Optional[int] = None,
-    name_pattern=None,
-) -> Tuple[Optional[str], int, int]:
-    end = len(source_code) if end is None else min(end, len(source_code))
-    if name_pattern is not None:
-        patterns = [name_pattern]
-    else:
-        patterns = [re.compile(_function_name_call_pattern(func_name))]
-        if _looks_like_php_extension_source(source_code):
-            patterns.extend(_php_macro_name_call_patterns(func_name))
-
-    for pattern in patterns:
-        for m in pattern.finditer(source_code, start, end):
-            name_start = m.start()
-            open_paren = source_code.rfind('(', m.start(), m.end())
-            if open_paren < 0:
-                continue
-            if open_paren >= end:
-                continue
-            close_paren = _find_matching_paren(source_code, open_paren)
-            if close_paren < 0 or close_paren >= end:
-                continue
-
-            i = close_paren + 1
-            n = end
-            # Bỏ qua whitespace, newline, comment, và attribute specifier
-            # trước khi gặp '{' mở hàm (GCC: __attribute__((...)), const, throw(),...).
-            while i < n:
-                c = source_code[i]
-                if c.isspace():
-                    i += 1
-                    continue
-                if c == '/' and i + 1 < n and source_code[i + 1] == '/':
-                    nl = source_code.find('\n', i)
-                    if nl < 0:
-                        i = n
-                        break
-                    i = nl + 1
-                    continue
-                if c == '/' and i + 1 < n and source_code[i + 1] == '*':
-                    comment_end = source_code.find('*/', i + 2)
-                    if comment_end < 0:
-                        i = n
-                        break
-                    i = comment_end + 2
-                    continue
-                if c == '#' and _at_line_start_after_ws(source_code, i):
-                    nl = source_code.find('\n', i)
-                    if nl < 0:
-                        i = n
-                        break
-                    i = nl + 1
-                    continue
-                # Chỉ bỏ qua các suffix hợp lệ sau declarator của hàm.
-                # Không bỏ qua identifier bất kỳ: nếu match nằm trong return type
-                # dạng macro (vd. FMT_ENABLE_IF_T(...) format_to(...)), token kế
-                # tiếp là tên hàm thật và candidate macro phải bị loại.
-                if c.isalpha() or c == '_':
-                    j = i
-                    while j < n and (source_code[j].isalnum() or source_code[j] == '_'):
-                        j += 1
-                    token = source_code[i:j]
-                    allowed_suffix = {
-                        "const",
-                        "volatile",
-                        "noexcept",
-                        "override",
-                        "final",
-                        "throw",
-                        "__attribute__",
-                        "__declspec",
-                        "FMT_NOEXCEPT",
-                        "FMT_NOEXCEPT_IF",
-                        "FMT_OVERRIDE",
-                        "FMT_CONSTEXPR",
-                        "FMT_CONSTEXPR_DECL",
-                        "FMT_CONSTEXPR20",
-                        "FMT_NODISCARD",
-                        "TSRMLS_DC",
-                        "TSRMLS_D",
-                    }
-                    if token == "requires":
-                        body_open = _find_cpp_requires_body_open(source_code, j, n)
-                        if body_open >= 0:
-                            i = body_open
-                        break
-                    if token not in allowed_suffix:
-                        break
-                    k = j
-                    while k < n and source_code[k].isspace():
-                        k += 1
-                    if k < n and source_code[k] == '(':
-                        end_paren = _find_matching_paren(source_code, k)
-                        if end_paren < 0:
-                            break
-                        i = end_paren + 1
-                        continue
-                    i = j
-                    continue
-                if c == '&':
-                    if i + 1 < n and source_code[i + 1] == '&':
-                        i += 2
-                    else:
-                        i += 1
-                    continue
-                if c == ':':
-                    body_open = _find_cpp_ctor_body_open(source_code, i)
-                    if body_open >= 0:
-                        i = body_open
-                    break
-                if c == '-' and i + 1 < n and source_code[i + 1] == '>':
-                    body_open = _find_cpp_trailing_return_body_open(source_code, i + 2, n)
-                    if body_open >= 0:
-                        i = body_open
-                    break
-                break
-
-            if i >= n or source_code[i] != '{':
-                continue
-
-            start_idx = _find_function_def_start(source_code, name_start)
-            end_idx = _find_matching_brace(source_code, i)
-            if end_idx < 0 or end_idx > end:
-                end_idx = _find_php_fold_marker_function_end(source_code, i, end)
-            if end_idx < 0 or end_idx > end:
-                continue
-
-            start_byte = len(source_code[:start_idx].encode("utf-8"))
-            end_byte = len(source_code[:end_idx].encode("utf-8"))
-            return source_code[start_idx:end_idx], start_byte, end_byte
-
-    return None, -1, -1
-
-
-def _find_php_fold_marker_function_end(source_code: str, body_open: int, end: int) -> int:
-    """Fallback for PHP extension files where preprocessor branches confuse braces."""
-    match = re.search(r'\n}\s*/\*\s*}}}', source_code[body_open:end])
-    if not match:
-        return -1
-    return body_open + match.start() + 2
-
-
-def _find_cpp_ctor_body_open(source: str, colon_pos: int) -> int:
-    """Find the body ``{`` after a C++ constructor initializer list."""
-    i = colon_pos + 1
-    n = len(source)
-    while i < n:
-        c = source[i]
-        if c == '/' and i + 1 < n and source[i + 1] == '/':
-            nl = source.find('\n', i)
-            if nl < 0:
-                return -1
-            i = nl + 1
-            continue
-        if c == '/' and i + 1 < n and source[i + 1] == '*':
-            end = source.find('*/', i + 2)
-            if end < 0:
-                return -1
-            i = end + 2
-            continue
-        if c == '(':
-            end = _find_matching_paren(source, i)
-            if end < 0:
-                return -1
-            i = end + 1
-            continue
-        if c == '{':
-            end = _find_matching_brace(source, i)
-            if end < 0:
-                return -1
-            j = end
-            while j < n and source[j].isspace():
-                j += 1
-            if j >= n or source[j] not in (',', '{'):
-                return i
-            if source[j] == '{':
-                return j
-            i = j + 1
-            continue
-        if c == ';':
-            return -1
-        i += 1
-    return -1
-
-
-def _find_cpp_requires_body_open(source: str, start: int, end: int) -> int:
-    i = start
-    depth = 0
-    while i < end:
-        c = source[i]
-        if c in ('"', "'"):
-            i = _skip_string_or_char(source, i)
-            continue
-        if c == '/' and i + 1 < end and source[i + 1] == '/':
-            nl = source.find('\n', i)
-            if nl < 0:
-                return -1
-            i = nl + 1
-            continue
-        if c == '/' and i + 1 < end and source[i + 1] == '*':
-            comment_end = source.find('*/', i + 2)
-            if comment_end < 0:
-                return -1
-            i = comment_end + 2
-            continue
-        if c in '(<[':
-            depth += 1
-        elif c in ')>]':
-            depth = max(0, depth - 1)
-        elif c == '{' and depth == 0:
-            return i
-        elif c == ';' and depth == 0:
-            return -1
-        i += 1
-    return -1
-
-
-def _find_cpp_trailing_return_body_open(source: str, start_pos: int, limit: int) -> int:
-    """Find the function body after a C++ trailing return type."""
-    i = start_pos
-    n = min(limit, len(source))
-    while i < n:
-        c = source[i]
-        if c == '/' and i + 1 < n and source[i + 1] == '/':
-            nl = source.find('\n', i)
-            if nl < 0 or nl >= n:
-                return -1
-            i = nl + 1
-            continue
-        if c == '/' and i + 1 < n and source[i + 1] == '*':
-            end = source.find('*/', i + 2)
-            if end < 0 or end >= n:
-                return -1
-            i = end + 2
-            continue
-        if c == '(':
-            end = _find_matching_paren(source, i)
-            if end < 0 or end >= n:
-                return -1
-            i = end + 1
-            continue
-        if c == '{':
-            return i
-        if c == ';':
-            return -1
-        i += 1
-    return -1
-
-
-def _find_function_def_start(source: str, name_pos: int) -> int:
-    """
-    Đi lùi theo từng dòng từ vị trí ``name_pos`` để tìm dòng đầu của
-    return-type/attribute specifier. Dừng khi gặp:
-
-    - Dòng trống (chỉ whitespace).
-    - Dòng bắt đầu bằng ``#`` (preprocessor directive).
-    - Dòng kết thúc bằng ``;`` hoặc ``}`` (kết thúc construct trước đó).
-    """
-    line_start = source.rfind('\n', 0, name_pos) + 1
-    while line_start > 0:
-        prev_line_end   = line_start - 1
-        prev_line_start = source.rfind('\n', 0, prev_line_end) + 1
-        stripped = source[prev_line_start:prev_line_end].strip()
-        if not stripped:
-            break
-        if stripped.startswith('#') and not _is_signature_preprocessor_line(stripped):
-            break
-        if stripped in ("public:", "private:", "protected:"):
-            break
-        if stripped.endswith(';') or stripped.endswith('}'):
-            break
-        line_start = prev_line_start
-    return line_start
-
-
-def _is_signature_preprocessor_line(stripped_line: str) -> bool:
-    return bool(re.match(r'^#\s*(if|ifdef|ifndef|elif|else|endif)\b', stripped_line))
-
-
-def _at_line_start_after_ws(source: str, pos: int) -> bool:
-    line_start = source.rfind('\n', 0, pos) + 1
-    return not source[line_start:pos].strip()
-
-
-def _find_matching_paren(source: str, open_pos: int) -> int:
-    """
-    Tìm '(' đóng tương ứng với '(' tại open_pos, bỏ qua parens trong
-    comments, string literals, char literals.
-
-    Returns: vị trí của ')' đóng, hoặc -1 nếu không tìm thấy.
-    """
-    depth = 0
-    i = open_pos
-    n = len(source)
-
-    while i < n:
-        c = source[i]
-
-        if c == '/' and i + 1 < n:
-            if source[i + 1] == '/':
-                i = source.find('\n', i)
-                if i < 0:
-                    return -1
-                i += 1
-                continue
-            if source[i + 1] == '*':
-                end = source.find('*/', i + 2)
-                if end < 0:
-                    return -1
-                i = end + 2
-                continue
-
-        if c == '"':
-            i += 1
-            while i < n and source[i] != '"':
-                if source[i] == '\\':
-                    i += 1
-                i += 1
-            i += 1
-            continue
-
-        if c == "'":
-            i += 1
-            while i < n and source[i] != "'":
-                if source[i] == '\\':
-                    i += 1
-                i += 1
-            i += 1
-            continue
-
-        if c == '(':
-            depth += 1
-        elif c == ')':
-            depth -= 1
-            if depth == 0:
-                return i
-
-        i += 1
-
-    return -1
-
-
-def _find_matching_brace(source: str, open_brace_pos: int) -> int:
-    """
-    Tìm dấu } đóng tương ứng với { tại open_brace_pos, bỏ qua braces
-    bên trong comments (/* */, //), string literals ("..."), và
-    char literals ('...').
-
-    Returns: vị trí ngay sau } (exclusive), hoặc -1 nếu không tìm thấy.
-    """
-    depth = 0
-    i = open_brace_pos
-    n = len(source)
-
-    while i < n:
-        c = source[i]
-
-        if c == '/' and i + 1 < n:
-            if source[i + 1] == '/':
-                i = source.find('\n', i)
-                if i < 0:
-                    return -1
-                i += 1
-                continue
-            if source[i + 1] == '*':
-                end = source.find('*/', i + 2)
-                if end < 0:
-                    return -1
-                i = end + 2
-                continue
-
-        if c == '"':
-            i += 1
-            while i < n and source[i] != '"':
-                if source[i] == '\\':
-                    i += 1
-                i += 1
-            i += 1
-            continue
-
-        if c == "'":
-            i += 1
-            while i < n and source[i] != "'":
-                if source[i] == '\\':
-                    i += 1
-                i += 1
-            i += 1
-            continue
-
-        if c == '{':
-            depth += 1
-        elif c == '}':
-            depth -= 1
-            if depth == 0:
-                return i + 1
-
-        i += 1
-
-    return -1
 
 
 # ---------------------------------------------------------------------------

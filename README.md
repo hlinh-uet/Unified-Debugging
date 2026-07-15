@@ -1,43 +1,5 @@
 # Unified-Debugging Pipeline
 
-## Luồng hoạt động
-```
-get_loader(dataset)
-      │
-      ▼
- [BugRecord list]
-      │
-      ├──► FL (Tarantula + IR reranker) ────────► fault_localization_results.json
-      │
-      └──► APR
-             │
-             ├──► FailContextAgent
-             ├──► CodeContextCollectorAgent
-             │        gom function lỗi, include/header/helper, symbol/API liên quan
-             │
-             ├──► FixAgent
-             │        sinh patch hàm từ fail context + code evidence
-             │
-             ├──► Sandbox Adapter
-             │        apply patch → compile/test → lưu validation context
-             │
-             ├──► PatchValidationAgent nếu FixAgent chưa success
-             │        phân tích patch fail: giữ gì, revert gì, tránh đổi gì
-             │
-             ├──► ReFixAgent nếu FixAgent chưa success
-             │        sửa tiếp từ best FixAgent candidate + validation feedback + patch critique
-             │
-             ├──► Chọn kết quả tốt hơn giữa Fix best và ReFix result
-             │
-             ├──► experiments/llm_patches/<bug-id>/  ← mọi artifact/log/context
-             ├──► experiments/patches/               ← bản vá success
-             └──► apr_results.json                   ← manifest/kết quả tổng hợp
-                         │
-                         ▼
-                  Evaluation Report
-                  (patch-comparison + real/full metrics, ED func + file)
-```
-
 ---
 
 ## Guideline for Starts
@@ -100,8 +62,7 @@ python3 main.py --fl --dataset tcpdump
 python3 main.py --apr --dataset tcpdump --llm openrouter
 python3 main.py --apr --dataset tcpdump --llm openai
 python3 main.py --apr --dataset tcpdump    # dùng LLM_PROVIDER trong .env
-
-# APR-valid: giả định FL đúng 100%, đưa ground-truth lên top 1 rồi chỉ chạy APR trên top 1 đó.
+# APR-valid: giả định FL đúng 100%
 python3 main.py --apr --dataset fmt --llm openrouter --valid
 
 # Bước 3 (optional) Validate riêng lại patch do APR sinh ra 
@@ -118,6 +79,8 @@ python3 main.py --eval --dataset tcpdump --fl-eval-level function
 python3 main.py --eval --dataset tcpdump --fl-eval-level file
 python3 main.py --eval --dataset tcpdump --fl-eval-level class
 python3 main.py --eval --dataset tcpdump --fl-eval-level all
+# tính evaluation cho valid mode
+python3 main.py --eval --dataset fmt --valid
 ```
 
 ### Chạy APR kèm ReFix standalone sau pipeline
@@ -129,64 +92,12 @@ sau khi APR kết thúc, dựa trên artifact đã lưu trong `experiments/llm_p
 ```bash
 python3 main.py --apr --dataset fmt --llm openrouter --with-refix
 python3 main.py --all --dataset fmt --llm openrouter --with-refix
+
+# Chỉ chạy bug chưa có thư mục experiments/llm_patches/<bug-id>.
+# Không retry các bug đã có artifact (kể cả negfix/invalid).
+python3 main.py --apr --dataset libyang --valid --only-missing --llm openrouter
 ```
 
-### ReFix hoạt động như thế nào
-
-Có hai cách ReFix chạy:
-
-1. **ReFix nội tuyến trong APR pipeline**
-   - chạy tự động khi best FixAgent candidate chưa success;
-   - chỉ nhận best FixAgent candidate, không sửa lại toàn bộ failed artifacts;
-   - so sánh Fix best và ReFix result bằng quality key rồi chọn kết quả tốt hơn.
-
-2. **ReFix standalone bằng `--refix` hoặc `--with-refix`**
-   - đọc artifact đã lưu;
-   - chọn best failed FixAgent artifact của bug;
-   - chạy ReFix và cập nhật `apr_results.json` kể cả khi ReFix không được chọn.
-
-Artifact được đọc từ:
-
-```text
-experiments/llm_patches/<bug-id>/
-```
-
-ReFix dùng:
-
-- function gốc trước APR;
-- function đã được FixAgent patch nhưng fail;
-- validation context/log của patch đó;
-- PatchValidationAgent critique về patch fail nếu có;
-- `validation_error`, failed tests, full failed tests nếu có;
-- context cũ từ FailContextAgent, CodeContextCollectorAgent, FixAgent và PatchValidationAgent.
-
-ReFix tạo artifact mới dạng `__refix01.*` và không ghi đè artifact FixAgent gốc:
-
-```text
-experiments/llm_patches/<bug-id>/
-  02__file.c_function.json
-  02__file.c_function.response.txt
-  02__file.c_function.function.c
-  02__file.c_function.patched.c
-  02__file.c_function.validation.json
-  02__file.c_function__patch_validation_agent.json
-  02__file.c_function__patch_validation_agent.response.txt
-
-  02__file.c_function__refix01.json
-  02__file.c_function__refix01.response.txt
-  02__file.c_function__refix01.function.c
-  02__file.c_function__refix01.patched.c
-  02__file.c_function__refix01.validation.json
-```
-
-Nếu ReFix pass hoặc tốt hơn Fix best, patch cuối được lưu vào `experiments/patches/`
-và `experiments/apr_results.json` được cập nhật. Nếu ReFix không tốt hơn,
-`apr_results.json` vẫn lưu `refix_agent_result`, `refix_attempted=true`,
-`refix_selected=false`, `refix_applied=false` để trace.
-
-Nếu đang phân tích kết quả cũ trong `experiments/Results/...`, cần copy đúng
-`llm_patches/` của experiment đó về `experiments/llm_patches/` trước khi chạy
-ReFix độc lập.
 
 ### Output được lưu
 
@@ -201,7 +112,8 @@ Lưu toàn bộ output/log/context của từng lần sinh patch:
 | `*.patched.c` | Full source file sau khi thay hàm sửa vào file gốc |
 | `*.validation.json` | Validation context, log, failed tests, agent context |
 | `*.json` | Metadata artifact: status, path, agent artifact, evaluation snapshot |
-| `*__patch_validation_agent.response.txt` | Critique JSON cho patch FixAgent fail, dùng làm input cho ReFix |
+| `*__security_patch_validation_agent.response.txt` | Critique LLM riêng cho nhánh security repair |
+| `*__correctness_validation_router.context.json` | Phân loại deterministic từ compile/test để chọn ReFix, causal re-diagnosis hoặc plausible pool |
 
 #### APR-valid (`--valid`)
 
@@ -244,6 +156,7 @@ chính xác:
 | `--refix`       | Chạy ReFix standalone từ `experiments/llm_patches/` đã lưu |
 | `--bug-id`      | Giới hạn một bug khi dùng `--apr-validate`, `--refix`, hoặc `--with-refix`, ví dụ `CVE-2018-7584` |
 | `--with-refix`  | Sau APR hoặc `--all`, chạy thêm ReFix standalone từ artifact đã lưu |
+| `--only-missing` | Với APR, chỉ chạy bug chưa có thư mục `experiments/llm_patches/<bug-id>`; không retry artifact cũ |
 | `--valid`       | Dùng oracle FL: ground-truth top 1, APR chỉ thử top 1; đọc/ghi `fault_localization_results_valid.json` và `apr_results_valid.json` |
 | `--eval`        | Chỉ chạy Evaluation (FL + APR), lọc theo dataset   |
 | `--all`         | Chạy FL → APR pipeline mới → Evaluation            |

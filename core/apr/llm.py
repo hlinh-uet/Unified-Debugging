@@ -1,10 +1,10 @@
 import os
 import time
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
-from core.apr.config import DEFAULT_LLM_PROVIDER
+from core.apr.common import DEFAULT_LLM_PROVIDER
 
 
 DEFAULT_SYSTEM_PROMPT = "You are a precise coding assistant. Return only the requested content."
@@ -31,6 +31,18 @@ def _extract_chat_message_content(message) -> Optional[str]:
             return "".join(text_parts)
 
     return None
+
+
+def _extract_chat_tool_calls(message) -> List[Dict[str, Any]]:
+    if not isinstance(message, dict):
+        return []
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        return [item for item in tool_calls if isinstance(item, dict)]
+    function_call = message.get("function_call")
+    if isinstance(function_call, dict):
+        return [{"type": "function", "function": function_call}]
+    return []
 
 
 def _is_transient_llm_error(code=None, metadata=None) -> bool:
@@ -221,6 +233,110 @@ def _call_openai_compatible_chat(
         return None
 
 
+def _call_openai_compatible_chat_with_tools(
+    prompt: str,
+    *,
+    provider_label: str,
+    api_key: Optional[str],
+    missing_key_message: str,
+    base_url: str,
+    model: str,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: str = "auto",
+    extra_headers: Optional[dict] = None,
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+) -> Optional[Dict[str, Any]]:
+    try:
+        if not api_key:
+            print(f"[LLM] LỖI: {missing_key_message}")
+            return None
+
+        url = f"{base_url.rstrip('/')}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key.strip()}",
+            "Content-Type": "application/json",
+        }
+        if extra_headers:
+            headers.update(extra_headers)
+
+        payload: Dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+            "max_tokens": int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "12000")),
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = tool_choice
+
+        timeout = int(os.getenv("LLM_REQUEST_TIMEOUT", "120"))
+        retries = int(os.getenv("LLM_RETRIES", "3"))
+        for attempt in range(1, retries + 1):
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            except requests.exceptions.RequestException as exc:
+                if attempt >= retries:
+                    raise
+                sleep_s = min(2 ** attempt, 15)
+                print(
+                    f"[LLM] {provider_label} lỗi kết nối lần {attempt}/{retries}: {exc}. "
+                    f"Thử lại sau {sleep_s}s..."
+                )
+                time.sleep(sleep_s)
+                continue
+
+            if response.status_code != 200:
+                if _is_transient_llm_error(response.status_code) and attempt < retries:
+                    sleep_s = min(2 ** attempt, 15)
+                    print(
+                        f"[LLM] {provider_label} HTTP {response.status_code} lần {attempt}/{retries}. "
+                        f"Thử lại sau {sleep_s}s..."
+                    )
+                    time.sleep(sleep_s)
+                    continue
+                print(f"[LLM] Tool-call error {response.status_code}: {response.text[:1000]}")
+                return None
+
+            try:
+                result = response.json()
+            except ValueError as exc:
+                print(f"[LLM] {provider_label} trả về JSON không hợp lệ: {exc}")
+                return None
+
+            choices = result.get("choices") or []
+            if not choices:
+                print(f"[LLM] {provider_label} response không có choices: {response.text[:1000]}")
+                return None
+            choice = choices[0] or {}
+            message = choice.get("message") or {}
+            content = _extract_chat_message_content(message) or ""
+            tool_calls = _extract_chat_tool_calls(message)
+            if content.strip() or tool_calls:
+                return {
+                    "content": content,
+                    "tool_calls": tool_calls,
+                    "finish_reason": choice.get("finish_reason"),
+                    "raw_message": message,
+                }
+            if attempt < retries:
+                sleep_s = min(2 ** attempt, 15)
+                print(
+                    f"[LLM] {provider_label} trả về content/tool_calls rỗng lần {attempt}/{retries}. "
+                    f"Thử lại sau {sleep_s}s..."
+                )
+                time.sleep(sleep_s)
+                continue
+            return {"content": "", "tool_calls": [], "finish_reason": choice.get("finish_reason"), "raw_message": message}
+        return None
+
+    except Exception as e:
+        print(f"[LLM] Exception khi gọi {provider_label} với tools: {e}")
+        return None
+
+
 def call_llm(
     prompt: str,
     provider: Optional[str] = None,
@@ -252,3 +368,63 @@ def call_llm(
 
     print(f"[LLM] Warning: Provider không hỗ trợ '{chosen}'. Chọn 'openai' hoặc 'openrouter'.")
     return None
+
+
+def call_llm_with_tools(
+    prompt: str,
+    *,
+    provider: Optional[str] = None,
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: str = "auto",
+) -> Dict[str, Any]:
+    """Call a chat model with tool definitions, falling back to plain text JSON."""
+    chosen = (provider or DEFAULT_LLM_PROVIDER).strip().lower()
+    result: Optional[Dict[str, Any]] = None
+    if chosen == "openai":
+        openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        print(f"[LLM] Provider: OpenAI ({openai_model}) + tools")
+        result = _call_openai_compatible_chat_with_tools(
+            prompt,
+            provider_label="OpenAI",
+            api_key=os.getenv("OPENAI_API_KEY"),
+            missing_key_message="OPENAI_API_KEY chưa được đặt trong .env.",
+            base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            model=openai_model,
+            tools=tools,
+            tool_choice=tool_choice,
+            system_prompt=system_prompt,
+        )
+    elif chosen == "openrouter":
+        openrouter_model = os.getenv("OPENROUTER_MODEL", "qwen/qwen3-coder-30b-a3b-instruct")
+        print(f"[LLM] Provider: OpenRouter ({openrouter_model}) + tools")
+        result = _call_openai_compatible_chat_with_tools(
+            prompt,
+            provider_label="OpenRouter",
+            api_key=os.getenv("OPENROUTER_API_KEY"),
+            missing_key_message="Không tìm thấy OPENROUTER_API_KEY trong môi trường.",
+            base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+            model=openrouter_model,
+            extra_headers={
+                "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", "http://localhost:3000"),
+                "X-Title": os.getenv("OPENROUTER_APP_NAME", "UET_APR_Research"),
+            },
+            tools=tools,
+            tool_choice=tool_choice,
+            system_prompt=system_prompt,
+        )
+    else:
+        print(f"[LLM] Warning: Provider không hỗ trợ '{chosen}'. Chọn 'openai' hoặc 'openrouter'.")
+
+    if result is not None:
+        result["used_tool_api"] = True
+        return result
+
+    fallback_content = call_llm(prompt, provider=provider, system_prompt=system_prompt)
+    return {
+        "content": fallback_content or "",
+        "tool_calls": [],
+        "finish_reason": "fallback_plain_text",
+        "raw_message": {},
+        "used_tool_api": False,
+    }

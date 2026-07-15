@@ -5,8 +5,8 @@ split by responsibility:
 - agent/: CodeContext, FailContext, and FixAgent logic
 - pipeline.py: APR orchestration
 - llm.py: OpenAI/OpenRouter-compatible client
-- apr_utils.py: source and candidate-result helpers
-- artifacts.py/validation.py: output and sandbox helpers
+- common.py: APR settings, source/context helpers, and result helpers
+- artifacts.py/validation.py: output metadata and sandbox helpers
 """
 
 __all__ = ["call_llm", "run_apr_pipeline", "validate_patch"]

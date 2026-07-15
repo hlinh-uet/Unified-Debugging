@@ -1,17 +1,19 @@
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from core.apr.apr_utils import classify_patch_outcome
+from core.apr.common import classify_patch_outcome, filter_zero_test_artifact_failures
 from core.apr.artifacts import write_llm_patch_artifact
-from core.apr.evaluation_snapshot import (
+from core.apr.artifacts import (
     build_initial_test_snapshot,
     build_validation_snapshot,
 )
 from core.apr.revalidate import _validate_bug_artifacts
+from data_loaders.sandbox_adapter import Defects4CAdapter
 from evaluation.eval_apr import _classify_fix
 
 
@@ -40,6 +42,197 @@ class PatchOutcomeTests(unittest.TestCase):
         self.assertEqual("NoiseFix", _classify_fix(["a", "b"], ["b", "c"]))
         self.assertEqual("NoneFix", _classify_fix(["a"], ["a"]))
         self.assertEqual("NegFix", _classify_fix(["a"], ["a", "c"]))
+
+
+class ZeroTestArtifactTests(unittest.TestCase):
+    ZERO_TEST_LOG = """__UD_FAIL__ ranges-test
+Internal ctest changing into directory: /tmp/build_meta_fmt
+14: [==========] Running 0 tests from 0 test cases.
+14: [==========] 0 tests from 0 test cases ran. (0 ms total)
+14: [  PASSED  ] 0 tests.
+1/1 Test #14: ranges-test ......................   Passed    0.01 sec
+100% tests passed, 0 tests failed out of 1
+__UD_PASS__ scan-test::ScanTest.ReadText
+"""
+
+    def test_zero_test_ctest_artifact_does_not_create_regression(self):
+        initial = build_initial_test_snapshot(
+            [
+                {"test_id": "format-test::FormatterTest.HashFlag", "outcome": "FAIL"},
+                {"test_id": "ranges-test", "outcome": "PASS"},
+            ],
+            exclude_fixed_fail_tests=True,
+        )
+        self.assertNotIn("ranges-test", initial["comparison_passed"])
+        self.assertNotIn("ranges-test", initial["full_passed"])
+        snapshot = build_validation_snapshot(
+            initial,
+            validation_details={
+                "validation_error": "",
+                "full_post_passed_tests": ["format-test::FormatterTest.HashFlag"],
+                "full_post_failed_tests": ["ranges-test"],
+                "validation_log_tail": self.ZERO_TEST_LOG,
+            },
+            post_passed=["format-test::FormatterTest.HashFlag"],
+            post_failed=["ranges-test"],
+            exclude_fixed_fail_tests=True,
+        )
+
+        self.assertEqual("plausible", snapshot["status"])
+        self.assertEqual([], snapshot["post_failed_tests"])
+        self.assertEqual([], snapshot["full_post_failed_tests"])
+        self.assertIn("ranges-test", snapshot["post_passed_tests"])
+        self.assertIn("ranges-test", snapshot["full_post_passed_tests"])
+        self.assertEqual(
+            [],
+            filter_zero_test_artifact_failures(
+                ["ranges-test"],
+                {"validation_log_tail": self.ZERO_TEST_LOG},
+            ),
+        )
+
+    def test_metadata_validation_ids_skip_zero_coverage_pass_tests(self):
+        adapter = Defects4CAdapter("example", data_folder="fmt")
+        ids = adapter._metadata_test_ids_from_bug_meta(
+            {
+                "tests": [
+                    {
+                        "test_id": "ranges-test",
+                        "outcome": "PASS",
+                        "outcome_fixed": "PASS",
+                        "covered_functions": [],
+                    },
+                    {
+                        "test_id": "format-test::FormatterTest.HashFlag",
+                        "outcome": "FAIL",
+                        "outcome_fixed": "PASS",
+                        "covered_functions": [],
+                    },
+                    {
+                        "test_id": "format-test::FormatterTest.NamedArg",
+                        "outcome": "PASS",
+                        "outcome_fixed": "PASS",
+                        "covered_functions": ["format.h:format"],
+                    },
+                    {
+                        "test_id": "compile-fp-test",
+                        "outcome": "PASS",
+                        "outcome_fixed": "PASS",
+                        "covered_functions": [],
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(
+            [
+                "format-test::FormatterTest.HashFlag",
+                "format-test::FormatterTest.NamedArg",
+                "compile-fp-test",
+            ],
+            ids,
+        )
+
+    def test_fmt_runner_allows_empty_ctest_target_but_not_empty_gtest_filter(self):
+        adapter = Defects4CAdapter("example", data_folder="fmt")
+        script = adapter._fmt_run_one_test_script()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script_path = os.path.join(tmpdir, "run_one_test.sh")
+            with open(script_path, "w") as f:
+                f.write(script)
+            os.chmod(script_path, 0o755)
+
+            ctest_path = os.path.join(tmpdir, "ctest")
+            with open(ctest_path, "w") as f:
+                f.write(
+                    "#!/usr/bin/env bash\n"
+                    "echo '[==========] Running 0 tests from 0 test cases.'\n"
+                    "echo '[  PASSED  ] 0 tests.'\n"
+                    "echo '100% tests passed, 0 tests failed out of 1'\n"
+                    "exit 0\n"
+                )
+            os.chmod(ctest_path, 0o755)
+            env = {**os.environ, "PATH": tmpdir + os.pathsep + os.environ.get("PATH", "")}
+
+            result = subprocess.run(
+                [script_path, "ranges-test"],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+            os.makedirs(os.path.join(tmpdir, "build_meta_fmt", "test"))
+            bin_dir = os.path.join(tmpdir, "build_meta_fmt", "bin")
+            os.makedirs(bin_dir)
+            binary_path = os.path.join(bin_dir, "format-test")
+            with open(binary_path, "w") as f:
+                f.write(
+                    "#!/usr/bin/env bash\n"
+                    "echo '[==========] Running 0 tests from 0 test cases.'\n"
+                    "echo '[  PASSED  ] 0 tests.'\n"
+                    "exit 0\n"
+                )
+            os.chmod(binary_path, 0o755)
+
+            result = subprocess.run(
+                [script_path, "format-test::NoSuch.Test"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+
+    def test_libyang_runner_does_not_treat_ten_tests_as_zero_tests(self):
+        adapter = Defects4CAdapter("example", data_folder="libyang")
+        script = adapter._metadata_run_one_test_script({"project": "CESNET___libyang"})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script_path = os.path.join(tmpdir, "run_one_test.sh")
+            with open(script_path, "w") as f:
+                f.write(script)
+            os.chmod(script_path, 0o755)
+
+            test_dir = os.path.join(tmpdir, "build_meta_libyang", "tests")
+            os.makedirs(test_dir)
+            binary_path = os.path.join(test_dir, "utest_parser_json")
+            with open(binary_path, "w") as f:
+                f.write(
+                    "#!/usr/bin/env bash\n"
+                    "echo '[==========] Running 10 test(s).'\n"
+                    "echo '[ RUN      ] test_rpc'\n"
+                    "echo '[       OK ] test_rpc'\n"
+                    "echo '[==========] 10 test(s) run.'\n"
+                    "echo '[  PASSED  ] 10 test(s).'\n"
+                    "exit 0\n"
+                )
+            os.chmod(binary_path, 0o755)
+
+            result = subprocess.run(
+                [script_path, "utest_parser_json::test_rpc"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+            with open(binary_path, "w") as f:
+                f.write(
+                    "#!/usr/bin/env bash\n"
+                    "echo '[==========] 0 test(s) run.'\n"
+                    "exit 0\n"
+                )
+            os.chmod(binary_path, 0o755)
+
+            result = subprocess.run(
+                [script_path, "utest_parser_json::test_rpc"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(1, result.returncode, result.stdout + result.stderr)
 
 
 class ArtifactSnapshotTests(unittest.TestCase):

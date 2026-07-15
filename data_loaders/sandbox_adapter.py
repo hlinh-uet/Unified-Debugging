@@ -10,6 +10,7 @@ from typing import Optional, Tuple
 import glob
 import hashlib
 from configs.path import CODEFLAWS_SOURCE_DIR, DEFECTS4C_OUT_DIR, DEFECTS4C_PATCHES_DIR, DEFECTS4C_TPL_DIR
+from core.test_filtering import is_zero_test_noop_pass_test
 from core.utils import get_codeflaws_buggy_cfile
 from data_loaders.defects4c_loader import (
     get_defects4c_raw_record,
@@ -845,7 +846,10 @@ class Defects4CAdapter(SandboxAdapter):
             fi
             STATUS=$?
             echo "$OUTPUT"
-            if [[ $STATUS -ne 0 ]] || echo "$OUTPUT" | grep -Eq '\*\*\*Failed|\[  FAILED  \]|Running 0 tests'; then
+            if [[ $STATUS -ne 0 ]] || echo "$OUTPUT" | grep -Eq '\*\*\*Failed|\[  FAILED  \]'; then
+              exit 1
+            fi
+            if [[ "$TEST_ID" == *"::"* ]] && echo "$OUTPUT" | grep -q 'Running 0 tests'; then
               exit 1
             fi
             exit 0
@@ -971,6 +975,8 @@ class Defects4CAdapter(SandboxAdapter):
         out = []
         for test in tests:
             if not isinstance(test, dict):
+                continue
+            if is_zero_test_noop_pass_test(test):
                 continue
             if exclude_fixed_fail_tests:
                 outcome = str(test.get("outcome") or "").upper()

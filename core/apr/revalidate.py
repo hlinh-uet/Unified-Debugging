@@ -4,16 +4,17 @@ import shutil
 from typing import Optional
 
 from configs.path import EXPERIMENTS_DIR, LLM_PATCHES_DIR, PATCHES_DIR
-from core.apr.apr_utils import (
+from core.apr.common import (
     candidate_relpath_from_buggy_tree,
 )
 from core.apr.artifacts import update_patch_artifact_evaluation
-from core.apr.evaluation_snapshot import (
+from core.apr.artifacts import (
     build_initial_test_snapshot,
     build_validation_snapshot,
     extract_evaluation_snapshot,
 )
 from core.apr.validation import validate_patch
+from core.test_filtering import filtered_bug_record_for_pipeline
 from data_loaders.base_loader import get_loader
 
 
@@ -46,9 +47,13 @@ def run_apr_validation_only(
 
         print(f"[APR-VALIDATE] Validate lại {bug.bug_id}: {len(artifacts)} candidate artifact.")
         _remove_success_patches_for_bug(bug.bug_id)
+        filtered_bug, _excluded_fixed_fail = filtered_bug_record_for_pipeline(
+            bug,
+            exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+        )
         result = _validate_bug_artifacts(
             dataset,
-            bug,
+            filtered_bug,
             artifacts,
             exclude_fixed_fail_tests=exclude_fixed_fail_tests,
         )
