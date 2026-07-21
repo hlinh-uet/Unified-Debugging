@@ -1,13 +1,10 @@
-import difflib
 import json
 import os
 import shutil
 from typing import Optional
 
 from configs.path import EXPERIMENTS_DIR, LLM_PATCHES_DIR, PATCHES_DIR
-from core.apr.agent.correctness_repair.repair_planning_pipeline import run_correctness_repair_planning
 from core.apr.agent.correctness_repair.feedback import (
-    classify_validation_feedback,
     validation_feedback_mode,
 )
 from core.apr.agent.correctness_repair.refix_agent import run_correctness_refix_agent
@@ -23,7 +20,6 @@ from core.apr.common import (
     is_plausible_status,
     is_defects4c_dataset,
     source_language_from_path,
-    source_root,
     source_slice_by_byte_range,
 )
 from core.apr.artifacts import write_refix_patch_artifact
@@ -117,6 +113,19 @@ def _refix_branch_agents(prior_context: dict) -> tuple:
     if _repair_route_from_prior_context(prior_context) == "security_repair":
         return run_security_patch_validation_agent, run_security_refix_agent
     return None, run_correctness_refix_agent
+
+
+def _preserve_selected_fix_plan(prior_context: dict, previous_validation: dict) -> dict:
+    """Bind ReFix to the plan that produced its selected parent Fix candidate."""
+    validation_context = (prior_context or {}).get("validation_context") or {}
+    repair_plan = validation_context.get("repair_plan") or {}
+    prior_context["validation_feedback_mode"] = validation_feedback_mode(previous_validation)
+    prior_context["refix_plan_lineage"] = {
+        "strategy": "refine_selected_fix_plan",
+        "plan_id": repair_plan.get("id"),
+        "source_hypothesis_id": repair_plan.get("source_hypothesis_id"),
+    }
+    return repair_plan
 
 
 def _merge_evaluation_history(existing_history: list, refix_result: dict) -> list:
@@ -458,94 +467,7 @@ def _run_one_refix_candidate(
         )
 
     prior_context = _prior_context_from_artifact(artifact)
-    prior_context["validation_feedback_mode"] = validation_feedback_mode(previous_validation)
-    repair_plan = ((prior_context.get("validation_context") or {}).get("repair_plan") or {})
-    if (
-        prior_context["validation_feedback_mode"] in {
-            "rediagnose_mechanism",
-            "revise_preservation_constraints",
-        }
-        and _repair_route_from_prior_context(prior_context) == "correctness_repair"
-    ):
-        fail_context = dict(prior_context.get("fail_context_agent_artifact_payload") or {})
-        behavior_key = "behavior_context" if isinstance(fail_context.get("behavior_context"), dict) else ""
-        if behavior_key:
-            fail_context[behavior_key] = dict(fail_context[behavior_key])
-            fail_context[behavior_key]["validation_feedback"] = previous_validation
-        else:
-            fail_context["validation_feedback"] = previous_validation
-        validation_context = prior_context.get("validation_context") or {}
-        repair_objective = validation_context.get("repair_objective") or {}
-        prior_repair_state = dict(prior_context.get("repair_state") or {})
-        prior_history = list(prior_repair_state.get("validation_history") or [])
-        prior_history.append({
-            "kind": "tested_repair",
-            "round": refix_round,
-            "hypothesis": repair_plan.get("hypothesis"),
-            "hypothesis_id": repair_plan.get("source_hypothesis_id"),
-            "plan_id": repair_plan.get("id"),
-            "edit_intent": repair_plan.get("edit_intent"),
-            "patch_diff": "\n".join(difflib.unified_diff(
-                (original_replacement_unit or "").splitlines(),
-                (previous_function or "").splitlines(),
-                fromfile="original_target",
-                tofile="tested_patch",
-                lineterm="",
-                n=3,
-            ))[:8000],
-            "outcome": classify_validation_feedback(previous_validation),
-        })
-        prior_repair_state["validation_history"] = prior_history[-6:]
-        rediagnosed_context, rediagnosed_artifact = run_correctness_repair_planning(
-            bug_id=bug.bug_id,
-            attempt_index=attempt_index,
-            qualified_name=qualified_name,
-            candidate_relpath=target_relpath,
-            llm_provider=llm_provider,
-            func_name=source_func_name,
-            cand_label=target_relpath or os.path.basename(original_path),
-            func_code=original_replacement_unit,
-            source_root=source_root(original_path, (raw_meta or {}).get("buggy_tree_dir") or (raw_meta or {}).get("source_repo_dir") or ""),
-            source_path=original_path,
-            failed_tests_context=fail_context,
-            replacement_target=replacement_target,
-            repair_objective=repair_objective,
-            output_contract={
-                "editable_scope": "Edit only the source-backed replacement unit.",
-                "return_format": "Return exactly one raw complete C/C++ replacement unit.",
-                "repair_scope": replacement_target.get("repair_scope") or {},
-            },
-            max_plans=3,
-            prior_repair_state=prior_repair_state,
-            planning_round=refix_round + 1,
-        )
-        rediagnosed_plans = [
-            plan for plan in rediagnosed_context.get("plans") or []
-            if isinstance(plan, dict)
-        ]
-        prior_context["rediagnosis_repair_context"] = rediagnosed_context
-        prior_context["rediagnosis_planning_artifact"] = rediagnosed_artifact
-        if rediagnosed_plans:
-            repair_plan = rediagnosed_plans[0]
-            prior_context.setdefault("validation_context", {})["repair_plan"] = repair_plan
-        else:
-            return _failed_refix_candidate(
-                bug=bug,
-                artifact=artifact,
-                qualified_name=qualified_name,
-                target_relpath=target_relpath,
-                original_path=original_path,
-                validation_error="rediagnosis_no_plan",
-                initial=initial,
-                exclude_fixed_fail_tests=exclude_fixed_fail_tests,
-                refix_agent_artifact={
-                    "agent": "correctness_planning_agent",
-                    "status": "empty",
-                    "refix_round": refix_round,
-                    "rediagnosis_planning_artifact": rediagnosed_artifact,
-                },
-                repair_plan={},
-            )
+    repair_plan = _preserve_selected_fix_plan(prior_context, previous_validation)
     repair_route = _repair_route_from_prior_context(prior_context)
     run_patch_validation_agent, run_refix_agent = _refix_branch_agents(prior_context)
     if repair_route == "correctness_repair":

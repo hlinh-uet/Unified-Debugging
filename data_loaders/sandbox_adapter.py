@@ -10,6 +10,11 @@ from typing import Optional, Tuple
 import glob
 import hashlib
 from configs.path import CODEFLAWS_SOURCE_DIR, DEFECTS4C_OUT_DIR, DEFECTS4C_PATCHES_DIR, DEFECTS4C_TPL_DIR
+from core.apr.compilation_database import (
+    find_build_compilation_database,
+    materialize_analysis_database,
+    write_single_file_database,
+)
 from core.test_filtering import is_zero_test_noop_pass_test
 from core.utils import get_codeflaws_buggy_cfile
 from data_loaders.defects4c_loader import (
@@ -49,6 +54,59 @@ TCPDUMP_RUN_ONE_TEST_SH = textwrap.dedent(r"""
     exit 0
 """).lstrip()
 
+LIBYANG_CMOCKA_FILTER_PATCH_SCRIPT = r"""
+import sys
+from pathlib import Path
+
+repo = Path(sys.argv[1])
+marker = "BUILD_META_CMOCKA_TEST_FILTER"
+call = "return cmocka_run_group_tests("
+hook = (
+    "{\n"
+    "        const char *build_meta_filter = getenv(\"BUILD_META_CMOCKA_TEST_FILTER\");\n"
+    "        if (build_meta_filter && build_meta_filter[0]) {\n"
+    "            cmocka_set_test_filter(build_meta_filter);\n"
+    "        }\n"
+    "    }\n"
+    "    return cmocka_run_group_tests("
+)
+
+candidates = []
+patched = 0
+for path in sorted((repo / "tests").rglob("*.c")):
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if call not in text:
+        continue
+    candidates.append(path)
+    if marker in text:
+        continue
+    if "#include <stdlib.h>" not in text:
+        if "#include <cmocka.h>" in text:
+            text = text.replace(
+                "#include <cmocka.h>",
+                "#include <cmocka.h>\n#include <stdlib.h>",
+                1,
+            )
+    new_text = text.replace(call, hook, 1)
+    if new_text == text:
+        continue
+    path.write_text(new_text, encoding="utf-8")
+    patched += 1
+
+unpatched = [str(path.relative_to(repo)) for path in candidates if marker not in path.read_text(
+    encoding="utf-8", errors="replace"
+)]
+if not candidates:
+    print("no CMocka test entrypoints found", file=sys.stderr)
+    raise SystemExit(2)
+if unpatched:
+    print("unpatched CMocka test entrypoints: " + ", ".join(unpatched), file=sys.stderr)
+    raise SystemExit(3)
+
+print(f"libyang_cmocka_filter_sources:{len(candidates)}")
+print(f"libyang_cmocka_filter_patched:{patched}")
+""".lstrip()
+
 class SandboxAdapter:
     """Class Cầu nối cơ sở để chuẩn hoá mọi dataset (Codeflaws, Defects4C, Defects4J)"""
     def __init__(self, bug_id):
@@ -58,6 +116,33 @@ class SandboxAdapter:
     def get_source_path(self):
         """Trả về đường dẫn tuyệt đối đến file mã nguồn đang chứa lỗi"""
         raise NotImplementedError("Phải trả về đường dẫn tuyệt đối đến file mã nguồn cần sửa")
+
+    def prepare_compilation_database(
+        self, *, source_root: str, source_path: str, src_relpath: Optional[str] = None
+    ) -> dict:
+        """Expose an existing build database without inventing compiler flags."""
+        del source_path, src_relpath
+        database = find_build_compilation_database([source_root])
+        if not database:
+            return {
+                "version": 1,
+                "available": False,
+                "database_path": "",
+                "provider": "sandbox_existing_database",
+                "diagnostics": ["sandbox_compilation_database_missing"],
+            }
+        root = os.path.realpath(source_root)
+        return {
+            "version": 1,
+            "available": True,
+            "database_path": database,
+            "source_database": database,
+            "build_source_root": root,
+            "analysis_source_root": root,
+            "allowed_source_roots": [root],
+            "provider": "sandbox_existing_database",
+            "diagnostics": [],
+        }
 
     def validate(self, patched_file_path, src_basename=None, src_relpath=None,
                  exclude_fixed_fail_tests=True):
@@ -89,6 +174,34 @@ class CodeflawsAdapter(SandboxAdapter):
         bug_dir   = os.path.join(CODEFLAWS_SOURCE_DIR, self.bug_id)
         cfilename = get_codeflaws_buggy_cfile(self.bug_id)
         return os.path.join(bug_dir, cfilename)
+
+    def prepare_compilation_database(
+        self, *, source_root: str, source_path: str, src_relpath: Optional[str] = None
+    ) -> dict:
+        del src_relpath
+        bug_dir = os.path.realpath(source_root)
+        source = os.path.realpath(source_path)
+        if not os.path.isfile(source):
+            return {
+                "version": 1,
+                "available": False,
+                "database_path": "",
+                "provider": "codeflaws_validation_command",
+                "diagnostics": ["codeflaws_compilation_source_missing"],
+            }
+        output = os.path.join(bug_dir, ".apr", "compile_commands.json")
+        return write_single_file_database(
+            output_database=output,
+            directory=bug_dir,
+            source_path=source,
+            arguments=[
+                "gcc", "-fno-optimize-sibling-calls", "-fno-strict-aliasing",
+                "-fno-asm", "-std=c99", "-Wno-error=implicit-function-declaration",
+                "-O0", source, "-o", os.path.join(bug_dir, ".apr", "analysis.out"),
+                "-lm",
+            ],
+            provider="codeflaws_validation_fallback_command",
+        )
 
     def _parse_test_cases(self, bug_dir):
         """
@@ -282,6 +395,130 @@ class Defects4CAdapter(SandboxAdapter):
 
     def get_source_path(self):
         return get_defects4c_source_path(self.bug_id, data_folder=self.data_folder)
+
+    def prepare_compilation_database(
+        self, *, source_root: str, source_path: str, src_relpath: Optional[str] = None
+    ) -> dict:
+        """Build/export the same compilation context used by metadata validation."""
+        del source_path, src_relpath
+        cached = getattr(self, "_analysis_compilation_context", None)
+        cached_database = str((cached or {}).get("database_path") or "")
+        if (
+            isinstance(cached, dict)
+            and cached.get("available")
+            and cached_database
+            and os.path.isfile(cached_database)
+        ):
+            return dict(cached)
+        raw = get_defects4c_raw_record(self.bug_id, data_folder=self.data_folder)
+        bug_meta = (raw or {}).get("raw", raw or {})
+        analysis_root = os.path.realpath(source_root)
+        build_root = os.path.realpath(str(bug_meta.get("source_repo_dir") or ""))
+        container_root = str(bug_meta.get("container_repo_dir") or "")
+        database = find_build_compilation_database([analysis_root, build_root])
+        diagnostics = []
+        if not database:
+            database, prepare_diagnostics = self._export_metadata_compilation_database(
+                bug_meta=bug_meta,
+            )
+            diagnostics.extend(prepare_diagnostics)
+        if not database:
+            context = {
+                "version": 1,
+                "available": False,
+                "database_path": "",
+                "provider": "defects4c_metadata_build",
+                "diagnostics": diagnostics or ["metadata_build_compilation_database_missing"],
+            }
+            # A later sandbox build may create the database.  Do not make a
+            # transient build/export failure sticky for the adapter lifetime.
+            return context
+        output = os.path.join(analysis_root, ".apr", "compile_commands.json")
+        mappings = [(container_root, build_root)] if container_root and build_root else []
+        context = materialize_analysis_database(
+            source_database=database,
+            output_database=output,
+            build_source_root=build_root or analysis_root,
+            analysis_source_root=analysis_root,
+            path_mappings=mappings,
+        )
+        context["provider"] = "defects4c_metadata_build"
+        context["diagnostics"] = list(dict.fromkeys([
+            *diagnostics, *(context.get("diagnostics") or [])
+        ]))
+        self._analysis_compilation_context = dict(context)
+        return context
+
+    def _export_metadata_compilation_database(self, *, bug_meta: dict) -> Tuple[str, list]:
+        container = self._select_defects4c_container(bug_meta)
+        container_repo = str(bug_meta.get("container_repo_dir") or "")
+        compile_cmd = str(bug_meta.get("compile_cmd") or "").strip()
+        commit_after = str(bug_meta.get("commit_after") or "")
+        commit_before = str(bug_meta.get("commit_before") or "")
+        if not container or not container_repo or not compile_cmd:
+            return "", ["metadata_compilation_database_build_context_missing"]
+        if not self._prepare_generic_workspace(
+            container=container,
+            container_repo=container_repo,
+            commit_after=commit_after,
+            commit_before=commit_before,
+            src_files=self._phase_a_src_files(bug_meta),
+            # Metadata workspaces are persistent and commonly retain a CMake
+            # cache configured before CMAKE_EXPORT_COMPILE_COMMANDS was set.
+            # Reconfigure from a clean tree so the exported setting is applied
+            # before semantic analysis, rather than only during validation.
+            clean=True,
+        ):
+            return "", ["metadata_compilation_database_workspace_prepare_failed"]
+        timeout = int(os.getenv("APR_COMPILE_DATABASE_TIMEOUT_SECONDS", "1800"))
+        quoted_compile = shlex.quote(compile_cmd)
+        database_output = shlex.quote(f"{container_repo.rstrip('/')}/compile_commands.json")
+        script = (
+            "export CMAKE_EXPORT_COMPILE_COMMANDS=ON; "
+            "if command -v bear >/dev/null 2>&1; then "
+            f"timeout --kill-after=10s {shlex.quote(str(timeout) + 's')} "
+            f"bear --output {database_output} -- bash -lc {quoted_compile}; "
+            "else "
+            f"timeout --kill-after=10s {shlex.quote(str(timeout) + 's')} "
+            f"bash -lc {quoted_compile}; "
+            "fi"
+        )
+        try:
+            completed = subprocess.run(
+                ["docker", "exec", container, "bash", "-lc", script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout + 30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return "", [f"metadata_compilation_database_build_failed:{type(exc).__name__}"]
+        diagnostics = []
+        if completed.returncode != 0:
+            diagnostics.append(f"metadata_compilation_build_nonzero:{completed.returncode}")
+        find_cmd = (
+            f"find {shlex.quote(container_repo)} -maxdepth 3 -name compile_commands.json "
+            "-type f -print -quit"
+        )
+        located = subprocess.run(
+            ["docker", "exec", container, "bash", "-lc", find_cmd],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        container_database = (located.stdout or "").strip().splitlines()
+        if located.returncode != 0 or not container_database:
+            return "", [*diagnostics, "metadata_build_did_not_export_compile_commands"]
+        host_build_root = os.path.realpath(str(bug_meta.get("source_repo_dir") or ""))
+        relative = os.path.relpath(container_database[0], container_repo)
+        host_database = os.path.realpath(os.path.join(host_build_root, relative))
+        if not os.path.isfile(host_database):
+            return "", [*diagnostics, "metadata_compile_commands_not_host_mapped"]
+        return host_database, diagnostics
 
     def validate(self, patched_file_path, src_basename=None, src_relpath=None,
                  exclude_fixed_fail_tests=True):
@@ -587,8 +824,27 @@ class Defects4CAdapter(SandboxAdapter):
         """Apply narrow environment fixes needed to build old projects on newer toolchains."""
         folder = str(bug_meta.get("data_folder") or bug_meta.get("metadata_slug") or "").lower()
         project = str(bug_meta.get("project") or "").lower()
+        applied = []
+
+        if self._is_libyang_project(bug_meta):
+            result = subprocess.run(
+                ["docker", "exec", "-i", container, "python3", "-", container_repo],
+                input=LIBYANG_CMOCKA_FILTER_PATCH_SCRIPT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if result.returncode != 0:
+                self._last_validation_log_tail = (result.stderr or result.stdout or "")[-4000:]
+                return None
+            applied.extend(
+                line.strip() for line in (result.stdout or "").splitlines() if line.strip()
+            )
+
         if folder != "php" and "php-src" not in project:
-            return []
+            return applied
 
         cmd = (
             f"repo={shlex.quote(container_repo)}; "
@@ -613,7 +869,18 @@ class Defects4CAdapter(SandboxAdapter):
         if result.returncode != 0:
             self._last_validation_log_tail = (result.stderr or result.stdout or "")[-4000:]
             return None
-        return [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+        applied.extend(line.strip() for line in (result.stdout or "").splitlines() if line.strip())
+        return applied
+
+    @staticmethod
+    def _is_libyang_project(bug_meta: dict) -> bool:
+        folder = str(
+            (bug_meta or {}).get("data_folder")
+            or (bug_meta or {}).get("metadata_slug")
+            or ""
+        ).lower()
+        project = str((bug_meta or {}).get("project") or "").lower()
+        return folder == "libyang" or "libyang" in project
 
     def _restore_known_test_helpers_cmd(self) -> str:
         tcpdump_runner = shlex.quote(TCPDUMP_RUN_ONE_TEST_SH)
@@ -696,6 +963,7 @@ class Defects4CAdapter(SandboxAdapter):
         lines = [
             "set +e",
             f"cd {shlex.quote(container_repo)} || exit 2",
+            "export CMAKE_EXPORT_COMPILE_COMMANDS=ON",
         ]
         if helper_path:
             lines.extend([
@@ -814,6 +1082,8 @@ class Defects4CAdapter(SandboxAdapter):
             return self._php_run_one_test_script()
         if project == "fmtlib___fmt":
             return self._fmt_run_one_test_script()
+        if project == "CESNET___libyang":
+            return self._libyang_run_one_test_script()
 
         project_dir = os.path.join(DEFECTS4C_TPL_DIR, "projects_v1", project)
         if not os.path.isdir(project_dir):
@@ -826,6 +1096,147 @@ class Defects4CAdapter(SandboxAdapter):
             if script:
                 return script.replace("__BUILD_DIR_NAME__", build_dir or "build_meta")
         return ""
+
+    def _libyang_run_one_test_script(self) -> str:
+        return textwrap.dedent(r"""
+            #!/usr/bin/env bash
+            # Auto-generated by Unified-Debugging validation.
+            set -uo pipefail
+            HERE=$(cd "$(dirname "$0")" && pwd)
+            TEST_ID="${1:?Usage: $0 <test_id>}"
+            BUILD_DIR="$HERE/build_meta_libyang"
+            TEST_TIMEOUT="${BUILD_META_TEST_TIMEOUT:-180}"
+            if [[ "$TEST_ID" == *"::"* ]]; then
+              CTEST_NAME="${TEST_ID%%::*}"
+              CASE_NAME="${TEST_ID#*::}"
+              OUTPUT=$(python3 - "$BUILD_DIR" "$CTEST_NAME" "$CASE_NAME" "$TEST_TIMEOUT" 2>&1 <<'PY'
+            import json
+            import os
+            import subprocess
+            import sys
+
+            build_dir, ctest_name, case_name, timeout_text = sys.argv[1:]
+            try:
+                timeout_seconds = max(1, int(timeout_text))
+                metadata = subprocess.run(
+                    ["ctest", "--test-dir", build_dir, "--show-only=json-v1"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=True,
+                )
+                payload = json.loads(metadata.stdout)
+            except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+                print("[run_one_test] unable to read CTest metadata: {}".format(exc), file=sys.stderr)
+                raise SystemExit(2)
+
+            tests = [item for item in payload.get("tests", []) if item.get("name") == ctest_name]
+            if len(tests) != 1:
+                print(
+                    "[run_one_test] expected exactly one CTest target named {!r}, found {}".format(
+                        ctest_name, len(tests)
+                    ),
+                    file=sys.stderr,
+                )
+                raise SystemExit(2)
+
+            test = tests[0]
+            command = [str(value) for value in test.get("command") or []]
+            if not command:
+                print("[run_one_test] CTest target has no command: {}".format(ctest_name), file=sys.stderr)
+                raise SystemExit(2)
+            properties = {
+                str(item.get("name") or ""): item.get("value")
+                for item in test.get("properties") or []
+                if isinstance(item, dict) and item.get("name")
+            }
+
+            original_env = os.environ.copy()
+            test_env = original_env.copy()
+            for assignment in properties.get("ENVIRONMENT") or []:
+                key, separator, value = str(assignment).partition("=")
+                if separator and key:
+                    test_env[key] = value
+
+            for modification in properties.get("ENVIRONMENT_MODIFICATION") or []:
+                key, separator, operation_value = str(modification).partition("=")
+                operation, colon, value = operation_value.partition(":")
+                if not separator or not colon or not key:
+                    print("[run_one_test] invalid CTest environment modification: {}".format(modification), file=sys.stderr)
+                    raise SystemExit(2)
+                current = test_env.get(key, "")
+                if operation == "reset":
+                    if key in original_env:
+                        test_env[key] = original_env[key]
+                    else:
+                        test_env.pop(key, None)
+                elif operation == "set":
+                    test_env[key] = value
+                elif operation == "unset":
+                    test_env.pop(key, None)
+                elif operation == "string_append":
+                    test_env[key] = current + value
+                elif operation == "string_prepend":
+                    test_env[key] = value + current
+                elif operation == "path_list_append":
+                    test_env[key] = current + (os.pathsep if current and value else "") + value
+                elif operation == "path_list_prepend":
+                    test_env[key] = value + (os.pathsep if current and value else "") + current
+                elif operation == "cmake_list_append":
+                    test_env[key] = current + (";" if current and value else "") + value
+                elif operation == "cmake_list_prepend":
+                    test_env[key] = value + (";" if current and value else "") + current
+                else:
+                    print("[run_one_test] unsupported CTest environment modification: {}".format(operation), file=sys.stderr)
+                    raise SystemExit(2)
+
+            test_env["BUILD_META_CMOCKA_TEST_FILTER"] = case_name
+            working_directory = str(properties.get("WORKING_DIRECTORY") or build_dir)
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=working_directory,
+                    env=test_env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=timeout_seconds,
+                )
+            except subprocess.TimeoutExpired as exc:
+                if exc.stdout:
+                    print(exc.stdout, end="" if str(exc.stdout).endswith("\n") else "\n")
+                print("[run_one_test] CMocka test timed out: {}".format(ctest_name), file=sys.stderr)
+                raise SystemExit(124)
+            except OSError as exc:
+                print("[run_one_test] unable to execute CTest command: {}".format(exc), file=sys.stderr)
+                raise SystemExit(2)
+
+            if completed.stdout:
+                print(completed.stdout, end="" if completed.stdout.endswith("\n") else "\n")
+            raise SystemExit(completed.returncode if completed.returncode >= 0 else 128 - completed.returncode)
+            PY
+              )
+            else
+              OUTPUT=$(ctest --test-dir "$BUILD_DIR" -R "^${TEST_ID}$" -V --timeout "$TEST_TIMEOUT" 2>&1)
+            fi
+            STATUS=$?
+            echo "$OUTPUT"
+            if [[ $STATUS -ne 0 ]] || echo "$OUTPUT" | grep -Eq '\*\*\*Failed|\[  FAILED  \]|FAILED TEST\(S\)'; then
+              exit 1
+            fi
+            if [[ "$TEST_ID" == *"::"* ]]; then
+              SELECTED_CASES=$(echo "$OUTPUT" | sed -nE 's/^\[[[:space:]]*RUN[[:space:]]*\][[:space:]]+//p')
+              if [[ -z "$SELECTED_CASES" ]] || echo "$SELECTED_CASES" | grep -Fvxq "$CASE_NAME"; then
+                echo "[run_one_test] CMocka filter selected no case or a different case: $TEST_ID" >&2
+                exit 1
+              fi
+            fi
+            exit 0
+        """).lstrip()
 
     def _fmt_run_one_test_script(self) -> str:
         return textwrap.dedent(r"""

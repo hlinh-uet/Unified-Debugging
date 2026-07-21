@@ -802,12 +802,34 @@ def candidate_list_len(candidate: dict, key: str, default: int = 10**9) -> int:
     return len(values) if isinstance(values, list) else default
 
 
+_CANDIDATE_STATUS_RANK = {
+    # A candidate that passes the complete validation scope is always best.
+    "plausible": 0,
+    "success": 0,
+    # Preserve semantic progress before comparing raw failure counts.  In
+    # particular, a ReFix that loses an original fix (nonefix) must not replace
+    # an earlier partial fix merely because the regression set is smaller.
+    "cleanfix": 1,
+    "noisefix": 2,
+    "nonefix": 3,
+    "negfix": 4,
+    "invalid": 5,
+}
+
+
+def candidate_status_rank(status: object) -> int:
+    """Return the APR outcome rank used to retain the best candidate so far."""
+    normalized = str(status or "").strip().lower()
+    return _CANDIDATE_STATUS_RANK.get(normalized, 6)
+
+
 def candidate_quality_key(candidate: dict) -> tuple:
     """Lower is better when comparing Fix/ReFix candidates or artifacts."""
     status = str((candidate or {}).get("status") or "").strip().lower()
+    real_status = str((candidate or {}).get("real_status") or status).strip().lower()
     return (
-        0 if is_plausible_status(status) else 1,
-        1 if status == "invalid" else 0,
+        candidate_status_rank(status),
+        candidate_status_rank(real_status),
         candidate_list_len(candidate, "post_failed_tests"),
         candidate_list_len(candidate, "full_post_failed_tests"),
         -candidate_list_len(candidate, "post_passed_tests", default=0),
@@ -817,7 +839,7 @@ def candidate_quality_key(candidate: dict) -> tuple:
 
 
 def candidate_is_strictly_better(candidate: dict, baseline: dict) -> bool:
-    """Return True only when candidate improves baseline without adding failures."""
+    """Return True only when candidate improves the best-so-far baseline."""
     if not candidate:
         return False
     if not baseline:

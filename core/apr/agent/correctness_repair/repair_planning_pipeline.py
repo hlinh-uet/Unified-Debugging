@@ -10,7 +10,7 @@ from .behavior_analysis import analyze_target_behavior, merge_expansion_context
 from .causal_reasoner import adjudicate_and_plan, diagnose
 from .evidence_broker import execute_behavior_queries, merge_information_needs
 from .failure_contract import build_failure_contract
-from .models import STATE_VERSION, new_repair_state, unique_dicts
+from .models import ARCHITECTURE, STATE_VERSION, new_repair_state, unique_dicts
 from .source_model import build_target_contract
 from .target_inventory import build_target_inventory
 
@@ -34,6 +34,7 @@ def run_correctness_repair_planning(
     max_plans: int = 3,
     prior_repair_state: Optional[Dict[str, Any]] = None,
     planning_round: int = 1,
+    compilation_context: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     del cand_label
     target, target_errors = build_target_contract(
@@ -75,10 +76,16 @@ def run_correctness_repair_planning(
         target_inventory=inventory,
     )
     state["planning_round"] = max(1, int(planning_round or 1))
+    state["compilation_context"] = (
+        compilation_context
+        or (prior_repair_state or {}).get("compilation_context")
+        or {}
+    )
     state["repair_objective"] = repair_objective or {}
     state["output_contract"] = output_contract or {}
     state["warnings"].extend(target.get("diagnostics") or [])
     state["warnings"].extend(inventory.get("diagnostics") or [])
+    state["warnings"].extend(state["compilation_context"].get("diagnostics") or [])
     compatible_prior = _compatible_prior_state(prior_repair_state or {}, target)
     if compatible_prior:
         state["prior_repair_state"] = _compact_prior_state(compatible_prior)
@@ -96,6 +103,7 @@ def run_correctness_repair_planning(
         target_contract=target,
         target_inventory=inventory,
         source_root=source_root,
+        compilation_context=state["compilation_context"],
     )
     state["behavior_state"]["context"] = behavior_analysis
     state["behavior_state"]["query_rounds"].append(query_round)
@@ -130,6 +138,8 @@ def run_correctness_repair_planning(
             target_inventory=inventory,
             source_root=source_root,
             round_index=2,
+            semantic_context=(state["behavior_state"].get("context") or {}).get("semantic_context") or {},
+            compilation_context=state.get("compilation_context") or {},
         )
         state["behavior_state"]["information_needs"] = merge_information_needs(
             state["behavior_state"]["information_needs"], clarified_needs
@@ -184,27 +194,43 @@ def _write_semantic_workspace_artifact(
     candidate_relpath: str,
 ) -> Dict[str, Any]:
     workspace = {
-        "architecture": "target_anchored_cpg_behavior_analysis_apr",
+        "architecture": ARCHITECTURE,
         "target_inventory": state.get("target_inventory") or {},
+        "compilation_context": state.get("compilation_context") or {},
         "behavior_state": state.get("behavior_state") or {},
         "evidence_store": {
             "fact_count": len(state.get("evidence_facts") or []),
             "evidence_ids": [item.get("id") for item in state.get("evidence_facts") or []],
         },
         "query_policy": {
-            "search_domain": "full_cached_project_joern_cpg",
-            "execution": "compact_call_variable_contract_projection_then_hypothesis_driven_expansion",
+            "initial_search_domain": "exact_target_syntax_ir_and_compiler_semantic_deltas",
+            "follow_up_search_domain": "budgeted_compiler_declarations_then_joern_on_demand",
+            "evidence_domain": "static_program_semantics",
+            "runtime_observed": False,
+            "runtime_evidence_policy": (
+                "Tree-sitter and optional Joern queries never answer failing-run value, branch, or return questions"
+            ),
+            "execution": "tree_sitter_query_then_clang_frontend_then_hypothesis_driven_expansion",
             "initial_projection": [
-                "source_level_variable_contracts",
-                "target_call_contracts",
-                "unique_exact_callee_contracts",
+                "budgeted_balanced_view_over_full_target_syntax_index",
+                "compiler_resolved_variable_types",
+                "compiler_resolved_direct_call_identities",
             ],
+            "syntax_index_policy": (
+                "retain_all_target_records_for_retrieval_and expose only the budgeted view to the LLM"
+            ),
             "lazy_only": [
                 "overload_candidates", "sibling_usages", "callers",
                 "type_or_constant_definitions", "deep_dataflow",
             ],
-            "source_scan_fallback": "exact_target_ast_only",
-            "static_semantic_bundle": False,
+            "semantic_retrieval_budget": {
+                "max_compiler_queries": 3,
+                "max_source_regions": 5,
+                "max_total_source_chars": 2400,
+                "max_source_chars_per_region": 800,
+            },
+            "source_index": "tree_sitter_query_pack_plus_clang_compilation_database",
+            "static_semantic_bundle": True,
         },
         "warnings": state.get("warnings") or [],
         "errors": state.get("errors") or [],
@@ -256,6 +282,7 @@ def _compact_prior_state(prior: Dict[str, Any]) -> Dict[str, Any]:
         ],
         "plans": list(prior.get("plans") or [])[:3],
         "validation_history": list(prior.get("validation_history") or [])[-6:],
+        "compilation_context": prior.get("compilation_context") or {},
         "warnings": list(prior.get("warnings") or [])[-8:],
         "errors": list(prior.get("errors") or [])[-8:],
     }
@@ -273,7 +300,7 @@ def _write_result(
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     plans = state.get("plans") or []
     result = {
-        "architecture": "target_anchored_cpg_behavior_analysis_apr",
+        "architecture": ARCHITECTURE,
         "plans": plans,
         "repair_state": state,
         "failure_contract": state.get("failure_contract") or {},
@@ -321,7 +348,7 @@ def _failed_result(
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     state = {
         "state_version": STATE_VERSION,
-        "architecture": "target_anchored_cpg_behavior_analysis_apr",
+        "architecture": ARCHITECTURE,
         "status": f"{stage}_failed",
         "target_contract": target,
         "failure_contract": failure,

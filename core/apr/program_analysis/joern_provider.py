@@ -33,6 +33,153 @@ def joern_available() -> bool:
     return bool(_joern_bin() and _joern_parse_bin())
 
 
+def joern_target_data_flow_slice(
+    *,
+    source_root: str,
+    source_path: str,
+    function_name: str,
+    slice_depth: int = 8,
+) -> Dict[str, Any]:
+    """Run joern-slice on the cached CPG for one target method.
+
+    ``joern-slice`` is deliberately given the existing CPG instead of source
+    code.  Some Joern distributions bundle a slicer and a language frontend
+    with slightly different CLI flags; reusing our cached CPG also avoids a
+    second parse of the project.
+    """
+    joern_slice = _joern_slice_bin()
+    joern_parse = _joern_parse_bin()
+    if not joern_slice or not joern_parse:
+        return _data_flow_slice_result(
+            [], [], ["joern_slice_binary_not_found"], available=False
+        )
+    if not source_root or not os.path.isdir(source_root):
+        return _data_flow_slice_result(
+            [], [], ["source_root_missing_for_joern_slice"], available=False
+        )
+    cpg_path, cpg_uncertainties = _ensure_cpg(
+        source_root=source_root, joern_parse=joern_parse
+    )
+    if not cpg_path:
+        return _data_flow_slice_result(
+            [], [], cpg_uncertainties or ["joern_slice_cpg_build_failed"], available=False
+        )
+
+    output_prefix = ""
+    output_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="apr_joern_slice_", delete=False
+        ) as tmp:
+            output_prefix = tmp.name
+        output_path = output_prefix + ".json"
+        method_leaf = str(function_name or "").rsplit("::", 1)[-1]
+        # joern-slice applies these regexes to qualified values rather than
+        # consistently to the leaf/basename. Exact binding is enforced again
+        # against method, file and line range when consuming its graph.
+        method_filter = re.escape(method_leaf)
+        file_filter = _joern_slice_file_filter(source_root, source_path)
+        if not file_filter:
+            return _data_flow_slice_result(
+                [], [], ["source_path_missing_for_joern_slice"], available=False,
+                cpg_path=cpg_path,
+            )
+        depth = max(1, min(int(slice_depth or 8), 64))
+        cmd = [
+            joern_slice,
+            "data-flow",
+            "--slice-depth",
+            str(depth),
+            "--method-name-filter",
+            method_filter,
+            "--file-filter",
+            file_filter,
+            "--parallelism",
+            str(_joern_slice_parallelism()),
+            "--out",
+            output_prefix,
+            cpg_path,
+        ]
+        completed = _run_joern_command(
+            cmd, timeout=_joern_timeout(), cpg_path=cpg_path
+        )
+        if completed.returncode != 0:
+            return _data_flow_slice_result(
+                [],
+                [],
+                ["joern_slice_query_failed"],
+                available=False,
+                cpg_path=cpg_path,
+                file_filter=file_filter,
+                stderr_excerpt=clip_text(completed.stderr, 4000),
+            )
+        payload, output_status = _read_joern_slice_result(output_prefix, output_path)
+        if output_status == "missing":
+            command_output = "\n".join([
+                str(completed.stdout or ""),
+                str(completed.stderr or ""),
+            ]).lower()
+            if "empty slice" in command_output or "no file generated" in command_output:
+                return _data_flow_slice_result(
+                    [], [], [*list(cpg_uncertainties or []), "joern_slice_returned_no_nodes"],
+                    available=True,
+                    cpg_path=cpg_path,
+                    slice_depth=depth,
+                    file_filter=file_filter,
+                    stdout_excerpt=clip_text(completed.stdout, 1000),
+                    stderr_excerpt=clip_text(completed.stderr, 1000),
+                )
+            return _data_flow_slice_result(
+                [], [], ["joern_slice_result_missing"], available=False,
+                cpg_path=cpg_path,
+                file_filter=file_filter,
+                stdout_excerpt=clip_text(completed.stdout, 1000),
+                stderr_excerpt=clip_text(completed.stderr, 1000),
+            )
+        if output_status == "unreadable":
+            return _data_flow_slice_result(
+                [], [], ["joern_slice_result_unreadable"], available=False,
+                cpg_path=cpg_path,
+                file_filter=file_filter,
+            )
+        nodes = [item for item in payload.get("nodes") or [] if isinstance(item, dict)]
+        edges = [item for item in payload.get("edges") or [] if isinstance(item, dict)]
+        uncertainties = list(cpg_uncertainties or [])
+        if not nodes:
+            uncertainties.append("joern_slice_returned_no_nodes")
+        return _data_flow_slice_result(
+            nodes, edges, uncertainties, available=True, cpg_path=cpg_path,
+            slice_depth=depth, file_filter=file_filter,
+        )
+    except subprocess.TimeoutExpired:
+        return _data_flow_slice_result(
+            [], [], ["joern_slice_query_timeout"], available=False,
+            cpg_path=cpg_path,
+        )
+    except Exception as exc:
+        return _data_flow_slice_result(
+            [], [], [f"joern_slice_query_exception:{type(exc).__name__}"],
+            available=False, cpg_path=cpg_path,
+        )
+    finally:
+        cleanup_candidates = [output_prefix, output_path]
+        if output_prefix:
+            try:
+                prefix = Path(output_prefix)
+                cleanup_candidates.extend(
+                    str(path) for path in prefix.parent.glob(prefix.name + "*.json")
+                )
+            except OSError:
+                pass
+        for candidate in dict.fromkeys(cleanup_candidates):
+            if not candidate:
+                continue
+            try:
+                os.unlink(candidate)
+            except OSError:
+                pass
+
+
 def joern_cpg_tool_query(
     *,
     source_root: str,
@@ -279,6 +426,56 @@ def _run_joern_command(cmd: List[str], *, timeout: int, cpg_path: str) -> subpro
         _release_joern_lock(fd, lock_path)
 
 
+def _joern_slice_file_filter(source_root: str, source_path: str) -> str:
+    """Return the repository-relative filename stored in CPG ``parentFile``."""
+    root = os.path.realpath(str(source_root or ""))
+    raw_path = str(source_path or "").strip()
+    if not root or not raw_path:
+        return ""
+
+    if os.path.isabs(raw_path):
+        absolute_path = os.path.realpath(raw_path)
+    else:
+        absolute_path = os.path.realpath(os.path.join(root, raw_path))
+    try:
+        relative_path = os.path.relpath(absolute_path, root)
+    except ValueError:
+        relative_path = raw_path
+    normalized = os.path.normpath(relative_path).replace("\\", "/")
+    if normalized in {"", "."}:
+        return ""
+    if normalized == ".." or normalized.startswith("../"):
+        return os.path.normpath(raw_path).replace("\\", "/")
+    return normalized[2:] if normalized.startswith("./") else normalized
+
+
+def _read_joern_slice_result(output_prefix: str, output_path: str) -> tuple:
+    """Read the mode-suffixed Joern output without mislabelling an empty slice."""
+    candidates = [output_path, output_prefix]
+    parent = Path(output_prefix).parent
+    prefix_name = Path(output_prefix).name
+    try:
+        candidates.extend(str(path) for path in sorted(parent.glob(prefix_name + "*.json")))
+    except OSError:
+        pass
+
+    saw_nonempty_output = False
+    for candidate in dict.fromkeys(candidates):
+        try:
+            if not candidate or os.path.getsize(candidate) <= 0:
+                continue
+            saw_nonempty_output = True
+            with open(candidate, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except OSError:
+            continue
+        except (ValueError, TypeError):
+            continue
+        if isinstance(payload, dict):
+            return payload, "ok"
+    return None, "unreadable" if saw_nonempty_output else "missing"
+
+
 def _joern_lock_path(cpg_path: str) -> str:
     lock_dir = os.getenv("APR_JOERN_LOCK_DIR", "").strip()
     if not lock_dir:
@@ -414,6 +611,18 @@ def _joern_bin() -> str:
 def _joern_parse_bin() -> str:
     configured = os.getenv("APR_JOERN_PARSE_BIN", "").strip()
     return configured if configured and os.path.isfile(configured) else shutil.which(configured or "joern-parse") or ""
+
+
+def _joern_slice_bin() -> str:
+    configured = os.getenv("APR_JOERN_SLICE_BIN", "").strip()
+    return configured if configured and os.path.isfile(configured) else shutil.which(configured or "joern-slice") or ""
+
+
+def _joern_slice_parallelism() -> int:
+    try:
+        return max(1, min(int(os.getenv("APR_JOERN_SLICE_PARALLELISM", "2")), 32))
+    except (TypeError, ValueError):
+        return 2
 
 
 def _joern_timeout() -> int:
@@ -723,6 +932,41 @@ def _tool_query_result(
         "tool": tool,
         "results": results,
         "uncertainties": uncertainties,
+    }
+
+
+def _data_flow_slice_result(
+    nodes: List[Dict[str, Any]],
+    edges: List[Dict[str, Any]],
+    uncertainties: List[str],
+    *,
+    available: bool,
+    cpg_path: str = "",
+    slice_depth: int = 0,
+    file_filter: str = "",
+    stdout_excerpt: str = "",
+    stderr_excerpt: str = "",
+) -> Dict[str, Any]:
+    engine = {
+        **JOERN_ENGINE,
+        "query": "joern-slice:data-flow",
+        "available": available,
+    }
+    if cpg_path:
+        engine["cpg_path"] = cpg_path
+    if slice_depth:
+        engine["slice_depth"] = slice_depth
+    if file_filter:
+        engine["file_filter"] = file_filter
+    if stdout_excerpt:
+        engine["stdout_excerpt"] = stdout_excerpt
+    if stderr_excerpt:
+        engine["stderr_excerpt"] = stderr_excerpt
+    return {
+        "engine": engine,
+        "nodes": nodes,
+        "edges": edges,
+        "uncertainties": list(uncertainties or []),
     }
 
 

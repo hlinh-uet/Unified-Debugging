@@ -993,9 +993,8 @@ def _evaluate_fix_patch_candidate(
     if snapshot["status"] == "plausible":
         print(f"    [SUCCESS] Bản vá hợp lệ cho {bug_id} trong hàm '{qualified_name}'!")
         if _repair_route(repair_objective) == "correctness_repair":
-            # The controller validates the complete plan portfolio.  Persisting
-            # here would let a later plausible plan overwrite the candidate
-            # ultimately selected below.
+            # The controller persists the selected candidate after leaving the
+            # plan loop.  Remove only this temporary validation input here.
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
         else:
@@ -1041,7 +1040,7 @@ def _candidate_trace_record(candidate: Optional[dict], *, agent: str) -> dict:
 def _persist_selected_correctness_patch(
     *, bug_id: str, candidate: dict, primary_base: str
 ) -> str:
-    """Persist only the plausible candidate selected from the full portfolio."""
+    """Persist the first plausible correctness candidate selected by the controller."""
     if not is_plausible_status((candidate or {}).get("status")):
         return ""
     patched_source = str((candidate or {}).get("patched_file") or "")
@@ -1681,6 +1680,21 @@ def run_apr_pipeline(
                     repair_objective=repair_objective,
                 )
             if repair_route == "correctness_repair":
+                try:
+                    compilation_context = adapter.prepare_compilation_database(
+                        source_root=cpg_source_root,
+                        source_path=candidate_path,
+                        src_relpath=candidate_relpath,
+                    )
+                except Exception as exc:
+                    compilation_context = {
+                        "version": 1,
+                        "available": False,
+                        "database_path": "",
+                        "diagnostics": [
+                            f"sandbox_compilation_database_exception:{type(exc).__name__}"
+                        ],
+                    }
                 repair_context, repair_context_agent_artifact = run_correctness_repair_planning(
                     bug_id=bug_id,
                     attempt_index=llm_patch_attempt_index,
@@ -1697,6 +1711,7 @@ def run_apr_pipeline(
                     repair_objective=repair_objective,
                     output_contract=output_contract,
                     max_plans=3,
+                    compilation_context=compilation_context,
                 )
                 repair_plans = repair_context.get("plans") or []
                 if not repair_plans:
@@ -1822,12 +1837,10 @@ def run_apr_pipeline(
                         or candidate_quality_key(candidate_result) < candidate_quality_key(best_candidate)
                     ):
                         best_candidate = candidate_result
-                    # Correctness APR keeps the complete plausible portfolio;
-                    # later plans may satisfy the same tests with a smaller or
-                    # less regressive edit. Security repair retains its legacy
-                    # first-success behavior.
-                    if repair_route != "correctness_repair":
-                        break
+                    # A full validator pass is the terminal condition for this
+                    # target. Avoid additional LLM calls and full-suite runs for
+                    # the remaining plans.
+                    break
             if best_candidate is not None:
                 break
 

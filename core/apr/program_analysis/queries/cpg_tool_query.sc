@@ -31,7 +31,7 @@ import java.nio.file.{Files, Paths}
   val canonicalRegionSpans = parseRegionSpans(regionSpans)
   val resolvedRegionSpans = canonicalRegionSpans
   val rawResults = tool match {
-    case "get_target_behavior_analysis" => targetBehaviorAnalysis(sourceNorm, fn, functionSignature, fnStart, maxResults)
+    case "get_target_behavior_analysis" => targetBehaviorAnalysis(sourceNorm, fn, functionSignature, fnStart, resolvedRegionSpans, maxResults)
     case "get_callers" => callerResults(names, maxResults)
     case "get_callees" => calleeResults(names, sourceNorm, fn, functionSignature, fnStart, maxResults)
     case "get_symbol_usages" => symbolUsageResults(names, maxResults)
@@ -67,7 +67,10 @@ import java.nio.file.{Files, Paths}
   Files.write(Paths.get(outputPath), json.getBytes("UTF-8"))
 }
 
-def targetBehaviorAnalysis(sourcePath: String, functionName: String, functionSignature: String, functionStartLine: Int, limit: Int): List[String] = {
+def targetBehaviorAnalysis(
+  sourcePath: String, functionName: String, functionSignature: String,
+  functionStartLine: Int, spans: List[(String, Int, Int)], limit: Int
+): List[String] = {
   val methods = targetMethods(sourcePath, functionName, functionSignature, functionStartLine)
     .filter(m => functionStartLine <= 0 || line(m) == functionStartLine)
   if (methods.size != 1) {
@@ -75,6 +78,7 @@ def targetBehaviorAnalysis(sourcePath: String, functionName: String, functionSig
   }
   val m = methods.head
   val nonOperatorCalls = m.call.nameNot("<operator>.*").nameNot("<unknown>").l
+    .filter(call => spans.isEmpty || nodeInSpans(call, spans))
   val targetMethod = resultJson(
     "target_method",
     Option(m.name).getOrElse(""),
@@ -114,7 +118,9 @@ def targetBehaviorAnalysis(sourcePath: String, functionName: String, functionSig
       ""
     )
   }
-  val assignments = m.call.nameExact("<operator>.assignment").l.map { a =>
+  val slicedAssignments = m.call.nameExact("<operator>.assignment").l
+    .filter(assignment => spans.isEmpty || nodeInSpans(assignment, spans))
+  val assignments = slicedAssignments.map { a =>
     val symbols = a.argument.l.sortBy(_.argumentIndex).headOption
       .map(identifiersFor)
       .getOrElse(List[String]())
@@ -135,10 +141,12 @@ def targetBehaviorAnalysis(sourcePath: String, functionName: String, functionSig
       ""
     )
   }
-  val updates = List(
+  val slicedUpdates = List(
     "<operator>.postIncrement", "<operator>.preIncrement",
     "<operator>.postDecrement", "<operator>.preDecrement"
-  ).flatMap(name => m.call.nameExact(name).l).map { update =>
+  ).flatMap(name => m.call.nameExact(name).l)
+    .filter(update => spans.isEmpty || nodeInSpans(update, spans))
+  val updates = slicedUpdates.map { update =>
     val symbols = identifiersFor(update)
     resultJson(
       "target_update",
@@ -157,9 +165,39 @@ def targetBehaviorAnalysis(sourcePath: String, functionName: String, functionSig
       ""
     )
   }
-  // Emit the complete declared-variable inventory. Uses are represented on the
-  // target operations that consume them, so no arbitrary first-N use sample is needed.
-  val parameterVariables = m.parameter.l.map { parameter =>
+  val slicedReturns = m.ast.isReturn.l
+    .filter(ret => spans.isEmpty || nodeInSpans(ret, spans))
+  val returns = slicedReturns.map { ret =>
+    resultJson(
+      "target_return", Option(m.name).getOrElse(""), fileName(m),
+      line(ret), lineEnd(ret), Option(m.name).getOrElse(""), "", "",
+      Option(ret.code).getOrElse(""), List(), controlContext(ret),
+      semanticDataflowDeps(ret, m), Option(m.fullName).getOrElse(""),
+      Option(m.signature).getOrElse("")
+    )
+  }
+  val slicedControls = m.controlStructure.l.filter { control =>
+    spans.isEmpty || nodeInSpans(control, spans)
+  }
+  val controls = slicedControls.map { control =>
+    resultJson(
+      "target_control", Option(control.controlStructureType).getOrElse(""),
+      fileName(m), line(control), lineEnd(control), Option(m.name).getOrElse(""),
+      "", "", Option(control.code).getOrElse(""), List(), controlContext(control),
+      List(), Option(m.fullName).getOrElse(""), Option(m.signature).getOrElse("")
+    )
+  }
+  val sliceSymbols = (
+    nonOperatorCalls.flatMap(identifiersFor) ++
+    slicedAssignments.flatMap(identifiersFor) ++
+    slicedUpdates.flatMap(identifiersFor) ++
+    slicedReturns.flatMap(identifiersFor)
+  ).filter(_.nonEmpty).distinct.toSet
+  // Declarations are evidence only when their symbol participates in the
+  // retained target slice; compiler-generated and unrelated locals disappear.
+  val parameterVariables = m.parameter.l
+    .filter(parameter => sliceSymbols.contains(Option(parameter.name).getOrElse("")))
+    .map { parameter =>
     resultJson(
       "symbol_usage", Option(parameter.name).getOrElse(""), fileName(m),
       line(parameter), lineEnd(parameter), Option(m.name).getOrElse(""), "", "",
@@ -167,7 +205,9 @@ def targetBehaviorAnalysis(sourcePath: String, functionName: String, functionSig
       Option(m.fullName).getOrElse(""), Option(parameter.typeFullName).getOrElse("")
     )
   }
-  val localVariables = m.local.l.map { local =>
+  val localVariables = m.local.l
+    .filter(local => sliceSymbols.contains(Option(local.name).getOrElse("")))
+    .map { local =>
     resultJson(
       "symbol_usage", Option(local.name).getOrElse(""), fileName(m),
       line(local), lineEnd(local), Option(m.name).getOrElse(""), "", "",
@@ -197,32 +237,19 @@ def targetBehaviorAnalysis(sourcePath: String, functionName: String, functionSig
         Option(call.name).getOrElse(""),
         fileName(callee),
         line(callee),
-        lineEnd(callee),
+        // A callee contract is anchored to its declaration line.  Returning
+        // the full method range copied complete callees into initial evidence.
+        line(callee),
         Option(callee.name).getOrElse(""),
         callFullName,
         Option(call.name).getOrElse(""),
-        Option(callee.code).getOrElse(""),
-        List(),
-        List(),
         (
-          callee.parameter.l.map { parameter =>
-            contractDepJson(
-              "parameter", Option(parameter.name).getOrElse(""), line(parameter),
-              Option(parameter.code).getOrElse(""), List()
-            )
-          } ++
-          callee.ast.isReturn.l.map { ret =>
-            contractDepJson(
-              "callee_return", Option(call.name).getOrElse(""), line(ret), Option(ret.code).getOrElse(""), controlContext(ret)
-            )
-          } ++
-          callee.call.nameExact("<operator>.assignment").l.map { assignment =>
-            contractDepJson(
-              "callee_assignment", identifiersFor(assignment).headOption.getOrElse(""),
-              line(assignment), Option(assignment.code).getOrElse(""), controlContext(assignment)
-            )
-          }
-        ),
+          Option(callee.name).getOrElse("") + " " +
+          Option(callee.signature).getOrElse("")
+        ).trim,
+        List(),
+        List(),
+        calleeContractDeps(callee, Option(call.name).getOrElse("")),
         Option(callee.fullName).getOrElse(""),
         Option(callee.signature).getOrElse("")
       )
@@ -232,7 +259,78 @@ def targetBehaviorAnalysis(sourcePath: String, functionName: String, functionSig
   // source declarations/writes, and only uniquely resolved callee contracts.
   // Candidate overloads, siblings, callers, types, and deep dataflow are lazy
   // get_behavior_evidence queries bound to an LLM proof obligation.
-  (List(targetMethod) ++ targetCalls ++ assignments ++ updates ++ variables ++ exactCalleeContracts).distinct
+  (List(targetMethod) ++ targetCalls ++ assignments ++ updates ++ returns ++ controls ++ variables ++ exactCalleeContracts).distinct
+}
+
+def calleeContractDeps(
+  callee: io.shiftleft.codepropertygraph.generated.nodes.Method,
+  callName: String
+): List[String] = {
+  val returns = callee.ast.isReturn.l
+  val assignments = callee.call.nameExact("<operator>.assignment").l
+  val returnSymbols = returns.flatMap(identifiersFor).distinct
+  val externallyVisible = assignments.filter(isExternalStateWrite)
+  var demanded = (
+    returnSymbols ++ externallyVisible.flatMap(assignmentRhsSymbols)
+  ).filter(_.nonEmpty).toSet
+  var selected = externallyVisible.map(_.id).toSet
+  var changed = true
+  while (changed) {
+    changed = false
+    assignments.sortBy(line).reverse.foreach { assignment =>
+      val defined = assignmentDefinedSymbols(assignment).toSet
+      if (!selected.contains(assignment.id) && defined.intersect(demanded).nonEmpty) {
+        selected = selected + assignment.id
+        demanded = demanded ++ assignmentRhsSymbols(assignment)
+        changed = true
+      }
+    }
+  }
+  val relevantParameters = callee.parameter.l.filter { parameter =>
+    demanded.contains(Option(parameter.name).getOrElse(""))
+  }
+  (
+    relevantParameters.map { parameter =>
+      contractDepJson(
+        "parameter", Option(parameter.name).getOrElse(""), line(parameter),
+        Option(parameter.code).getOrElse(""), List()
+      )
+    } ++
+    returns.map { ret =>
+      contractDepJson(
+        "callee_return", callName, line(ret), Option(ret.code).getOrElse(""),
+        controlContext(ret)
+      )
+    } ++
+    assignments.filter(assignment => selected.contains(assignment.id)).map { assignment =>
+      contractDepJson(
+        "callee_assignment", assignmentDefinedSymbols(assignment).headOption.getOrElse(""),
+        line(assignment), Option(assignment.code).getOrElse(""), controlContext(assignment)
+      )
+    }
+  ).distinct.take(48)
+}
+
+def assignmentDefinedSymbols(
+  assignment: io.shiftleft.codepropertygraph.generated.nodes.Call
+): List[String] = {
+  assignment.argument.l.sortBy(_.argumentIndex).headOption
+    .map(identifiersFor).getOrElse(List[String]()).distinct
+}
+
+def assignmentRhsSymbols(
+  assignment: io.shiftleft.codepropertygraph.generated.nodes.Call
+): List[String] = {
+  assignment.argument.l.sortBy(_.argumentIndex).drop(1)
+    .flatMap(identifiersFor).distinct
+}
+
+def isExternalStateWrite(
+  assignment: io.shiftleft.codepropertygraph.generated.nodes.Call
+): Boolean = {
+  val lhs = assignment.argument.l.sortBy(_.argumentIndex).headOption
+    .map(node => Option(node.code).getOrElse("")).getOrElse("")
+  lhs.contains("->") || lhs.contains(".") || lhs.contains("[") || lhs.trim.startsWith("*")
 }
 
 def contractDepJson(
@@ -304,7 +402,7 @@ def callerResults(names: List[String], limit: Int): List[String] = {
           Option(c.code).getOrElse(""),
           args(c),
           controlContext(c),
-          List(),
+          callResultUsageDeps(c),
           Option(m.fullName).getOrElse(""),
           Option(m.signature).getOrElse("")
         )
@@ -368,19 +466,30 @@ def exactTargetCalleeResults(
 ): List[String] = {
   targetMethods(sourcePath, functionName, functionSignature, functionStartLine).flatMap { target =>
     target.call.nameNot("<operator>.*").nameNot("<unknown>").l
-      .filter(call => names.isEmpty || names.contains(Option(call.name).getOrElse("")))
+      .filter(call => names.isEmpty || names.exists(name => symbolMatches(Option(call.name).getOrElse(""), name)))
       .flatMap { call =>
         val callFullName = Option(call.methodFullName).getOrElse("")
-        val exact =
+        val callName = Option(call.name).getOrElse("")
+        val namedCandidates = cpg.method.l.filter { candidate =>
+          line(candidate) > 0 &&
+          !Set("", "<empty>", "<includes>").contains(fileName(candidate)) &&
+          (
+            symbolMatches(Option(candidate.name).getOrElse(""), callName) ||
+            symbolMatches(Option(candidate.fullName).getOrElse(""), callName)
+          )
+        }
+        val fullNameMatches =
           if (callFullName.nonEmpty && callFullName != "<unknownFullName>")
-            cpg.method.nameExact(Option(call.name).getOrElse("")).l.filter { candidate =>
-              line(candidate) > 0 &&
-              !Set("", "<empty>", "<includes>").contains(fileName(candidate)) &&
-              canonMethodIdentity(Option(candidate.fullName).getOrElse("")) == canonMethodIdentity(callFullName)
+            namedCandidates.filter { candidate =>
+              canonCallableIdentity(Option(candidate.fullName).getOrElse("")) ==
+                canonCallableIdentity(callFullName)
             }
           else List[io.shiftleft.codepropertygraph.generated.nodes.Method]()
-        if (exact.size != 1) List[String]()
-        else exact.map { callee =>
+        val exact =
+          if (fullNameMatches.size == 1) fullNameMatches
+          else if (namedCandidates.size == 1) namedCandidates
+          else List[io.shiftleft.codepropertygraph.generated.nodes.Method]()
+        val contracts = exact.map { callee =>
           resultJson(
             "callee_definition", Option(call.name).getOrElse(""), fileName(callee),
             line(callee), lineEnd(callee), Option(callee.name).getOrElse(""),
@@ -396,6 +505,39 @@ def exactTargetCalleeResults(
             Option(callee.fullName).getOrElse(""), Option(callee.signature).getOrElse("")
           )
         }
+        val candidates =
+          if (contracts.nonEmpty) List[String]()
+          else namedCandidates.sortBy(candidate => (fileName(candidate), line(candidate))).take(4).map { candidate =>
+            resultJson(
+              "callee_candidate", callName, fileName(candidate), line(candidate),
+              lineEnd(candidate), Option(candidate.name).getOrElse(""), callFullName,
+              callName, Option(candidate.code).getOrElse(""), List(), List(),
+              methodDeps(candidate).take(24), Option(candidate.fullName).getOrElse(""),
+              Option(candidate.signature).getOrElse("")
+            )
+          }
+        contracts ++ candidates
+      }
+  }.distinct.take(limit)
+}
+
+def targetCallArgumentResults(
+  names: List[String], sourcePath: String, functionName: String,
+  functionSignature: String, functionStartLine: Int, limit: Int
+): List[String] = {
+  targetMethods(sourcePath, functionName, functionSignature, functionStartLine).flatMap { target =>
+    target.call.nameNot("<operator>.*").nameNot("<unknown>").l
+      .filter(call => names.isEmpty || names.exists(name => symbolMatches(Option(call.name).getOrElse(""), name)))
+      .sortBy(line)
+      .take(limit)
+      .map { call =>
+        resultJson(
+          "call_argument_flow", Option(call.name).getOrElse(""), fileName(target),
+          line(call), lineEnd(call), Option(target.name).getOrElse(""),
+          Option(target.fullName).getOrElse(""), Option(call.name).getOrElse(""),
+          Option(call.code).getOrElse(""), args(call), controlContext(call),
+          argumentDeps(call, target).take(32), Option(call.methodFullName).getOrElse(""), ""
+        )
       }
   }.distinct.take(limit)
 }
@@ -476,7 +618,9 @@ def symbolUsageResults(names: List[String], limit: Int): List[String] = {
 
 def typeOrMacroResults(names: List[String], limit: Int): List[String] = {
   names.flatMap { name =>
-    val types = cpg.typeDecl.nameExact(name).l.take(limit).map { t =>
+    val types = cpg.typeDecl.l
+      .filter(t => symbolMatches(Option(t.name).getOrElse(""), name) || symbolMatches(Option(t.fullName).getOrElse(""), name))
+      .take(limit).map { t =>
       resultJson(
         "type_definition",
         name,
@@ -494,7 +638,35 @@ def typeOrMacroResults(names: List[String], limit: Int): List[String] = {
         ""
       )
     }
-    val methods = cpg.method.nameExact(name).l.take(limit).map { m =>
+    val members = cpg.member.l
+      .filter(member => symbolMatches(Option(member.name).getOrElse(""), name))
+      .filter(member => line(member) > 0)
+      .take(limit).map { member =>
+      val owner = member.astParent match {
+        case value: io.shiftleft.codepropertygraph.generated.nodes.TypeDecl => Some(value)
+        case _ => None
+      }
+      val ownerFullName = owner.map(value => Option(value.fullName).getOrElse("")).getOrElse("")
+      resultJson(
+        "type_definition",
+        name,
+        owner.map(fileName).getOrElse(fileName(member)),
+        line(member),
+        lineEnd(member),
+        Option(member.name).getOrElse(""),
+        "",
+        "",
+        Option(member.code).getOrElse(""),
+        List(),
+        List(),
+        List(),
+        List(ownerFullName, Option(member.name).getOrElse("")).filter(_.nonEmpty).mkString("::"),
+        Option(member.typeFullName).getOrElse("")
+      )
+    }
+    val methods = cpg.method.l
+      .filter(m => symbolMatches(Option(m.name).getOrElse(""), name) || symbolMatches(Option(m.fullName).getOrElse(""), name))
+      .take(limit).map { m =>
       resultJson(
         "method_definition",
         name,
@@ -512,7 +684,7 @@ def typeOrMacroResults(names: List[String], limit: Int): List[String] = {
         Option(m.signature).getOrElse("")
       )
     }
-    types ++ methods
+    types ++ members ++ methods
   }.take(limit)
 }
 
@@ -520,7 +692,6 @@ def controlDataResults(names: List[String], sourcePath: String, functionName: St
   targetMethods(sourcePath, functionName, functionSignature, functionStartLine).flatMap { m =>
     val symbols = if (names.nonEmpty) names else identifiersFor(m).take(24)
     val calls = m.call.l
-      .filter(c => spans.isEmpty || nodeInSpans(c, spans))
       .filter(c => intersects(identifiersFor(c), symbols) || symbols.contains(Option(c.name).getOrElse("")))
       .take(limit)
       .map { c =>
@@ -542,7 +713,6 @@ def controlDataResults(names: List[String], sourcePath: String, functionName: St
         )
       }
     val returns = m.ast.isReturn.l
-      .filter(r => spans.isEmpty || nodeInSpans(r, spans))
       .filter(r => intersects(identifiersFor(r), symbols))
       .take(limit)
       .map { r =>
@@ -570,7 +740,6 @@ def controlDataResults(names: List[String], sourcePath: String, functionName: St
 def variableBehaviorResults(names: List[String], sourcePath: String, functionName: String, functionSignature: String, functionStartLine: Int, spans: List[(String, Int, Int)], limit: Int): List[String] = {
   targetMethods(sourcePath, functionName, functionSignature, functionStartLine).flatMap { m =>
     val assignments = m.call.nameExact("<operator>.assignment").l
-      .filter(c => spans.isEmpty || nodeInSpans(c, spans))
       .flatMap { c =>
         val hits = identifiersFor(c).filter(names.contains).distinct
         hits.map { symbol =>
@@ -594,7 +763,6 @@ def variableBehaviorResults(names: List[String], sourcePath: String, functionNam
       }
     val usages = names.flatMap { symbol =>
       m.ast.isIdentifier.nameExact(symbol).l
-        .filter(i => spans.isEmpty || nodeInSpans(i, spans))
         .take(limit)
         .map { i =>
           resultJson(
@@ -617,6 +785,110 @@ def variableBehaviorResults(names: List[String], sourcePath: String, functionNam
     }
     (assignments ++ usages).distinct.take(limit)
   }.take(limit)
+}
+
+def projectValueUsageResults(
+  names: List[String], sourcePath: String, functionName: String,
+  functionSignature: String, functionStartLine: Int, limit: Int
+): List[String] = {
+  val targets = targetMethods(sourcePath, functionName, functionSignature, functionStartLine)
+  val targetFiles = targets.map(fileName).filter(_.nonEmpty).toSet
+  val targetOwners = targets.map(methodOwner).filter(_.nonEmpty).toSet
+  val requestedSymbols = names.filter(_.nonEmpty).distinct
+  val perSymbolLimit = math.max(1, math.ceil(limit.toDouble / requestedSymbols.size.max(1)).toInt)
+  requestedSymbols.flatMap { symbol =>
+    val identifiers = cpg.identifier.nameExact(symbol).l
+      .filter(identifier => line(identifier) > 0 && identifier.method != null)
+      .sortBy { identifier =>
+        val owner = methodOwner(identifier.method)
+        val file = fileName(identifier.method)
+        val locality =
+          if (targetOwners.contains(owner)) 0
+          else if (targetFiles.contains(file) || strictSourceMatch(file, sourcePath)) 1
+          else 2
+        (locality, file, line(identifier))
+      }
+      .take(perSymbolLimit)
+      .map { identifier =>
+        val owner = identifier.method
+        resultJson(
+          "symbol_usage", symbol, fileName(owner), line(identifier), lineEnd(identifier),
+          Option(owner.name).getOrElse(""), Option(owner.fullName).getOrElse(""), "",
+          Option(identifier.code).getOrElse(""), List(), controlContext(identifier),
+          reachingDefs(identifier, owner, List(symbol)).take(32),
+          Option(owner.fullName).getOrElse(""), Option(owner.signature).getOrElse("")
+        )
+      }
+    val fields = cpg.fieldIdentifier.l
+      .filter(field => symbolMatches(Option(field.canonicalName).getOrElse(""), symbol))
+      .filter(field => line(field) > 0 && field.method != null)
+      .sortBy { field =>
+        val owner = field.method
+        val ownerName = methodOwner(owner)
+        val file = fileName(owner)
+        val locality =
+          if (targetOwners.contains(ownerName)) 0
+          else if (targetFiles.contains(file) || strictSourceMatch(file, sourcePath)) 1
+          else 2
+        (locality, file, line(field))
+      }
+      .take(perSymbolLimit)
+      .map { field =>
+        val owner = field.method
+        resultJson(
+          "symbol_usage", symbol, fileName(owner), line(field), lineEnd(field),
+          Option(owner.name).getOrElse(""), Option(owner.fullName).getOrElse(""), "",
+          Option(field.code).getOrElse(""), List(), controlContext(field),
+          reachingDefs(field, owner, List(symbol)).take(32),
+          Option(owner.fullName).getOrElse(""), Option(owner.signature).getOrElse("")
+        )
+      }
+    val calls = cpg.call.l
+      .filter(call => line(call) > 0 && call.method != null && identifiersFor(call).contains(symbol))
+      .sortBy { call =>
+        val owner = methodOwner(call.method)
+        val file = fileName(call.method)
+        val locality =
+          if (targetOwners.contains(owner)) 0
+          else if (targetFiles.contains(file) || strictSourceMatch(file, sourcePath)) 1
+          else 2
+        (locality, file, line(call))
+      }
+      .take(perSymbolLimit)
+      .map { call =>
+        val owner = call.method
+        resultJson(
+          "control_data_dependency", symbol, fileName(owner), line(call), lineEnd(call),
+          Option(owner.name).getOrElse(""), Option(owner.fullName).getOrElse(""),
+          Option(call.name).getOrElse(""), Option(call.code).getOrElse(""), args(call),
+          controlContext(call), argumentDeps(call, owner).take(32),
+          Option(call.methodFullName).getOrElse(""), Option(owner.signature).getOrElse("")
+        )
+      }
+    (identifiers ++ fields ++ calls).distinct.take(perSymbolLimit)
+  }.distinct.take(limit)
+}
+
+def inferredTypeNames(
+  names: List[String], sourcePath: String, functionName: String,
+  functionSignature: String, functionStartLine: Int
+): List[String] = {
+  targetMethods(sourcePath, functionName, functionSignature, functionStartLine).flatMap { method =>
+    method.ast.isIdentifier.l
+      .filter(identifier => names.exists(name => symbolMatches(Option(identifier.name).getOrElse(""), name)))
+      .map(identifier => typeLeaf(Option(identifier.typeFullName).getOrElse("")))
+  }.filter(_.nonEmpty).distinct.take(24)
+}
+
+def methodOwner(method: io.shiftleft.codepropertygraph.generated.nodes.Method): String = {
+  val identity = canonCallableIdentity(Option(method.fullName).getOrElse(""))
+  identity.split("::").dropRight(1).mkString("::")
+}
+
+def typeLeaf(value: String): String = {
+  val noPointer = Option(value).getOrElse("")
+    .replace("*", "").replace("&", "").replace("const", "").trim
+  noPointer.split("::").lastOption.getOrElse(noPointer)
 }
 
 def targetRegionResults(names: List[String], sourcePath: String, functionName: String, functionSignature: String, functionStartLine: Int, spans: List[(String, Int, Int)], limit: Int): List[String] = {
@@ -708,21 +980,28 @@ def behaviorEvidence(relations: List[String], names: List[String], sourcePath: S
     else List[String]()
   val calleeNames = targetMethods(sourcePath, functionName, functionSignature, functionStartLine)
     .flatMap(_.call.name.l)
-    .filter(name => name.nonEmpty && (symbols.isEmpty || symbols.contains(name)))
+    .filter(name => name.nonEmpty && (symbols.isEmpty || symbols.exists(symbol => symbolMatches(name, symbol))))
     .distinct
     .take(24)
   val calleeEvidence =
     if (wants("CALLEE_CONTRACT", "CALL_ARGUMENT_MAPPING", "CALL_RESULT_CONTRACT", "ERROR_PROPAGATION"))
       if (calleeNames.nonEmpty)
-        exactTargetCalleeResults(calleeNames, sourcePath, functionName, functionSignature, functionStartLine, familyBudget)
+        (
+          exactTargetCalleeResults(calleeNames, sourcePath, functionName, functionSignature, functionStartLine, familyBudget) ++
+          targetCallArgumentResults(calleeNames, sourcePath, functionName, functionSignature, functionStartLine, familyBudget)
+        ).distinct.take(familyBudget * 2)
       else List[String]()
     else List[String]()
-  val dataEvidence =
-    if (wants("REACHING_DEFINITIONS", "VALUE_USES", "FIELD_READ_WRITE", "STATE_TRANSITIONS", "ALIAS_OR_REFERENCE_FLOW"))
+  val targetDataEvidence =
+    if (wants("REACHING_DEFINITIONS", "FIELD_READ_WRITE", "STATE_TRANSITIONS", "ALIAS_OR_REFERENCE_FLOW"))
       (
         controlDataResults(symbols, sourcePath, functionName, functionSignature, functionStartLine, spans, familyBudget) ++
         variableBehaviorResults(symbols, sourcePath, functionName, functionSignature, functionStartLine, spans, familyBudget)
       ).distinct.take(familyBudget * 2)
+    else List[String]()
+  val valueUseEvidence =
+    if (wants("VALUE_USES"))
+      projectValueUsageResults(symbols, sourcePath, functionName, functionSignature, functionStartLine, familyBudget)
     else List[String]()
   val controlEvidence =
     if (wants("CONTROLLING_PREDICATES", "BRANCH_REACHABILITY", "EARLY_RETURN_CONDITIONS", "ALTERNATE_PATH_STATE"))
@@ -730,7 +1009,10 @@ def behaviorEvidence(relations: List[String], names: List[String], sourcePath: S
     else List[String]()
   val typeEvidence =
     if (wants("TYPE_DEFINITION", "ENUM_OR_SENTINEL_VALUES", "OVERLOAD_SET", "TEMPLATE_SPECIALIZATION", "CONVERSION_OPERATORS"))
-      typeOrMacroResults(symbols, familyBudget)
+      typeOrMacroResults(
+        (symbols ++ inferredTypeNames(symbols, sourcePath, functionName, functionSignature, functionStartLine)).distinct,
+        familyBudget
+      )
     else List[String]()
   val siblingEvidence =
     if (wants("SIBLING_IMPLEMENTATION"))
@@ -738,7 +1020,7 @@ def behaviorEvidence(relations: List[String], names: List[String], sourcePath: S
     else if (wants("SIBLING_BRANCH", "SAME_TYPE_OPERATION", "PARALLEL_ERROR_HANDLING"))
       symbolUsageResults(symbols, familyBudget)
     else List[String]()
-  (callerEvidence ++ calleeEvidence ++ dataEvidence ++ controlEvidence ++ typeEvidence ++ siblingEvidence)
+  (callerEvidence ++ calleeEvidence ++ targetDataEvidence ++ valueUseEvidence ++ controlEvidence ++ typeEvidence ++ siblingEvidence)
     .distinct
     .take(limit)
 }
@@ -892,6 +1174,21 @@ def selectTargetMethods(sourcePath: String, functionName: String, functionSignat
   if (strict.nonEmpty) {
     return (strict, List[String]())
   }
+  val sourceBase = baseName(sourceNorm)
+  val basenameFiles = cpg.method.l
+    .map(m => normalizePath(fileName(m)))
+    .filter(file => baseName(file) == sourceBase)
+    .distinct
+  val basenameMatches = byName.filter(m => baseName(fileName(m)) == sourceBase)
+  if (basenameMatches.nonEmpty && basenameFiles.size == 1) {
+    return (basenameMatches, List("joern_source_match_used_unique_basename_fallback"))
+  }
+  if (basenameMatches.nonEmpty && basenameFiles.size > 1) {
+    return (
+      List[io.shiftleft.codepropertygraph.generated.nodes.Method](),
+      List("joern_source_match_ambiguous_basename:" + sourceBase)
+    )
+  }
   (List[io.shiftleft.codepropertygraph.generated.nodes.Method](), List("joern_strict_source_match_failed:" + sourceNorm))
 }
 
@@ -904,6 +1201,23 @@ def canonMethodIdentity(value: String): String = {
     .replaceAll("\\s+", "")
     .replaceAll("\\.", "::")
     .replaceAll("<[^<>]*>", "")
+}
+
+def canonCallableIdentity(value: String): String = {
+  canonMethodIdentity(value)
+    .replaceAll("(?<!:):(?!:).*$", "")
+    .replaceAll("\\([^()]*\\)$", "")
+}
+
+def canonSymbol(value: String): String = {
+  val callable = canonCallableIdentity(value)
+  callable.split("::").lastOption.getOrElse(callable).toLowerCase
+}
+
+def symbolMatches(left: String, right: String): Boolean = {
+  val a = canonSymbol(left)
+  val b = canonSymbol(right)
+  a.nonEmpty && b.nonEmpty && a == b
 }
 
 def parseRegionSpans(value: String): List[(String, Int, Int)] = {
@@ -1119,7 +1433,7 @@ def args(c: io.shiftleft.codepropertygraph.generated.nodes.Call): List[String] =
 }
 
 def identifiersFor(n: io.shiftleft.codepropertygraph.generated.nodes.AstNode): List[String] = {
-  n.ast.isIdentifier.name.l.distinct
+  (n.ast.isIdentifier.name.l ++ n.ast.isFieldIdentifier.canonicalName.l).distinct
 }
 
 def intersects(values: List[String], targets: List[String]): Boolean = {

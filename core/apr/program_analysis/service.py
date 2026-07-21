@@ -4,7 +4,11 @@ import os
 from collections import OrderedDict
 from typing import Any, Dict
 
-from .joern_provider import analyze_target_operations_joern, joern_cpg_tool_query
+from .joern_provider import (
+    analyze_target_operations_joern,
+    joern_cpg_tool_query,
+    joern_target_data_flow_slice,
+)
 from .models import (
     TargetAnalysisRequest,
     TargetOperationAnalysis,
@@ -134,8 +138,47 @@ def query_cpg_tool(
     return _cache_cpg_result(cache_key, fallback)
 
 
+def query_target_data_flow_slice(
+    *, source_root: str, source_path: str, function_name: str, slice_depth: int = 8
+) -> Dict[str, Any]:
+    """Return a cached, target-filtered joern-slice data-flow graph."""
+    cache_key = _cpg_tool_cache_key(
+        source_root=source_root,
+        source_path=source_path,
+        function_name=function_name,
+        tool="joern-slice:data-flow",
+        slice_depth=max(1, min(int(slice_depth or 8), 64)),
+    )
+    cached = _CPG_TOOL_CACHE.get(cache_key)
+    if cached is not None:
+        _CPG_TOOL_CACHE.move_to_end(cache_key)
+        result = copy.deepcopy(cached)
+        result.setdefault("engine", {})["cache_hit"] = True
+        return result
+    if not _joern_enabled():
+        return _cache_cpg_result(cache_key, {
+            "engine": {
+                "name": "joern_program_analysis",
+                "provider": "joern",
+                "query": "joern-slice:data-flow",
+                "available": False,
+                "disabled": True,
+            },
+            "nodes": [],
+            "edges": [],
+            "uncertainties": ["joern_disabled"],
+        })
+    result = joern_target_data_flow_slice(
+        source_root=source_root,
+        source_path=source_path,
+        function_name=function_name,
+        slice_depth=slice_depth,
+    )
+    return _cache_cpg_result(cache_key, result)
+
+
 def query_cpg_tools(requests: list) -> list:
-    """Coalesce compatible requests into fewer Joern CLI invocations."""
+    """Coalesce compatible requests without losing per-request result linking."""
     requests = list(requests or [])
     grouped = OrderedDict()
     for index, request in enumerate(requests):
@@ -143,6 +186,22 @@ def query_cpg_tools(requests: list) -> list:
             key: value for key, value in request.items()
             if key not in {"symbols", "query", "region_ids", "region_spans", "limit", "reason"}
         }
+        if request.get("tool") == "get_behavior_evidence":
+            group_payload["kinds"] = sorted(set(
+                _behavior_relation_family(value) for value in request.get("kinds") or []
+            ))
+            group_payload["behavior_subject_symbols"] = sorted(set(
+                _canonical_behavior_symbol(value) for value in request.get("symbols") or []
+                if _canonical_behavior_symbol(value)
+            ))
+            group_payload["behavior_subject_spans"] = sorted(set(
+                (
+                    int(span.get("start_line") or 0),
+                    int(span.get("end_line") or span.get("start_line") or 0),
+                )
+                for span in request.get("region_spans") or []
+                if isinstance(span, dict)
+            ))
         key = json.dumps(group_payload, sort_keys=True, ensure_ascii=True, default=str)
         grouped.setdefault(key, []).append((index, request))
     results = [None] * len(requests)
@@ -151,6 +210,9 @@ def query_cpg_tools(requests: list) -> list:
         merged["symbols"] = list(dict.fromkeys(
             str(value) for _, request in members for value in request.get("symbols") or []
         ))[:24]
+        merged["kinds"] = list(dict.fromkeys(
+            str(value) for _, request in members for value in request.get("kinds") or []
+        ))
         merged["query"] = " | ".join(dict.fromkeys(
             str(request.get("query") or "") for _, request in members if str(request.get("query") or "")
         ))
@@ -175,6 +237,42 @@ def query_cpg_tools(requests: list) -> list:
             })
             results[index] = result
     return results
+
+
+def _behavior_relation_family(relation: Any) -> str:
+    relation = str(relation or "").upper()
+    families = {
+        "caller": {
+            "CALLER_RESULT_USE", "CALLER_BRANCH_ON_RESULT", "RETURN_VALUE_FLOW",
+            "ERROR_PROPAGATION",
+        },
+        "callee": {
+            "CALLEE_CONTRACT", "CALL_ARGUMENT_MAPPING", "CALL_RESULT_CONTRACT",
+        },
+        "target_data": {
+            "REACHING_DEFINITIONS", "FIELD_READ_WRITE", "STATE_TRANSITIONS",
+            "ALIAS_OR_REFERENCE_FLOW",
+        },
+        "value_use": {"VALUE_USES"},
+        "control": {
+            "CONTROLLING_PREDICATES", "BRANCH_REACHABILITY", "EARLY_RETURN_CONDITIONS",
+            "ALTERNATE_PATH_STATE",
+        },
+        "type": {
+            "TYPE_DEFINITION", "ENUM_OR_SENTINEL_VALUES", "OVERLOAD_SET",
+            "TEMPLATE_SPECIALIZATION", "CONVERSION_OPERATORS",
+        },
+        "sibling": {
+            "SIBLING_BRANCH", "SIBLING_IMPLEMENTATION", "SAME_TYPE_OPERATION",
+            "PARALLEL_ERROR_HANDLING",
+        },
+    }
+    return next((name for name, values in families.items() if relation in values), relation)
+
+
+def _canonical_behavior_symbol(value: Any) -> str:
+    text = "".join(str(value or "").split()).replace("->", ".").lower()
+    return text
 
 
 def _cpg_tool_cache_key(**payload: Any) -> str:

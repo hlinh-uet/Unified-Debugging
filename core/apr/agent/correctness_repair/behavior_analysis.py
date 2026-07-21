@@ -1,23 +1,22 @@
-"""Compact source-bound Joern projection for one exact target method."""
+"""Bounded syntax anchors enriched only by compiler-resolved semantics."""
 
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
-from core.apr.program_analysis.service import query_cpg_tool
-
-from .evidence_broker import source_back_cpg_results
+from .clang_semantic_provider import resolve_target_semantics
 from .models import clip, stable_id
 
 
 FACT_GROUPS = {
     "target_method": "target_operations",
     "target_call": "target_operations",
-    "target_assignment": "target_operations",
-    "target_update": "target_operations",
+    "target_assignment": "program_slice",
+    "target_update": "program_slice",
+    "target_return": "program_slice",
+    "target_control": "program_slice",
     "symbol_usage": "variable_flows",
-    "callee_definition": "callee_contracts",
 }
 
 
@@ -26,117 +25,224 @@ def analyze_target_behavior(
     target_contract: Dict[str, Any],
     source_root: str,
     target_inventory: Dict[str, Any] = None,
-    limit: int = 256,
+    compilation_context: Dict[str, Any] = None,
+    limit: int = 31,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any], List[str]]:
-    """Collect call and source-variable contracts without an LLM query planner."""
-    result = query_cpg_tool(
+    """Collect bounded syntax facts and compiler semantic deltas without Joern."""
+    inventory = target_inventory or {}
+    entities = [
+        item for item in inventory.get("entities") or [] if isinstance(item, dict)
+    ]
+    structural_available = (
+        str(inventory.get("binding") or "") == "tree_sitter_query_target_syntax_ir"
+        and bool((inventory.get("syntax_ir") or {}).get("records"))
+    )
+    syntax_view = _budgeted_syntax_view(inventory, limit=limit)
+    syntax_view["available"] = structural_available
+    selected_entity_ids = set(syntax_view.get("entity_ids") or [])
+    semantic = resolve_target_semantics(
         source_root=source_root,
-        source_path=str(target_contract.get("source_path") or ""),
-        function_name=str(
-            target_contract.get("resolved_name") or target_contract.get("requested_name") or ""
-        ),
-        function_signature=str(target_contract.get("signature") or ""),
-        function_start_line=int((target_contract.get("source_range") or {}).get("start_line") or 1),
-        tool="get_target_behavior_analysis",
-        symbols=[],
-        kinds=[],
-        region_ids=[],
-        region_spans=[],
-        limit=max(1, min(int(limit), 256)),
-        allow_source_scan_fallback=False,
+        target_contract=target_contract,
+        syntax_ir=inventory.get("syntax_ir") or {},
+        compilation_context=compilation_context or {},
     )
-    facts, source_errors = source_back_cpg_results(
-        result.get("results") or [], source_root=source_root, query_round=1
+    indexed_facts = _source_local_inventory_facts(
+        target_contract=target_contract,
+        target_inventory=inventory,
+        call_resolutions=semantic.get("calls") or {},
+        variable_resolutions=semantic.get("variables") or {},
     )
-    facts = _select_initial_projection_facts(
-        facts, target_inventory=target_inventory or {}
-    )
-    joern_has_target_operations = any(
-        str(fact.get("kind") or "") in {
-            "target_method", "target_call", "target_assignment", "target_update"
-        }
-        for fact in facts
-    )
-    fallback_used = not facts or not joern_has_target_operations
-    if fallback_used:
-        facts = _unique_facts([
-            *facts,
-            *_source_local_inventory_facts(
-                target_contract=target_contract,
-                target_inventory=target_inventory or {},
-            ),
-        ])
+    indexed_facts = _unique_facts(indexed_facts)
+    view_facts = [
+        fact for fact in indexed_facts
+        if str(fact.get("subject_entity_id") or "") in selected_entity_ids
+    ]
     groups: Dict[str, List[str]] = {
         "target_operations": [],
+        "program_slice": [],
         "variable_flows": [],
         "callee_contracts": [],
     }
-    for fact in facts:
+    for fact in view_facts:
         group = FACT_GROUPS.get(str(fact.get("kind") or ""))
         if group:
             groups[group].append(str(fact["id"]))
-    engine = result.get("engine") if isinstance(result.get("engine"), dict) else {}
     diagnostics = [
-        *(result.get("uncertainties") or []),
-        *source_errors,
+        *(inventory.get("diagnostics") or []),
+        *(semantic.get("diagnostics") or []),
     ]
-    warnings = list(dict.fromkeys(
-        str(item) for item in (result.get("uncertainties") or []) if str(item)
-    ))
-    if not engine.get("available"):
-        warnings.append("joern_behavior_analysis_backend_unavailable")
-    if not joern_has_target_operations:
-        warnings.append("joern_behavior_analysis_target_operations_missing")
-    if fallback_used:
-        warnings.append("behavior_analysis_source_local_fallback")
-    truncation = next(
-        (str(item) for item in diagnostics if str(item).startswith("joern_target_behavior_truncated:")),
-        "",
-    )
-    if truncation:
-        warnings.append(truncation)
+    engine = {
+        "name": "tree_sitter_syntax_clang_semantics",
+        "provider": "tree_sitter+clang",
+        "available": structural_available,
+        "semantic_resolution": (
+            "compiler_frontend" if semantic.get("available") else "syntax_only_degraded"
+        ),
+    }
     analysis = _build_behavior_context(
         target_contract=target_contract,
-        target_inventory=target_inventory or {},
-        facts=facts,
+        target_inventory=inventory,
+        facts=view_facts,
     )
     analysis.update({
-        "provider": "joern+tree_sitter" if fallback_used else "joern",
+        "provider": "tree_sitter+clang",
+        "program_slice": syntax_view,
         "fact_groups": groups,
-        "fact_count": len(facts),
+        "fact_count": len(view_facts),
+        "indexed_fact_count": len(indexed_facts),
+        "evidence_index_policy": "full_target_index_budgeted_llm_view",
         "evidence_index_count": len(analysis.get("evidence_index") or {}),
-        "scope": "exact_target_call_and_source_variable_contract_projection",
-        "selection": (
-            "exact_target_ast_source_projection"
-            if fallback_used else "source_bound_compact_cpg_projection"
-        ),
+        "scope": "exact_target_observable_effect_program_slice",
+        "selection": "tree_sitter_query_syntax_plus_compiler_semantic_deltas",
+        "syntax_ir": inventory.get("syntax_ir") or {},
+        "semantic_context": semantic,
         "unresolved_relations": list(dict.fromkeys(str(item) for item in diagnostics if str(item))),
     })
     record = {
         "round": 1,
         "stage": "target_behavior_analysis",
         "status": (
-            "source_fallback" if fallback_used and facts and groups["target_operations"]
-            else "incomplete" if truncation
-            else "evidence_returned" if facts and groups["target_operations"]
+            "degraded" if view_facts and (
+                not structural_available or not semantic.get("available")
+            )
+            else "evidence_returned" if view_facts and groups["target_operations"]
             else "empty"
         ),
-        "tool": "get_target_behavior_analysis",
+        "tool": "tree_sitter_syntax_clang_semantics",
         "engine": engine,
-        "raw_result_count": int(result.get("raw_result_count") or len(result.get("results") or [])),
-        "source_backed_fact_count": len(facts),
-        "fallback_policy": "exact_target_ast_source" if fallback_used else "none",
+        "slice_engine": engine,
+        "semantic_engine": {
+            "provider": semantic.get("provider"),
+            "available": bool(semantic.get("available")),
+            "resolution": semantic.get("semantic_resolution"),
+            "command_status": semantic.get("command_status"),
+        },
+        "slice_raw_node_count": len(entities),
+        "slice_retained_node_count": len(selected_entity_ids),
+        "raw_result_count": len(entities),
+        "source_backed_fact_count": len(view_facts),
+        "indexed_source_backed_fact_count": len(indexed_facts),
+        "fallback_policy": "none",
+        "joern_invoked": False,
         "diagnostics": list(dict.fromkeys(str(item) for item in diagnostics if str(item))),
     }
-    return analysis, facts, record, list(dict.fromkeys(
-        str(item) for item in warnings if str(item)
+    return analysis, indexed_facts, record, list(dict.fromkeys(
+        str(item) for item in diagnostics if str(item)
     ))
 
 
-def _source_local_inventory_facts(
-    *, target_contract: Dict[str, Any], target_inventory: Dict[str, Any]
+def _budgeted_syntax_view(
+    target_inventory: Dict[str, Any], *, limit: int = 31
+) -> Dict[str, Any]:
+    """Build a bounded LLM view while retaining every record in SyntaxIR."""
+    records = [
+        item for item in ((target_inventory.get("syntax_ir") or {}).get("records") or [])
+        if isinstance(item, dict) and item.get("id")
+    ]
+    view_limit = max(8, min(int(limit or 31), 64))
+    buckets: Dict[str, List[Dict[str, Any]]] = {}
+    for record in records:
+        buckets.setdefault(str(record.get("kind") or "unknown"), []).append(record)
+    nonempty_kinds = sorted(buckets)
+    allocations = {kind: 0 for kind in nonempty_kinds}
+    # Give every syntax kind a chance to appear, then distribute the remaining
+    # budget proportionally. This avoids both kind deletion and source-prefix bias.
+    for kind in nonempty_kinds[:view_limit]:
+        allocations[kind] = 1
+    remaining = max(0, view_limit - sum(allocations.values()))
+    while remaining:
+        candidates = [
+            kind for kind in nonempty_kinds
+            if allocations[kind] < len(buckets[kind])
+        ]
+        if not candidates:
+            break
+        kind = max(
+            candidates,
+            key=lambda value: (
+                len(buckets[value]) / float(allocations[value] + 1),
+                len(buckets[value]),
+                value,
+            ),
+        )
+        allocations[kind] += 1
+        remaining -= 1
+    selected = []
+    for kind in nonempty_kinds:
+        selected.extend(_evenly_spaced_records(buckets[kind], allocations[kind]))
+    selected.sort(key=lambda item: (
+        int((item.get("source_range") or {}).get("start_byte") or 0),
+        str(item.get("kind") or ""),
+    ))
+    target_entity = next((
+        item for item in target_inventory.get("entities") or []
+        if isinstance(item, dict) and item.get("kind") == "target_function"
+    ), {})
+    entity_ids = [str(target_entity.get("id") or "")] if target_entity else []
+    entity_ids.extend(str(item["id"]) for item in selected)
+    source_lines = sorted({
+        int((item.get("source_range") or {}).get("start_line") or 0)
+        for item in selected
+        if int((item.get("source_range") or {}).get("start_line") or 0) > 0
+    })
+    symbols = sorted({
+        str(value) for item in selected
+        for value in item.get("declared_names") or [] if str(value)
+    })
+    calls = sorted({
+        str(item.get("callee_text") or "")
+        for item in selected if item.get("kind") == "call" and str(item.get("callee_text") or "")
+    })
+    return {
+        "provider": "tree_sitter_query",
+        "criterion": "budgeted_balanced_target_syntax_view",
+        "direction": "none_syntax_only",
+        "retrieval_scope": "full_target_syntax_ir",
+        "indexed_node_count": len(records) + (1 if target_entity else 0),
+        "view_node_count": len(entity_ids),
+        "excluded_from_view_count": max(0, len(records) - len(selected)),
+        "view_limit": view_limit,
+        "kind_counts": {kind: len(values) for kind, values in sorted(buckets.items())},
+        "view_kind_counts": {
+            kind: allocations[kind] for kind in nonempty_kinds if allocations[kind]
+        },
+        "retained_node_count": len(entity_ids),
+        "entity_ids": entity_ids,
+        "source_lines": source_lines,
+        "symbols": symbols,
+        "call_symbols": calls,
+        "dependency_edges": [],
+    }
+
+
+def _evenly_spaced_records(
+    records: List[Dict[str, Any]], count: int
 ) -> List[Dict[str, Any]]:
-    """Project exact Tree-sitter entities into source-backed fallback facts."""
+    """Sample a kind across the whole target instead of taking its prefix."""
+    if count <= 0 or not records:
+        return []
+    if count >= len(records):
+        return list(records)
+    indices = []
+    for index in range(count):
+        candidate = min(
+            len(records) - 1,
+            int((index + 0.5) * len(records) / count),
+        )
+        if candidate not in indices:
+            indices.append(candidate)
+    return [records[index] for index in indices]
+
+
+def _source_local_inventory_facts(
+    *,
+    target_contract: Dict[str, Any],
+    target_inventory: Dict[str, Any],
+    selected_entity_ids: Set[str] = None,
+    call_resolutions: Dict[str, Dict[str, Any]] = None,
+    variable_resolutions: Dict[str, Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Index source-backed facts, optionally restricting them to a view."""
     target_path = str(target_contract.get("source_path") or "")
     target_file = str(target_contract.get("source_file") or "")
     resolved_leaf = str(
@@ -147,34 +253,66 @@ def _source_local_inventory_facts(
         "call": "target_call",
         "assignment": "target_assignment",
         "update": "target_update",
+        "return": "target_return",
+        "branch": "target_control",
+        "conditional": "target_control",
         "declaration": "symbol_usage",
         "parameter": "symbol_usage",
     }
     facts: List[Dict[str, Any]] = []
+    call_resolutions = call_resolutions or {}
+    variable_resolutions = variable_resolutions or {}
     for entity in target_inventory.get("entities") or []:
         if not isinstance(entity, dict):
+            continue
+        if selected_entity_ids is not None and str(entity.get("id") or "") not in selected_entity_ids:
             continue
         entity_kind = str(entity.get("kind") or "")
         fact_kind = kind_map.get(entity_kind)
         if not fact_kind:
             continue
-        declared = [str(item) for item in entity.get("declared_symbols") or [] if str(item)]
         symbols = [str(item) for item in entity.get("symbols") or [] if str(item)]
-        fact_symbols = declared or symbols[:1] or ([resolved_leaf] if resolved_leaf else [])
+        fact_symbols = _entity_fact_symbols(
+            entity, fact_kind=fact_kind, target_leaf=resolved_leaf
+        )
         for symbol in fact_symbols or [""]:
+            resolution = call_resolutions.get(str(entity.get("id") or "")) or {}
+            variable_resolution = variable_resolutions.get(str(entity.get("id") or "")) or {}
             details = {
-                "provider": "tree_sitter_source_fallback",
+                "provider": "tree_sitter_target_inventory",
+                "subject_entity_id": entity.get("id"),
                 "node_type": entity.get("node_type"),
-                "arguments": [],
-                "control_context": [],
+                "write_target": entity.get("write_target") or "",
+                "value_expression": entity.get("value_expression") or "",
+                "arguments": list(entity.get("arguments") or []),
+                "control_context": list(entity.get("control_context") or []),
                 "dependency_paths": [],
                 "full_name": (
                     target_contract.get("resolved_name") if fact_kind == "target_method" else ""
                 ),
                 "signature": (
-                    target_contract.get("signature") if fact_kind == "target_method" else ""
+                    target_contract.get("signature") if fact_kind == "target_method"
+                    else entity.get("source_excerpt") if fact_kind == "symbol_usage"
+                    else ""
                 ),
+                "declared_type": entity.get("declared_type") or "",
+                "resolution_status": (
+                    resolution.get("status") or variable_resolution.get("status") or ""
+                ),
+                "semantic_symbol_id": (
+                    resolution.get("symbol_id") or variable_resolution.get("symbol_id") or ""
+                ),
+                "canonical_type": variable_resolution.get("canonical_type") or "",
             }
+            if fact_kind == "target_call":
+                details.update({
+                    "full_name": resolution.get("resolved_name") or "",
+                    "signature": resolution.get("signature") or "",
+                    "result_type": resolution.get("result_type") or "",
+                    "definition": resolution.get("definition") or {},
+                })
+            elif fact_kind == "symbol_usage" and variable_resolution:
+                details["declared_type"] = variable_resolution.get("type") or ""
             fact = {
                 "id": stable_id("ast_evidence", {
                     "entity_id": entity.get("id"),
@@ -182,6 +320,7 @@ def _source_local_inventory_facts(
                     "symbol": symbol,
                 }),
                 "kind": fact_kind,
+                "subject_entity_id": entity.get("id"),
                 "symbol": symbol,
                 "symbols": symbols,
                 "source_file": target_file,
@@ -190,47 +329,46 @@ def _source_local_inventory_facts(
                 "source_excerpt": str(entity.get("source_excerpt") or ""),
                 "semantic_summary": str(entity.get("source_excerpt") or ""),
                 "semantic_details": details,
+                "evidence_domain": "static_program_semantics",
+                "epistemic_status": "static_source_fact",
+                "runtime_observed": False,
+                "interpretation_limit": (
+                    "Syntax is Tree-sitter-backed; types and call identities are included only "
+                    "when compiler-resolved; nothing is runtime-observed."
+                ),
             }
             facts.append(fact)
     return _unique_facts(facts)
 
 
-def _select_initial_projection_facts(
-    facts: List[Dict[str, Any]], *, target_inventory: Dict[str, Any]
-) -> List[Dict[str, Any]]:
-    """Keep source-level declarations and compact call/write contracts only."""
-    declaration_entities = [
-        item for item in target_inventory.get("entities") or []
-        if isinstance(item, dict) and item.get("kind") in {"declaration", "parameter"}
-    ]
-    declared_symbols = {
-        str(symbol)
-        for entity in declaration_entities
-        for symbol in entity.get("declared_symbols") or []
-        if str(symbol)
-    }
-    always = {"target_method", "target_call", "callee_definition"}
-    selected = []
-    for fact in facts:
-        kind = str(fact.get("kind") or "")
-        if kind in always:
-            selected.append(fact)
-            continue
-        if kind in {"target_assignment", "target_update"}:
-            if str(fact.get("symbol") or "") in declared_symbols:
-                selected.append(fact)
-            continue
-        if kind != "symbol_usage":
-            continue
-        symbol = str(fact.get("symbol") or "")
-        fact_range = fact.get("source_range") or {}
-        if symbol and any(
-            symbol in set(str(value) for value in entity.get("declared_symbols") or [])
-            and _ranges_overlap(fact_range, entity.get("source_range") or {})
-            for entity in declaration_entities
-        ):
-            selected.append(fact)
-    return _unique_facts(selected)
+def _entity_fact_symbols(
+    entity: Dict[str, Any], *, fact_kind: str, target_leaf: str
+) -> List[str]:
+    """Choose labels without inferring def-use or data-flow from syntax tokens."""
+    if fact_kind == "target_method":
+        return [target_leaf] if target_leaf else [""]
+    if fact_kind == "target_call":
+        callee = _call_entity_symbol(entity)
+        return [callee] if callee else [""]
+    if fact_kind == "target_control":
+        return [""]
+    if fact_kind == "target_return":
+        return [target_leaf] if target_leaf else [""]
+    if fact_kind in {"target_assignment", "target_update"}:
+        write_target = str(entity.get("write_target") or "").strip()
+        if write_target:
+            return [write_target]
+        return [next((str(value) for value in entity.get("symbols") or [] if str(value)), "")]
+    declared = [str(value) for value in entity.get("declared_names") or [] if str(value)]
+    if not declared:
+        declared = [str(value) for value in entity.get("declared_symbols") or [] if str(value)]
+    return declared or [""]
+
+
+def _call_entity_symbol(entity: Dict[str, Any]) -> str:
+    if str(entity.get("callee_symbol") or ""):
+        return str(entity["callee_symbol"])
+    return next((str(value) for value in entity.get("symbols") or [] if str(value)), "")
 
 
 def _ranges_overlap(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
@@ -239,6 +377,23 @@ def _ranges_overlap(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
     right_start = _range_offset(right, "start_byte")
     right_end = _range_offset(right, "end_byte")
     return left_start >= 0 and right_start >= 0 and left_start < right_end and right_start < left_end
+
+
+def _source_ranges_overlap(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+    """Compare source anchors even when Joern lacks exact byte offsets."""
+    if _ranges_overlap(left, right):
+        return True
+    try:
+        left_start = int(left.get("start_line") or 0)
+        left_end = int(left.get("end_line") or left_start)
+        right_start = int(right.get("start_line") or 0)
+        right_end = int(right.get("end_line") or right_start)
+    except (TypeError, ValueError):
+        return False
+    return (
+        left_start > 0 and right_start > 0
+        and left_start <= right_end and right_start <= left_end
+    )
 
 
 def _range_offset(source_range: Dict[str, Any], key: str) -> int:
@@ -304,13 +459,22 @@ def merge_expansion_context(
                 "source_ref": source_ref,
                 "semantic_summary": clip(fact.get("semantic_summary"), 500),
                 "semantic_details": fact.get("semantic_details") or {},
+                "evidence_domain": fact.get("evidence_domain") or "static_program_semantics",
+                "epistemic_status": fact.get("epistemic_status") or "static_source_fact",
+                "runtime_observed": bool(fact.get("runtime_observed")),
+                "interpretation_limit": fact.get("interpretation_limit"),
             })
         expansions.append({
             "need_id": need_id,
             "hypothesis_id": need.get("hypothesis_id"),
             "relation": need.get("relation"),
             "question": need.get("question"),
+            "evidence_requirement": need.get("evidence_requirement"),
+            "answerable_by": need.get("answerable_by"),
             "status": need.get("status"),
+            "answer_scope": need.get("answer_scope"),
+            "answer_evidence_ids": need.get("answer_evidence_ids") or [],
+            "static_support_evidence_ids": need.get("static_support_evidence_ids") or [],
             "evidence": evidence,
         })
         existing_need_ids.add(need_id)
@@ -346,6 +510,25 @@ def _build_behavior_context(
     by_kind: Dict[str, List[Dict[str, Any]]] = {}
     for fact in facts:
         by_kind.setdefault(str(fact.get("kind") or ""), []).append(fact)
+
+    effects = []
+    for kind in (
+        "target_assignment", "target_update", "target_return", "target_control"
+    ):
+        for fact in by_kind.get(kind, []):
+            details = fact.get("semantic_details") or {}
+            effects.append({
+                "evidence_id": fact.get("id"),
+                "subject_entity_id": fact.get("subject_entity_id"),
+                "kind": kind,
+                "symbol": fact.get("symbol"),
+                "source_ref": ref(fact),
+                "expression": fact.get("semantic_summary"),
+                "control_context": details.get("control_context") or [],
+                "dataflow": details.get("dependency_paths") or [],
+                "epistemic_status": "static_possible_effect",
+                "runtime_observed": False,
+            })
 
     callee_contracts = []
     contract_ids_by_full_name: Dict[str, List[str]] = {}
@@ -392,6 +575,8 @@ def _build_behavior_context(
             "returns": returns,
             "assignments": assignments,
             "side_effect_analysis": "not_classified_beyond_source_backed_assignments",
+            "epistemic_status": "static_function_contract",
+            "runtime_observed": False,
         })
         full_name = str(details.get("full_name") or "")
         if full_name:
@@ -418,8 +603,11 @@ def _build_behavior_context(
         arguments = list(details.get("arguments") or [])
         subject_entity = next((
             entity for entity in call_entities
-            if symbol in set(str(value) for value in entity.get("symbols") or [])
-            and _ranges_overlap(entity.get("source_range") or {}, fact.get("source_range") or {})
+            if _ranges_overlap(entity.get("source_range") or {}, fact.get("source_range") or {})
+            and (
+                symbol in set(str(value) for value in entity.get("symbols") or [])
+                or symbol == str(entity.get("callee_symbol") or "")
+            )
         ), {})
         argument_mapping = []
         for contract_id in list(dict.fromkeys(contract_ids)):
@@ -436,13 +624,21 @@ def _build_behavior_context(
             "evidence_id": fact.get("id"),
             "symbol": symbol,
             "resolved_full_name": full_name,
+            "signature": details.get("signature") or "",
+            "result_type": details.get("result_type") or "",
+            "semantic_symbol_id": details.get("semantic_symbol_id") or "",
+            "definition": details.get("definition") or {},
             "callsite_ref": ref(fact),
             "arguments": arguments,
             "argument_mapping": argument_mapping,
             "control_context": details.get("control_context") or [],
             "dataflow": details.get("dependency_paths") or [],
             "callee_contract_ids": list(dict.fromkeys(contract_ids)),
-            "status": "resolved" if contract_ids else "callee_contract_unresolved",
+            "status": (
+                "resolved" if contract_ids or details.get("resolution_status") == "compiler_resolved"
+                else str(details.get("resolution_status") or "callee_contract_unresolved")
+            ),
+            "execution_status": "not_runtime_observed",
         })
 
     target_assignments = by_kind.get("target_assignment", [])
@@ -481,9 +677,19 @@ def _build_behavior_context(
             if _fact_mentions_symbol(item, symbol)
         ]
         type_name = next((
-            str((item.get("semantic_details") or {}).get("signature") or "")
+            str(
+                (item.get("semantic_details") or {}).get("canonical_type")
+                or (item.get("semantic_details") or {}).get("declared_type")
+                or (item.get("semantic_details") or {}).get("signature")
+                or ""
+            )
             for item in symbol_declaration_facts
-            if str((item.get("semantic_details") or {}).get("signature") or "")
+            if str(
+                (item.get("semantic_details") or {}).get("canonical_type")
+                or (item.get("semantic_details") or {}).get("declared_type")
+                or (item.get("semantic_details") or {}).get("signature")
+                or ""
+            )
         ), "")
         declaration_records = [
             {
@@ -513,6 +719,8 @@ def _build_behavior_context(
                     "source_ref": ref(item),
                     "expression": item.get("semantic_summary"),
                     "control_context": (item.get("semantic_details") or {}).get("control_context") or [],
+                    "epistemic_status": "static_assignment_site",
+                    "runtime_observed": False,
                 }
                 for item in writes
             ],
@@ -535,10 +743,29 @@ def _build_behavior_context(
 
     return {
         "version": 2,
+        "evidence_semantics": {
+            "domain": "static_program_semantics",
+            "runtime_observed": False,
+            "supports": [
+                "source definitions and contracts",
+                "possible control-flow and data-flow relations",
+                "source-level argument expressions and assignment sites",
+            ],
+            "does_not_support": [
+                "branch taken in the failing execution",
+                "concrete runtime value in the failing execution",
+                "callee return observed in the failing execution",
+            ],
+            "runtime_observation_sources": [
+                "failure_contract.failure_observation",
+                "tested_repairs validation outcomes",
+            ],
+        },
         "target": target,
         "source_regions": regions,
         "variables": variables,
         "calls": calls,
+        "effects": effects,
         "callee_contracts": callee_contracts,
         "expansions": [],
         "evidence_index": evidence_index,
@@ -612,4 +839,7 @@ def _evidence_index_entry(fact: Dict[str, Any], source_ref: Dict[str, Any]) -> D
         "kind": fact.get("kind"),
         "symbol": fact.get("symbol"),
         "source_ref": source_ref,
+        "evidence_domain": fact.get("evidence_domain") or "static_program_semantics",
+        "epistemic_status": fact.get("epistemic_status") or "static_source_fact",
+        "runtime_observed": bool(fact.get("runtime_observed")),
     }

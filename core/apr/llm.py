@@ -162,7 +162,18 @@ def _call_openai_compatible_chat(
             try:
                 result = response.json()
             except ValueError as exc:
-                print(f"[LLM] {provider_label} trả về JSON không hợp lệ: {exc}")
+                if attempt < retries:
+                    sleep_s = min(2 ** attempt, 15)
+                    print(
+                        f"[LLM] {provider_label} trả về JSON không hợp lệ "
+                        f"lần {attempt}/{retries}: {exc}. Thử lại sau {sleep_s}s..."
+                    )
+                    time.sleep(sleep_s)
+                    continue
+                print(
+                    f"[LLM] {provider_label} trả về JSON không hợp lệ "
+                    f"sau {retries} lần: {exc}"
+                )
                 return None
 
             choices = result.get("choices") or []
@@ -303,7 +314,18 @@ def _call_openai_compatible_chat_with_tools(
             try:
                 result = response.json()
             except ValueError as exc:
-                print(f"[LLM] {provider_label} trả về JSON không hợp lệ: {exc}")
+                if attempt < retries:
+                    sleep_s = min(2 ** attempt, 15)
+                    print(
+                        f"[LLM] {provider_label} trả về JSON không hợp lệ "
+                        f"lần {attempt}/{retries}: {exc}. Thử lại sau {sleep_s}s..."
+                    )
+                    time.sleep(sleep_s)
+                    continue
+                print(
+                    f"[LLM] {provider_label} trả về JSON không hợp lệ "
+                    f"sau {retries} lần: {exc}"
+                )
                 return None
 
             choices = result.get("choices") or []

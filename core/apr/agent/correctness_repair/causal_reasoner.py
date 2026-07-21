@@ -8,7 +8,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from core.apr.artifacts import write_llm_step_artifact
 from core.apr.llm import call_llm
 
-from .semantic_queries import BEHAVIOR_RELATIONS, normalize_information_needs
+from .semantic_queries import (
+    BEHAVIOR_RELATIONS,
+    normalize_information_needs,
+)
 from .models import clip, parse_json_object_with_recovery, unique_dicts
 
 
@@ -45,7 +48,10 @@ def diagnose(
     )
     if parse_error or not response:
         return [], [], artifact, parse_error or "causal_diagnosis_no_response"
-    hypotheses, error = _normalize_hypotheses(parsed.get("hypotheses"))
+    hypotheses, error = _normalize_hypotheses(
+        parsed.get("hypotheses"),
+        evidence=_planning_evidence_catalog(state),
+    )
     if error:
         return [], [], artifact, error
     raw_needs = parsed.get("information_needs") or []
@@ -97,7 +103,10 @@ def adjudicate_and_plan(
     if parse_error or not response:
         error = parse_error or "hypothesis_adjudication_no_response"
         return [], [_validation_fallback_plan(state, response, error)], artifact, error
-    hypotheses, error = _normalize_hypotheses(parsed.get("hypotheses"))
+    hypotheses, error = _normalize_hypotheses(
+        parsed.get("hypotheses"),
+        evidence=_planning_evidence_catalog(state),
+    )
     if error:
         return [], [_validation_fallback_plan(state, response, error)], artifact, error
     plans, error = _materialize_plans(
@@ -159,7 +168,16 @@ def _validation_fallback_plan(
 
 def _planning_evidence_catalog(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Accept every mechanically source-backed ID exposed in the capsule."""
-    facts = [dict(item) for item in state.get("evidence_facts") or [] if isinstance(item, dict)]
+    facts = [
+        {
+            **dict(item),
+            "evidence_domain": item.get("evidence_domain") or "static_program_semantics",
+            "epistemic_status": item.get("epistemic_status") or "static_source_fact",
+            "runtime_observed": bool(item.get("runtime_observed")),
+        }
+        for item in state.get("evidence_facts") or []
+        if isinstance(item, dict)
+    ]
     by_id = {str(item.get("id")): item for item in facts if item.get("id")}
     context = (state.get("behavior_state") or {}).get("context") or {}
     aliases: List[Dict[str, Any]] = []
@@ -193,6 +211,9 @@ def _planning_evidence_catalog(state: Dict[str, Any]) -> List[Dict[str, Any]]:
             "source_excerpt": entity.get("source_excerpt"),
             "semantic_summary": "source-backed target AST entity",
             "semantic_details": {"node_type": entity.get("node_type")},
+            "evidence_domain": "static_program_semantics",
+            "epistemic_status": "static_source_fact",
+            "runtime_observed": False,
         })
     return unique_dicts([*facts, *aliases])
 
@@ -203,22 +224,47 @@ def _diagnosis_prompt(state: Dict[str, Any]) -> str:
     return """CAUSAL DIAGNOSIS
 
 The fault-localized target is exact. The initial Behavior Context is deliberately narrow: exact target
-source, source-level variable contracts, target call contracts, immediate call-result use, and any
-uniquely resolved callee contracts from Joern. When Joern is unavailable or empty, use the exact
+source plus only variable definitions, effects, target calls, and exact callee contracts retained by
+the target's backward REACHING_DEF slice. Callee contracts contain relevant parameters, guarded
+returns, external writes, and reaching definitions rather than full method bodies. When Joern is unavailable or empty, use the exact
 Tree-sitter target entities as source-backed evidence. Compiler-generated variables and eager overload, sibling,
-caller, type, and deep-dataflow expansions are excluded. Cite the evidence/entity IDs attached to calls,
-variables, contracts, and any follow-up expansions. Trace observable effects through definitions, writes,
+caller, unrelated callee/local, type, and deep-dataflow expansions are excluded. Cite the evidence/entity IDs attached to calls,
+variables, contracts, and any follow-up expansions. Trace possible source-level effects through definitions, writes,
 result use, overwrite/order, control, alias, and callee effects visible in TARGET. Return two to four distinct causal
 hypotheses whenever the evidence exposes more than one effect path. Include a lower-confidence
 counter-hypothesis on a different effect path instead of collapsing immediately to one edit; never
 create syntactic variants of one mechanism or fabricate supporting evidence.
+
+Treat FAILURE CONTRACT as the oracle, using this evidence order:
+1. proof_obligation and a high-confidence failing_assertion selected from the runner-reported source line;
+2. failure_observation, which is observed runner output and is not automatically an expected/actual source operand;
+3. test_dependency_slice, which explains local test setup and data dependencies but is not runtime proof;
+4. test_source_excerpt only as a fallback.
+For a medium-confidence only-assertion selection, state that uncertainty. If proof_obligation is
+resolve_assertion_oracle, do not choose one candidate assertion or invent expected behavior. For a signal
+without a source location, do not infer a crash site from source order; only the signal itself is observed.
+Every predicted_failure_path must connect target behavior to the explicit proof_obligation.
+
+All Joern, CPG, Tree-sitter, reaching-definition, control-flow, call-graph, and callee-contract
+retrieval is STATIC PROGRAM SEMANTICS. It can establish that a definition, branch, return, write,
+or data-flow path exists and may execute under a condition. It does not establish that the branch
+was taken, that a callee returned a particular value, or that a variable held a concrete value in
+the failing execution. Only failure_observation and actual validation/test outcomes are runtime
+observations. Use conditional language for static paths. A runtime-specific claim supported only by
+static evidence must remain a low/medium-confidence hypothesis with the runtime fact listed in
+missing_facts.
+
 A hypothesis with unresolved critical facts must not claim high confidence. TESTED REPAIRS are negative
 or positive causal evidence: when a faithfully attempted mechanism leaves the same failure and observable
 output unchanged, explore a different causal path unless new evidence contradicts that result.
-Do not propose a patch yet. An unresolved callee is not a contract: if a
+Do not propose a patch yet. information_needs are handled only by static CPG/source retrieval.
+Do not request exact values, executed branches, or observed return values for the failing run through
+information_needs; keep those as missing_facts requiring runtime instrumentation. An unresolved callee is not a contract: if a
 critical proof obligation needs its overload, sibling usage, caller, type/constant definition, or deep
-dataflow, request that additional semantic query bound to an entity
-from TARGET INVENTORY. Otherwise return an empty information_needs array.
+dataflow, request that additional semantic query bound to the closest visible source entity.
+A declaration containing a call or a target-wide anchor is acceptable when no more specific visible
+entity is available; the deterministic query normalizer will rebind it only when there is one unique
+source-backed match. Never fabricate an entity ID. Otherwise return an empty information_needs array.
 
 Allowed relation names:
 """ + relations + """
@@ -229,7 +275,8 @@ Return exactly:
   "hypotheses": [{
     "id": "h1", "mechanism": "...", "predicted_failure_path": "...",
     "supporting_evidence_ids": ["..."], "contradicting_evidence_ids": [],
-    "missing_facts": ["..."], "confidence": "low|medium|high"
+    "missing_facts": ["..."], "confidence": "low|medium|high",
+    "epistemic_status": "static_path_hypothesis|runtime_observed|mixed|uncertain"
   }],
   "information_needs": [{
     "id": "need_h1_2", "hypothesis_id": "h1", "subject_entity_id": "entity:...",
@@ -253,6 +300,11 @@ Produce at most {max_plans} minimal plans, one per distinct viable causal mechan
 slots on syntactic variants of the same mechanism. Rank untested mechanisms before a mechanism whose
 faithful prior patch left the same failure unchanged, unless new cited evidence reverses that conclusion.
 Do not invent APIs, types, macros, fields, or constants absent from the target/evidence.
+Each supported plan must say how its target-local edit satisfies the FAILURE CONTRACT proof_obligation.
+Do not convert an uncertain assertion candidate or crash candidate site into an observed fact.
+Static source evidence may justify a possible mechanism or preservation condition, but it cannot prove
+that a value, return, or branch occurred in the failing execution. Plans relying on such an unobserved
+runtime link must retain that uncertainty in risk/confidence.
 
 All plans must use target_unit_id exactly "{target_id}". A structured edit describes intent and an exact
 source anchor copied from TARGET; it is advisory to PatchSynthesizer, not a hard-coded patch template.
@@ -261,7 +313,8 @@ Return exactly:
   "hypotheses": [{{
     "id": "h1", "mechanism": "...", "predicted_failure_path": "...",
     "supporting_evidence_ids": ["..."], "contradicting_evidence_ids": [],
-    "missing_facts": [], "confidence": "low|medium|high", "status": "supported|rejected|uncertain"
+    "missing_facts": [], "confidence": "low|medium|high", "status": "supported|rejected|uncertain",
+    "epistemic_status": "static_path_hypothesis|runtime_observed|mixed|uncertain"
   }}],
   "plans": [{{
     "id": "plan_1", "hypothesis_id": "h1", "target_unit_id": "{target_id}",
@@ -328,6 +381,8 @@ def _compact_tested_repairs(state: Dict[str, Any]) -> List[Dict[str, Any]]:
         outcome = raw.get("outcome") if isinstance(raw.get("outcome"), dict) else raw
         item = {
             "kind": raw.get("kind") or "validation_outcome",
+            "evidence_domain": "runtime_validation_observation",
+            "runtime_observed": True,
             "round": raw.get("round"),
             "hypothesis_id": raw.get("hypothesis_id"),
             "hypothesis": clip(raw.get("hypothesis"), 900),
@@ -359,6 +414,7 @@ def _compact_prior_hypotheses(values: Any) -> List[Dict[str, Any]]:
             "supporting_evidence_ids": (item.get("supporting_evidence_ids") or [])[:16],
             "confidence": item.get("confidence"),
             "status": item.get("status"),
+            "epistemic_status": item.get("epistemic_status"),
         }
         for item in values[:4]
         if isinstance(item, dict)
@@ -413,7 +469,7 @@ def _prompt_inventory(
 def _compact_behavior_context(context: Dict[str, Any]) -> Dict[str, Any]:
     """Remove audit indexes and repeated control text from the LLM-facing capsule."""
     variables = []
-    for item in context.get("variables") or []:
+    for item in list(context.get("variables") or [])[:12]:
         if not isinstance(item, dict):
             continue
         variables.append({
@@ -439,8 +495,10 @@ def _compact_behavior_context(context: Dict[str, Any]) -> Dict[str, Any]:
                 {
                     "evidence_id": value.get("evidence_id"),
                     "expression": clip(value.get("expression"), 500),
+                    "epistemic_status": value.get("epistemic_status") or "static_assignment_site",
+                    "runtime_observed": bool(value.get("runtime_observed")),
                 }
-                for value in item.get("writes") or []
+                for value in list(item.get("writes") or [])[:4]
                 if isinstance(value, dict)
             ],
             "call_uses": [
@@ -448,14 +506,14 @@ def _compact_behavior_context(context: Dict[str, Any]) -> Dict[str, Any]:
                     "evidence_id": value.get("evidence_id"),
                     "call": clip(value.get("call"), 500),
                 }
-                for value in item.get("call_uses") or []
+                for value in list(item.get("call_uses") or [])[:4]
                 if isinstance(value, dict)
             ],
-            "related_source_symbols": item.get("related_source_symbols") or [],
+            "related_source_symbols": list(item.get("related_source_symbols") or [])[:8],
             "status": item.get("status"),
         })
     calls = []
-    for item in context.get("calls") or []:
+    for item in list(context.get("calls") or [])[:8]:
         if not isinstance(item, dict):
             continue
         calls.append({
@@ -464,14 +522,19 @@ def _compact_behavior_context(context: Dict[str, Any]) -> Dict[str, Any]:
             "evidence_id": item.get("evidence_id"),
             "symbol": item.get("symbol"),
             "resolved_full_name": item.get("resolved_full_name"),
+            "signature": item.get("signature"),
+            "result_type": item.get("result_type"),
+            "semantic_symbol_id": item.get("semantic_symbol_id"),
+            "definition": item.get("definition") or {},
             "arguments": item.get("arguments") or [],
             "argument_mapping": (item.get("argument_mapping") or [])[:16],
             "dataflow": _compact_dependencies(item.get("dataflow")),
             "callee_contract_ids": item.get("callee_contract_ids") or [],
             "status": item.get("status"),
+            "execution_status": item.get("execution_status") or "not_runtime_observed",
         })
     contracts = []
-    for item in context.get("callee_contracts") or []:
+    for item in list(context.get("callee_contracts") or [])[:5]:
         if not isinstance(item, dict):
             continue
         contracts.append({
@@ -493,6 +556,8 @@ def _compact_behavior_context(context: Dict[str, Any]) -> Dict[str, Any]:
                 if isinstance(value, dict)
             ],
             "side_effect_analysis": item.get("side_effect_analysis"),
+            "epistemic_status": item.get("epistemic_status") or "static_function_contract",
+            "runtime_observed": bool(item.get("runtime_observed")),
         })
     retained_region_ids = set()
     for expansion in context.get("expansions") or []:
@@ -502,7 +567,26 @@ def _compact_behavior_context(context: Dict[str, Any]) -> Dict[str, Any]:
                 retained_region_ids.add(str(ref["region_id"]))
     return {
         "version": context.get("version"),
+        "evidence_semantics": context.get("evidence_semantics") or {
+            "domain": "static_program_semantics",
+            "runtime_observed": False,
+            "does_not_support": [
+                "executed branch",
+                "concrete failing-run value",
+                "observed callee return",
+            ],
+        },
         "target": context.get("target") or {},
+        "program_slice": {
+            key: (context.get("program_slice") or {}).get(key)
+            for key in (
+                "provider", "criterion", "direction", "retained_node_count",
+                "retrieval_scope", "indexed_node_count", "view_node_count",
+                "excluded_from_view_count", "view_limit", "view_kind_counts",
+                "source_lines", "symbols", "call_symbols",
+            )
+            if (context.get("program_slice") or {}).get(key) not in (None, [], {})
+        },
         "source_regions": [
             {**item, "source": clip(item.get("source"), 1600)}
             for item in context.get("source_regions") or []
@@ -510,6 +594,23 @@ def _compact_behavior_context(context: Dict[str, Any]) -> Dict[str, Any]:
         ],
         "variables": variables,
         "calls": calls,
+        "effects": [
+            {
+                "evidence_id": item.get("evidence_id"),
+                "subject_entity_id": item.get("subject_entity_id"),
+                "kind": item.get("kind"),
+                "symbol": item.get("symbol"),
+                "expression": clip(item.get("expression"), 500),
+                "dataflow": _compact_dependencies(item.get("dataflow")),
+                "epistemic_status": item.get("epistemic_status") or "static_possible_effect",
+                "runtime_observed": bool(item.get("runtime_observed")),
+            }
+            for item in list(context.get("effects") or [])[:16]
+            if isinstance(item, dict)
+            and item.get("kind") in {
+                "target_assignment", "target_update", "target_return", "target_control"
+            }
+        ],
         "callee_contracts": contracts,
         "expansions": context.get("expansions") or [],
         "unresolved_relations": context.get("unresolved_relations") or [],
@@ -535,9 +636,16 @@ def _compact_dependencies(values: Any) -> List[Dict[str, Any]]:
     return out
 
 
-def _normalize_hypotheses(value: Any) -> Tuple[List[Dict[str, Any]], str]:
+def _normalize_hypotheses(
+    value: Any, *, evidence: Optional[List[Dict[str, Any]]] = None
+) -> Tuple[List[Dict[str, Any]], str]:
     if not isinstance(value, list) or not value:
         return [], "hypotheses_missing"
+    evidence_by_id = {
+        str(item.get("id")): item
+        for item in evidence or []
+        if isinstance(item, dict) and item.get("id")
+    }
     out = []
     for raw in value[:4]:
         if not isinstance(raw, dict):
@@ -546,15 +654,46 @@ def _normalize_hypotheses(value: Any) -> Tuple[List[Dict[str, Any]], str]:
         mechanism = str(raw.get("mechanism") or "").strip()
         if not hypothesis_id or not mechanism:
             return [], "hypothesis_contract_incomplete"
+        supporting_ids = _strings(raw.get("supporting_evidence_ids"), 16)
+        supporting_domains = list(dict.fromkeys(
+            str((evidence_by_id.get(evidence_id) or {}).get("evidence_domain") or "")
+            for evidence_id in supporting_ids
+            if evidence_id in evidence_by_id
+        ))
+        runtime_support = any(
+            bool((evidence_by_id.get(evidence_id) or {}).get("runtime_observed"))
+            for evidence_id in supporting_ids
+        )
+        static_support_only = bool(supporting_ids) and not runtime_support
+        confidence = str(raw.get("confidence") or "low").lower()
+        if confidence not in {"low", "medium", "high"}:
+            confidence = "low"
+        epistemic_status = str(raw.get("epistemic_status") or "uncertain")
+        confidence_adjustment = ""
+        if static_support_only:
+            epistemic_status = "static_path_hypothesis"
+            if confidence == "high":
+                confidence = "medium"
+                confidence_adjustment = "high_downgraded_static_support_only"
+        elif not runtime_support:
+            if epistemic_status in {"runtime_observed", "mixed"}:
+                epistemic_status = "uncertain"
+            if confidence == "high":
+                confidence = "medium"
+                confidence_adjustment = "high_downgraded_no_runtime_evidence"
         out.append({
             "id": hypothesis_id,
             "mechanism": clip(mechanism, 900),
             "predicted_failure_path": clip(raw.get("predicted_failure_path"), 900),
-            "supporting_evidence_ids": _strings(raw.get("supporting_evidence_ids"), 16),
+            "supporting_evidence_ids": supporting_ids,
             "contradicting_evidence_ids": _strings(raw.get("contradicting_evidence_ids"), 16),
             "missing_facts": _strings(raw.get("missing_facts"), 8),
-            "confidence": str(raw.get("confidence") or "low"),
+            "confidence": confidence,
             "status": str(raw.get("status") or "candidate"),
+            "epistemic_status": epistemic_status,
+            "supporting_evidence_domains": supporting_domains,
+            "runtime_support_present": runtime_support,
+            "confidence_adjustment": confidence_adjustment,
         })
     return unique_dicts(out), ""
 

@@ -1,4 +1,4 @@
-"""Data contracts for target-anchored CPG behavior analysis repair."""
+"""Data contracts for target-anchored compact behavior analysis repair."""
 
 from __future__ import annotations
 
@@ -7,7 +7,10 @@ import json
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
-STATE_VERSION = 5
+STATE_VERSION = 11
+
+
+ARCHITECTURE = "target_anchored_syntax_semantic_behavior_analysis_apr"
 
 
 def new_repair_state(
@@ -18,7 +21,7 @@ def new_repair_state(
 ) -> Dict[str, Any]:
     state = {
         "state_version": STATE_VERSION,
-        "architecture": "target_anchored_cpg_behavior_analysis_apr",
+        "architecture": ARCHITECTURE,
         "status": "target_inventory_ready",
         "target_contract": target_contract,
         "failure_contract": failure_contract,

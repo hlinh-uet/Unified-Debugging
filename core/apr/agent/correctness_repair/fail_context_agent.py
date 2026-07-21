@@ -10,7 +10,7 @@ from data_loaders.base_loader import BugRecord
 from core.apr.artifacts import write_fail_context_artifact
 from core.apr.common import node_text, parse_tree, parser_diagnostics, source_language_from_path, walk_nodes
 
-from .failure_contract import build_failure_contract
+from .failure_contract import analyze_test_failure_source, build_failure_contract
 from .models import clip
 
 
@@ -47,26 +47,37 @@ def build_correctness_fail_context(bug: Optional[BugRecord]) -> dict:
         if not _is_repair_failure(record):
             continue
         test_id = str(record.get("test_id") or "").strip()
+        failure_log = clip(record.get("fail_reason"), 5000)
         source_match, match_error = _find_test_definition(test_id, test_files)
         if match_error:
             gaps.append(f"{test_id}:{match_error}")
         covered = {
             str(item) for item in (record.get("covered_functions") or record.get("covered_methods") or [])
         }
+        focused = analyze_test_failure_source(
+            source=str(source_match.get("source") or ""),
+            source_path=str(source_match.get("source_path") or ""),
+            source_range=source_match.get("source_range") or {},
+            failure_log=failure_log,
+            language=str(source_match.get("language") or ""),
+        )
         tests.append({
             "test_id": test_id,
             "test_source_path": source_match.get("source_path", ""),
             "test_source_range": source_match.get("source_range", {}),
-            "test_source": source_match.get("source", ""),
-            "failure_log": clip(record.get("fail_reason"), 5000),
+            "test_source": clip(source_match.get("source"), 1800),
+            "failing_assertion": focused.get("failing_assertion") or {},
+            "test_dependency_slice": focused.get("test_dependency_slice") or {},
+            "failure_observation": focused.get("failure_observation") or {},
+            "failure_log": failure_log,
             "actual_output": clip(record.get("actual_output"), 2200),
             "covered_target": bool(target_names & covered),
         })
     behavior = {
         "analysis_engine": {
             "name": "correctness_failure_contract_builder",
-            "version": 1,
-            "strategy": "tree_sitter_test_definition_source_range",
+            "version": 2,
+            "strategy": "tree_sitter_failing_assertion_and_test_dependency_slice",
             "parser": parser_diagnostics(_project_language(bug)),
             "llm_used": False,
             "fallback_policy": "none",
@@ -162,13 +173,16 @@ def _find_test_definition(test_id: str, paths: Iterable[str]) -> Tuple[Dict[str,
     path, node, source_bytes = matches[0]
     return {
         "source_path": path,
+        "language": source_language_from_path(path),
         "source_range": {
             "start_byte": int(node.start_byte),
             "end_byte": int(node.end_byte),
             "start_line": int(node.start_point[0]) + 1,
             "end_line": int(node.end_point[0]) + 1,
         },
-        "source": clip(node_text(node, source_bytes), 6000),
+        # Keep the complete isolated function until the failing assertion has
+        # been extracted. The persisted contract stores only focused excerpts.
+        "source": node_text(node, source_bytes),
     }, ""
 
 

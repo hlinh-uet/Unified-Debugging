@@ -2,36 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Tuple
 
-from core.apr.common import node_text, parse_tree, walk_nodes
+from core.apr.common import parse_tree, walk_nodes
 
 from .models import clip, stable_id
-
-
-OPERATION_KINDS = {
-    "assignment_expression": "assignment",
-    "call_expression": "call",
-    "conditional_expression": "conditional",
-    "field_expression": "field_access",
-    "if_statement": "branch",
-    "return_statement": "return",
-    "subscript_expression": "subscript",
-    "switch_statement": "branch",
-    "update_expression": "update",
-}
-
-ENTITY_KINDS = {
-    "declaration": "declaration",
-    "parameter_declaration": "parameter",
-}
-
-SYMBOL_NODE_TYPES = {
-    "field_identifier",
-    "identifier",
-    "namespace_identifier",
-    "type_identifier",
-}
+from .syntax_queries import build_target_syntax_ir, syntax_ir_entities
 
 
 def build_target_inventory(
@@ -39,62 +16,42 @@ def build_target_inventory(
 ) -> Tuple[Dict[str, Any], List[str]]:
     source = str(target_contract.get("replacement_unit") or "")
     language = str(target_contract.get("language") or "c")
-    tree, source_bytes = parse_tree(source, language)
+    (
+        tree, source_bytes, function_node, base_byte, base_line,
+        parse_scope, parse_diagnostics,
+    ) = (
+        _parse_target_function(target_contract, source=source, language=language)
+    )
     if tree is None or source_bytes is None:
         return _minimal_inventory(
             target_contract, ["target_inventory_tree_sitter_parse_failed"]
         ), []
-    diagnostics = []
+    diagnostics = list(parse_diagnostics)
     if tree.root_node.has_error:
         diagnostics.append("target_inventory_tree_sitter_has_error")
-    functions = _outer_function_definitions(tree.root_node)
-    if len(functions) != 1:
+    if function_node is None:
+        functions = _outer_function_definitions(tree.root_node)
         diagnostics.append(
             f"target_inventory_requires_one_outer_function_definition:found_{len(functions)}"
         )
         return _minimal_inventory(target_contract, diagnostics), []
 
-    base_range = target_contract.get("source_range") or {}
-    base_byte = int(base_range.get("start_byte") or 0)
-    base_line = int(base_range.get("start_line") or 1)
-    function_node = functions[0]
-    function_body = function_node.child_by_field_name("body")
-    root_symbols = _symbols(function_node, source_bytes)
-    entities: List[Dict[str, Any]] = [
-        _entity(
-            node=function_node,
-            source_bytes=source_bytes,
-            base_byte=base_byte,
-            base_line=base_line,
-            kind="target_function",
-            symbols=list(dict.fromkeys([
-                str(target_contract.get("resolved_name") or "").rsplit("::", 1)[-1],
-                *root_symbols,
-            ])),
-        )
-    ]
-    for node in _walk_without_nested_functions(function_node):
-        kind = OPERATION_KINDS.get(node.type) or ENTITY_KINDS.get(node.type)
-        if not kind:
-            continue
-        if kind in {"declaration", "parameter"} and not _is_target_declaration(
-            node, root=function_node, function_body=function_body
-        ):
-            continue
-        entities.append(
-            _entity(
-                node=node,
-                source_bytes=source_bytes,
-                base_byte=base_byte,
-                base_line=base_line,
-                kind=kind,
-                symbols=_symbols(node, source_bytes),
-                declared_symbols=_declared_symbols(node, source_bytes),
-            )
-        )
-    entities = _dedup_entities(entities)
+    syntax_ir, query_diagnostics = build_target_syntax_ir(
+        function_node=function_node,
+        source_bytes=source_bytes,
+        language=language,
+        source_path=str(target_contract.get("source_path") or ""),
+        base_byte=base_byte,
+        base_line=base_line,
+    )
+    diagnostics.extend(query_diagnostics)
+    entities = syntax_ir_entities(
+        syntax_ir,
+        target_contract=target_contract,
+        function_source=str(target_contract.get("replacement_unit") or ""),
+    )
     inventory = {
-        "version": 1,
+        "version": 3,
         "target_id": target_contract.get("target_id"),
         "source_hash": target_contract.get("source_hash"),
         "source_path": target_contract.get("source_path"),
@@ -103,7 +60,9 @@ def build_target_inventory(
         "visible_symbols": list(dict.fromkeys(
             str(value) for value in target_contract.get("visible_symbols") or [] if str(value)
         ))[:128],
-        "binding": "tree_sitter_target_local_ast_entities",
+        "binding": "tree_sitter_query_target_syntax_ir",
+        "parse_scope": parse_scope,
+        "syntax_ir": syntax_ir,
         "diagnostics": diagnostics,
         "fallback_policy": "minimal_exact_target" if diagnostics else "none",
     }
@@ -132,6 +91,8 @@ def _minimal_inventory(
         "source_excerpt": clip(target_contract.get("replacement_unit"), 280),
         "symbols": [value for value in symbols if value][:20],
         "declared_symbols": [],
+        "callee_symbol": "",
+        "syntax_only": True,
     }
     entity["id"] = stable_id("entity", {
         "type": entity["node_type"],
@@ -139,7 +100,7 @@ def _minimal_inventory(
         "range": source_range,
     })
     inventory = {
-        "version": 1,
+        "version": 3,
         "target_id": target_contract.get("target_id"),
         "source_hash": target_contract.get("source_hash"),
         "source_path": target_contract.get("source_path"),
@@ -160,104 +121,68 @@ def _minimal_inventory(
     return inventory
 
 
-def _entity(
-    *, node, source_bytes: bytes, base_byte: int, base_line: int, kind: str,
-    symbols: List[str], declared_symbols: List[str] = None
-) -> Dict[str, Any]:
-    absolute_start = base_byte + int(node.start_byte)
-    absolute_end = base_byte + int(node.end_byte)
-    payload = {
-        "node_type": node.type,
-        "kind": kind,
-        "source_range": {
-            "start_byte": absolute_start,
-            "end_byte": absolute_end,
-            "start_line": base_line + int(node.start_point[0]),
-            "end_line": base_line + int(node.end_point[0]),
-        },
-        "source_excerpt": clip(node_text(node, source_bytes), 280),
-        "symbols": list(dict.fromkeys(value for value in symbols if value))[:20],
-        "declared_symbols": list(dict.fromkeys(
-            value for value in declared_symbols or [] if value
-        ))[:8],
-    }
-    payload["id"] = stable_id("entity", {
-        "type": node.type,
-        "start": absolute_start,
-        "end": absolute_end,
-    })
-    return payload
+def _parse_target_function(
+    target_contract: Dict[str, Any], *, source: str, language: str
+):
+    """Prefer the full translation unit so macros/templates retain their context."""
+    source_path = os.path.realpath(str(target_contract.get("source_path") or ""))
+    target_range = target_contract.get("source_range") or {}
+    try:
+        target_start = int(target_range.get("start_byte"))
+        target_end = int(target_range.get("end_byte"))
+    except (TypeError, ValueError):
+        target_start = target_end = -1
+    if source_path and os.path.isfile(source_path) and target_start >= 0 and target_end > target_start:
+        try:
+            with open(source_path, "r", encoding="utf-8") as stream:
+                full_source = stream.read()
+        except (OSError, UnicodeError):
+            full_source = ""
+        if full_source:
+            full_tree, full_bytes = parse_tree(full_source, language)
+            if full_tree is not None and full_bytes is not None:
+                function = _function_for_exact_range(
+                    full_tree.root_node, start_byte=target_start, end_byte=target_end
+                )
+                if function is not None:
+                    diagnostics = []
+                    if full_tree.root_node.has_error:
+                        diagnostics.append("target_inventory_full_source_tree_sitter_has_error")
+                    return full_tree, full_bytes, function, 0, 1, "full_source", diagnostics
+
+    tree, source_bytes = parse_tree(source, language)
+    if tree is None or source_bytes is None:
+        return None, None, None, 0, 1, "unavailable", []
+    functions = _outer_function_definitions(tree.root_node)
+    function = functions[0] if len(functions) == 1 else None
+    base_line = int(target_range.get("start_line") or 1)
+    base_byte = max(0, target_start)
+    return (
+        tree,
+        source_bytes,
+        function,
+        base_byte,
+        base_line,
+        "replacement_unit",
+        ["target_inventory_used_isolated_replacement_unit"],
+    )
 
 
-def _is_target_declaration(node, *, root, function_body) -> bool:
-    if node.type == "parameter_declaration":
-        return function_body is not None and int(node.end_byte) <= int(function_body.start_byte)
-    parent = node.parent
-    while parent is not None and parent is not root:
-        if parent.type in {"struct_specifier", "class_specifier", "union_specifier"}:
-            return False
-        parent = parent.parent
-    return True
-
-
-def _declared_symbols(node, source_bytes: bytes) -> List[str]:
-    if node.type == "parameter_declaration":
-        declarator = node.child_by_field_name("declarator")
-        name = _declarator_name(declarator, source_bytes)
-        return [name] if name else []
-    values = []
-    for child in node.named_children:
-        candidate = child.child_by_field_name("declarator") if child.type == "init_declarator" else child
-        name = _declarator_name(candidate, source_bytes)
-        if name and name not in values:
-            values.append(name)
-    return values
-
-
-def _declarator_name(node, source_bytes: bytes) -> str:
-    if node is None:
-        return ""
-    if node.type in {"identifier", "field_identifier"}:
-        return node_text(node, source_bytes).strip()
-    nested = node.child_by_field_name("declarator")
-    if nested is not None:
-        name = _declarator_name(nested, source_bytes)
-        if name:
-            return name
-    if node.type in {
-        "pointer_declarator", "reference_declarator", "array_declarator",
-        "function_declarator", "parenthesized_declarator", "init_declarator",
-    }:
-        for child in node.named_children:
-            if child.type in {"argument_list", "initializer_list", "parameter_list"}:
-                continue
-            name = _declarator_name(child, source_bytes)
-            if name:
-                return name
-    return ""
-
-
-def _symbols(node, source_bytes: bytes) -> List[str]:
-    values = []
-    for child in walk_nodes(node):
-        if child.type not in SYMBOL_NODE_TYPES:
+def _function_for_exact_range(root, *, start_byte: int, end_byte: int):
+    exact = []
+    containing = []
+    for node in walk_nodes(root):
+        if node.type != "function_definition":
             continue
-        value = node_text(child, source_bytes).strip()
-        if value and value not in values:
-            values.append(value)
-    return values[:20]
-
-
-def _dedup_entities(values: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    out = []
-    seen = set()
-    for value in values:
-        marker = value.get("id")
-        if marker in seen:
-            continue
-        seen.add(marker)
-        out.append(value)
-    return out
+        if int(node.start_byte) == start_byte and int(node.end_byte) == end_byte:
+            exact.append(node)
+        elif int(node.start_byte) <= start_byte and int(node.end_byte) >= end_byte:
+            containing.append(node)
+    if len(exact) == 1:
+        return exact[0]
+    if not exact and containing:
+        return min(containing, key=lambda item: int(item.end_byte) - int(item.start_byte))
+    return None
 
 
 def _outer_function_definitions(root):
@@ -271,12 +196,3 @@ def _outer_function_definitions(root):
             continue
         stack.extend(reversed(node.children))
     return functions
-
-
-def _walk_without_nested_functions(root):
-    stack = [root]
-    while stack:
-        node = stack.pop()
-        yield node
-        children = [] if node is not root and node.type == "function_definition" else list(node.children)
-        stack.extend(reversed(children))

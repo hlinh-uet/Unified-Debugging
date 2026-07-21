@@ -53,11 +53,13 @@ def build_refix_prompt(
     }
     return f"""PATCH RE-SYNTHESIS
 
-Use the typed validation transition exactly:
+The selected plan is the plan that produced PREVIOUS FAILED REPLACEMENT UNIT. Preserve that plan lineage
+for this ReFix pass: refine its implementation and do not silently switch to another portfolio plan.
+Use the typed validation transition as feedback:
 - refine_edit: preserve the causal mechanism and repair only materialization/type/API details.
 - revise_preservation_constraints: retain the fixed behavior and remove the regression.
-- rediagnose_mechanism: the controller should already have supplied a new selected plan; implement that plan,
-  not the previous mechanism.
+- rediagnose_mechanism: the previous implementation did not support the selected mechanism; produce a more
+  faithful implementation of the same selected plan using the original unit, failed patch, and test feedback.
 - repair_source_binding_or_patch_shape: repair only completeness/source shape; do not infer test behavior.
 
 INPUT
