@@ -31,6 +31,41 @@ DEFECTS4C_CACHE_DIR = os.path.join(EXPERIMENTS_DIR, "defects4c_cache")
 PATCHES_DIR = os.path.join(EXPERIMENTS_DIR, "patches")
 LLM_PATCHES_DIR = os.path.join(EXPERIMENTS_DIR, "llm_patches")
 
+
+def get_apr_runtime_dir():
+    """Return the active APR working directory.
+
+    Normal CLI modes keep using ``experiments/``.  Iterative full-pipeline
+    runs set ``APR_RUNTIME_DIR`` so temporary files and selected patches are
+    isolated per round.
+    """
+    return os.path.abspath(
+        os.getenv("APR_RUNTIME_DIR", "").strip() or EXPERIMENTS_DIR
+    )
+
+
+def get_llm_patches_dir():
+    """Return the active directory for LLM artifacts."""
+    configured = os.getenv("APR_LLM_PATCHES_DIR", "").strip()
+    if configured:
+        return os.path.abspath(configured)
+    runtime_dir = os.getenv("APR_RUNTIME_DIR", "").strip()
+    if runtime_dir:
+        return os.path.join(os.path.abspath(runtime_dir), "llm_patches")
+    return LLM_PATCHES_DIR
+
+
+def get_patches_dir():
+    """Return the active directory for selected plausible patches."""
+    configured = os.getenv("APR_PATCHES_DIR", "").strip()
+    if configured:
+        return os.path.abspath(configured)
+    runtime_dir = os.getenv("APR_RUNTIME_DIR", "").strip()
+    if runtime_dir:
+        return os.path.join(os.path.abspath(runtime_dir), "patches")
+    return PATCHES_DIR
+
+
 # 5. Đảm bảo thư mục experiments tồn tại
 if not os.path.exists(EXPERIMENTS_DIR):
     os.makedirs(EXPERIMENTS_DIR)

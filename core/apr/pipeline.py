@@ -5,7 +5,12 @@ import re
 import shutil
 from typing import Optional, Tuple
 
-from configs.path import EXPERIMENTS_DIR, LLM_PATCHES_DIR, PATCHES_DIR
+from configs.path import (
+    EXPERIMENTS_DIR,
+    get_apr_runtime_dir,
+    get_llm_patches_dir,
+    get_patches_dir,
+)
 from core.apr.agent.correctness_repair.fail_context_agent import (
     run_correctness_fail_context_agent,
 )
@@ -908,7 +913,10 @@ def _evaluate_fix_patch_candidate(
         candidate_patched_func,
     )
     safe_cand = cand_label.replace("/", "__").replace(" ", "_")
-    tmp_path = os.path.join(EXPERIMENTS_DIR, f"tmp_{bug_id.replace('@', '__')}__{safe_cand}")
+    tmp_path = os.path.join(
+        get_apr_runtime_dir(),
+        f"tmp_{bug_id.replace('@', '__')}__{safe_cand}",
+    )
     with open(tmp_path, "w") as f:
         f.write(candidate_patched_source)
 
@@ -1003,8 +1011,9 @@ def _evaluate_fix_patch_candidate(
                 if cand_base == primary_base
                 else f"{bug_id}_patch__{safe_cand}"
             )
-            patch_path = os.path.join(PATCHES_DIR, patch_name)
-            os.makedirs(PATCHES_DIR, exist_ok=True)
+            patches_dir = get_patches_dir()
+            patch_path = os.path.join(patches_dir, patch_name)
+            os.makedirs(patches_dir, exist_ok=True)
             try:
                 shutil.move(tmp_path, patch_path)
             except Exception as e_mv:
@@ -1058,8 +1067,9 @@ def _persist_selected_correctness_patch(
         if target_base == primary_base
         else f"{bug_id}_patch__{safe_target or target_base or 'target'}"
     )
-    os.makedirs(PATCHES_DIR, exist_ok=True)
-    patch_path = os.path.join(PATCHES_DIR, patch_name)
+    patches_dir = get_patches_dir()
+    os.makedirs(patches_dir, exist_ok=True)
+    patch_path = os.path.join(patches_dir, patch_name)
     try:
         with open(patch_path, "w") as handle:
             handle.write(patched_source)
@@ -1143,7 +1153,10 @@ def _evaluate_coordinated_alternative_candidates(
     target_path = str(first.get("repair_target_file") or "")
     target_relpath = str(first.get("repair_target_relpath") or "")
     safe_target = (target_relpath or os.path.basename(target_path)).replace("/", "__").replace(" ", "_")
-    tmp_path = os.path.join(EXPERIMENTS_DIR, f"tmp_{bug_id.replace('@', '__')}__coordinated__{safe_target}")
+    tmp_path = os.path.join(
+        get_apr_runtime_dir(),
+        f"tmp_{bug_id.replace('@', '__')}__coordinated__{safe_target}",
+    )
     with open(tmp_path, "w") as handle:
         handle.write(patched_source)
     _, post_passed, post_failed = validate_patch(
@@ -1192,8 +1205,12 @@ def _evaluate_coordinated_alternative_candidates(
         artifact_suffix="patch_coordinated",
     )
     if is_plausible_status(snapshot.get("status")):
-        os.makedirs(PATCHES_DIR, exist_ok=True)
-        patch_path = os.path.join(PATCHES_DIR, f"{bug_id}_patch__coordinated__{safe_target}")
+        patches_dir = get_patches_dir()
+        os.makedirs(patches_dir, exist_ok=True)
+        patch_path = os.path.join(
+            patches_dir,
+            f"{bug_id}_patch__coordinated__{safe_target}",
+        )
         shutil.copyfile(tmp_path, patch_path)
     if os.path.exists(tmp_path):
         os.remove(tmp_path)
@@ -1221,6 +1238,7 @@ def run_apr_pipeline(
     apr_top_k: Optional[int] = None,
     valid_mode: bool = False,
     only_missing: bool = False,
+    skip_bug_ids: Optional[set] = None,
 ):
     """
     Pipeline APR (LLM-based).
@@ -1231,7 +1249,7 @@ def run_apr_pipeline(
         llm_provider: 'openai' | 'openrouter'.
                       Nếu None, đọc từ LLM_PROVIDER trong .env.
     """
-    os.makedirs(EXPERIMENTS_DIR, exist_ok=True)
+    os.makedirs(get_apr_runtime_dir(), exist_ok=True)
 
     fl_results_file = (
         fl_results_filename
@@ -1301,6 +1319,23 @@ def run_apr_pipeline(
             f"{skipped_missing_bug} records không có trong loader '{dataset}'."
         )
 
+    converged_bug_ids = {
+        str(bug_id).strip()
+        for bug_id in (skip_bug_ids or set())
+        if str(bug_id).strip()
+    }
+    if converged_bug_ids:
+        before_converged_filter = len(fl_results)
+        fl_results = {
+            bug_id: result_data
+            for bug_id, result_data in fl_results.items()
+            if bug_id not in converged_bug_ids
+        }
+        print(
+            f"[APR] Bỏ qua {before_converged_filter - len(fl_results)} bug đã "
+            "plausible ở vòng trước."
+        )
+
     if only_missing:
         before_missing_filter = len(fl_results)
         fl_results = {
@@ -1308,7 +1343,7 @@ def run_apr_pipeline(
             for bug_id, result_data in fl_results.items()
             if not os.path.isdir(
                 os.path.join(
-                    LLM_PATCHES_DIR,
+                    get_llm_patches_dir(),
                     re.sub(r"[^A-Za-z0-9._-]+", "_", str(bug_id)).strip("._-")
                     or "unknown",
                 )

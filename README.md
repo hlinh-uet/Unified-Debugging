@@ -45,6 +45,46 @@ python3 main.py --all --dataset tcpdump --llm openrouter
 FL → APR pipeline mới → Evaluation
 ```
 
+### Chạy full pipeline lặp FL/APR feedback
+
+```bash
+# Mặc định 2 vòng APR:
+# FL → APR vòng 1 → Update FL → APR vòng 2
+python3 main.py --full --dataset fmt --llm openrouter
+
+# Chạy 4 vòng APR; Update FL được chạy giữa mỗi hai vòng.
+python3 main.py --full --dataset libyang --rounds 4 --llm openrouter
+```
+
+Mỗi lần chạy tạo một thư mục độc lập:
+
+```text
+experiments/full_pipeline_runs/<dataset>/<run-id>/
+├── run_manifest.json
+├── round_01/
+│   ├── fault_localization_results.json
+│   ├── fault_localization_apr_feedback_results.json
+│   ├── apr_results.json
+│   ├── apr_results_cumulative.json
+│   ├── llm_patches/
+│   ├── patches/
+│   ├── evaluation.txt
+│   └── round_manifest.json
+├── round_02/
+│   └── ...
+└── ...
+```
+
+`evaluation.txt` của từng vòng lưu đầy đủ evaluation của FL đầu vào, APR và
+FL sau APR feedback (nếu còn vòng tiếp theo). Artifact và manifest của các
+vòng được tách riêng nên không ghi đè lẫn nhau.
+
+Khi một bug đã đạt `plausible`, các vòng sau không Update FL và không chạy APR
+lại cho bug đó. `apr_results_cumulative.json` giữ kết quả plausible từ các vòng
+trước để evaluation của vòng hiện tại vẫn bao phủ đầy đủ kết quả đã có. Nếu
+toàn bộ bug có FL scores đã plausible, pipeline dừng sớm dù chưa hết `--rounds`;
+trạng thái này được ghi trong `run_manifest.json`.
+
 Trong APR pipeline mới, ReFix đã được gọi tự động nếu best FixAgent candidate
 chưa success. Vì vậy, bình thường không cần thêm `--with-refix`.
 
@@ -160,6 +200,10 @@ chính xác:
 | `--valid`       | Dùng oracle FL: ground-truth top 1, APR chỉ thử top 1; đọc/ghi `fault_localization_results_valid.json` và `apr_results_valid.json` |
 | `--eval`        | Chỉ chạy Evaluation (FL + APR), lọc theo dataset   |
 | `--all`         | Chạy FL → APR pipeline mới → Evaluation            |
+| `--full`        | Chạy FL → APR → Update FL → APR lặp nhiều vòng; lưu riêng artifact/evaluation từng vòng |
+| `--rounds`, `--full-rounds` | Tổng số vòng APR của `--full`; mặc định `2` |
+| `--full-apr-strength` | Trọng số APR feedback khi Update FL; mặc định `1.0` |
+| `--full-same-file-weight` | Trọng số lan truyền feedback sang function cùng file; mặc định `0.0` |
 | `--include-fixed-fail-tests` | Không loại test có `outcome=FAIL` và `outcome_fixed=FAIL`; mặc định các test này bị loại khỏi FL/APR/validation |
 | `--fl-eval-level` | Chọn file FL để tính Top-K: `combined`, `valid`, `apr_feedback`, `function`, `file`, `class`, hoặc `all` |
 | `--llm`         | Provider APR: `openai` hoặc `openrouter` |

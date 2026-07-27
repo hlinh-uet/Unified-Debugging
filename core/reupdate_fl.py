@@ -268,11 +268,18 @@ def build_apr_feedback_fl_results(
     file_weight: float,
     signal_min: float,
     signal_max: float,
+    skip_bug_ids: set = None,
 ) -> Tuple[dict, dict]:
     output = {}
+    skipped_bugs = {
+        str(bug_id).strip()
+        for bug_id in (skip_bug_ids or set())
+        if str(bug_id).strip()
+    }
     summary = {
         "total_fl_records": 0,
         "updated_records": 0,
+        "skipped_plausible_records": 0,
         "updated_from_llm_patches": 0,
         "updated_from_apr_results_fallback": 0,
         "candidate_records": 0,
@@ -287,6 +294,21 @@ def build_apr_feedback_fl_results(
         if not isinstance(fl_record, dict):
             output[bug_id] = fl_record
             summary["missing_scores_records"] += 1
+            continue
+
+        if bug_id in skipped_bugs:
+            new_record = dict(fl_record)
+            scores = new_record.get("scores") or {}
+            if isinstance(scores, dict):
+                new_record["scores"] = sort_scores(
+                    {key: float(value) for key, value in scores.items()}
+                )
+            new_record["apr_feedback"] = {
+                "applied": False,
+                "reason": "plausible_converged",
+            }
+            output[bug_id] = new_record
+            summary["skipped_plausible_records"] += 1
             continue
 
         scores = fl_record.get("scores") or {}
@@ -360,8 +382,53 @@ def load_json(path: str) -> dict:
 
 
 def write_json(path: str, data: dict):
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with open(path, "w") as f:
         json.dump(data, f, indent=4)
+
+
+def update_fl_from_apr(
+    *,
+    fl_path: str,
+    apr_path: str,
+    llm_patches_dir: str,
+    output_path: str,
+    apr_strength: float = 1.0,
+    file_weight: float = 0.0,
+    signal_min: float = -1.0,
+    signal_max: float = 1.0,
+    skip_bug_ids: set = None,
+) -> Tuple[dict, dict]:
+    """Update one FL result file from one explicitly scoped APR round.
+
+    Explicit paths are required so iterative runs cannot accidentally mix
+    artifacts from another dataset or overwrite another round.
+    """
+    fl_path = os.path.abspath(fl_path)
+    apr_path = os.path.abspath(apr_path)
+    llm_patches_dir = os.path.abspath(llm_patches_dir)
+    output_path = os.path.abspath(output_path)
+
+    if not os.path.exists(fl_path):
+        raise FileNotFoundError(f"Không tìm thấy FL results: {fl_path}")
+
+    fl_results = load_json(fl_path)
+    apr_results = load_json(apr_path) if os.path.exists(apr_path) else {}
+    candidates_by_bug = load_llm_patch_attempts(llm_patches_dir)
+    updated_results, summary = build_apr_feedback_fl_results(
+        fl_results,
+        apr_results,
+        candidates_by_bug,
+        apr_strength=apr_strength,
+        file_weight=file_weight,
+        signal_min=signal_min,
+        signal_max=signal_max,
+        skip_bug_ids=skip_bug_ids,
+    )
+    write_json(output_path, updated_results)
+    return updated_results, summary
 
 
 def parse_args():
@@ -432,22 +499,16 @@ def main():
     )
     output_path = os.path.join(input_dir, args.output_file)
 
-    if not os.path.exists(fl_path):
-        raise FileNotFoundError(f"Không tìm thấy FL results: {fl_path}")
-
-    fl_results = load_json(fl_path)
-    apr_results = load_json(apr_path) if os.path.exists(apr_path) else {}
-    candidates_by_bug = load_llm_patch_attempts(llm_patches_dir)
-    updated_results, summary = build_apr_feedback_fl_results(
-        fl_results,
-        apr_results,
-        candidates_by_bug,
+    _, summary = update_fl_from_apr(
+        fl_path=fl_path,
+        apr_path=apr_path,
+        llm_patches_dir=llm_patches_dir,
+        output_path=output_path,
         apr_strength=args.apr_strength,
         file_weight=args.same_file_weight,
         signal_min=args.signal_min,
         signal_max=args.signal_max,
     )
-    write_json(output_path, updated_results)
 
     print(f"[APR-FL] Wrote {output_path}")
     print(

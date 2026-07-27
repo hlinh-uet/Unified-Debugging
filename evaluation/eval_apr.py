@@ -69,6 +69,7 @@ def evaluate_apr(
     dataset: str = "codeflaws",
     results_filename: str = "apr_results.json",
     label: str = "LLM-based APR",
+    results_dir: str = None,
 ):
     """
     Evaluate APR results across all engines found in experiments/.
@@ -95,7 +96,11 @@ def evaluate_apr(
     ]
 
     for label, filename in apr_files:
-        filepath = os.path.join(EXPERIMENTS_DIR, filename)
+        filepath = (
+            filename
+            if os.path.isabs(filename)
+            else os.path.join(results_dir or EXPERIMENTS_DIR, filename)
+        )
         if os.path.exists(filepath):
             _evaluate_one_apr(label, filepath, dataset)
 

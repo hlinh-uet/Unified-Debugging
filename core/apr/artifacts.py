@@ -3,7 +3,7 @@ import os
 import re
 from typing import Optional
 
-from configs.path import EXPERIMENTS_DIR, LLM_PATCHES_DIR
+from configs.path import EXPERIMENTS_DIR, get_llm_patches_dir
 
 from core.apr.common import (
     DEFAULT_LLM_PROVIDER,
@@ -260,9 +260,24 @@ def rel_experiment_path(path: str) -> str:
         return path
 
 
+def runtime_artifact_metadata() -> dict:
+    """Attach full-pipeline provenance when a round-scoped run is active."""
+    metadata = {}
+    dataset = os.getenv("APR_RUN_DATASET", "").strip()
+    round_value = os.getenv("APR_RUN_ROUND", "").strip()
+    if dataset:
+        metadata["dataset"] = dataset
+    if round_value:
+        try:
+            metadata["pipeline_round"] = int(round_value)
+        except ValueError:
+            metadata["pipeline_round"] = round_value
+    return metadata
+
+
 def llm_bug_artifact_dir(bug_id: str) -> str:
     bug_part = safe_artifact_part(bug_id, 80)
-    bug_dir = os.path.join(LLM_PATCHES_DIR, bug_part)
+    bug_dir = os.path.join(get_llm_patches_dir(), bug_part)
     os.makedirs(bug_dir, exist_ok=True)
     return bug_dir
 
@@ -302,6 +317,7 @@ def write_llm_step_artifact(
         f.write(response or "")
 
     artifact = {
+        **runtime_artifact_metadata(),
         "bug_id": bug_id,
         "attempt_index": attempt_index,
         "function": qualified_name,
@@ -369,6 +385,7 @@ def _write_deterministic_context_artifact(
         json.dump(payload or {}, f, ensure_ascii=False, indent=2, default=str)
 
     artifact = {
+        **runtime_artifact_metadata(),
         "bug_id": bug_id,
         "attempt_index": attempt_index,
         "function": qualified_name,
@@ -545,6 +562,7 @@ def write_llm_patch_artifact(
         f.write(patched_function or "")
 
     artifact = {
+        **runtime_artifact_metadata(),
         "bug_id": bug_id,
         "attempt_index": attempt_index,
         "function": qualified_name,
@@ -627,6 +645,7 @@ def write_refix_patch_artifact(
         f.write(patched_function or "")
 
     artifact = {
+        **runtime_artifact_metadata(),
         "bug_id": bug_id,
         "attempt_index": attempt_index,
         "refix_round": refix_round,

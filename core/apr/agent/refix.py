@@ -3,7 +3,12 @@ import os
 import shutil
 from typing import Optional
 
-from configs.path import EXPERIMENTS_DIR, LLM_PATCHES_DIR, PATCHES_DIR
+from configs.path import (
+    EXPERIMENTS_DIR,
+    get_apr_runtime_dir,
+    get_llm_patches_dir,
+    get_patches_dir,
+)
 from core.apr.agent.correctness_repair.feedback import (
     validation_feedback_mode,
 )
@@ -166,7 +171,7 @@ def run_refix_from_saved_artifacts(
       - bug_id is None: scan all bugs in the dataset and refix failed APR artifacts.
       - bug_id is set: refix only that bug.
     """
-    os.makedirs(EXPERIMENTS_DIR, exist_ok=True)
+    os.makedirs(get_apr_runtime_dir(), exist_ok=True)
 
     ds_lc = (dataset or "").lower()
     if is_defects4c_dataset(ds_lc):
@@ -584,7 +589,7 @@ def _run_one_refix_candidate(
 
     safe_target = (target_relpath or os.path.basename(original_path)).replace("/", "__").replace(" ", "_")
     tmp_path = os.path.join(
-        EXPERIMENTS_DIR,
+        get_apr_runtime_dir(),
         f"tmp_refix_{bug.bug_id.replace('@', '__')}__{safe_target}",
     )
     with open(tmp_path, "w") as f:
@@ -769,7 +774,7 @@ def _refix_validation_context(
 
 
 def _refix_source_artifacts_for_bug(bug_id: str) -> list:
-    bug_dir = os.path.join(LLM_PATCHES_DIR, _safe_artifact_part(bug_id, 80))
+    bug_dir = os.path.join(get_llm_patches_dir(), _safe_artifact_part(bug_id, 80))
     if not os.path.isdir(bug_dir):
         return []
 
@@ -1064,8 +1069,9 @@ def _save_success_patch(bug, candidate: dict):
         safe_target = (target_relpath or target_base or "patch").replace("/", "__").replace(" ", "_")
         patch_name = f"{bug.bug_id}_patch__{safe_target}"
 
-    os.makedirs(PATCHES_DIR, exist_ok=True)
-    shutil.copyfile(patched_file, os.path.join(PATCHES_DIR, patch_name))
+    patches_dir = get_patches_dir()
+    os.makedirs(patches_dir, exist_ok=True)
+    shutil.copyfile(patched_file, os.path.join(patches_dir, patch_name))
 
 
 def _repair_target_file(raw_meta: dict, relpath: str) -> str:
