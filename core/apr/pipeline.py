@@ -397,6 +397,7 @@ def _resolve_target_for_repair(
         source_language,
         source_path=candidate_path,
         source_file=cand_label,
+        resolution_hints=resolution_hints,
     )
     ast_targets = list(enumerated_targets)
     exact_target = (
@@ -663,7 +664,12 @@ def _tree_sitter_target_resolution_failure(
     }
 
 
-def _target_resolution_hints(failed_tests_context: dict) -> dict:
+def _target_resolution_hints(
+    failed_tests_context: dict,
+    *,
+    fl_result: Optional[dict] = None,
+    qualified_name: str = "",
+) -> dict:
     behavior = failed_tests_context if isinstance(failed_tests_context, dict) else {}
     for key in ("behavior_context", "final_behavior_context", "behavior_evidence"):
         if isinstance(behavior.get(key), dict):
@@ -676,7 +682,39 @@ def _target_resolution_hints(failed_tests_context: dict) -> dict:
             continue
         frames.extend(str(item) for item in test.get("stack_frames") or [] if str(item).strip())
         covered_lines.extend(item for item in test.get("covered_lines") or [] if str(item).isdigit())
-    return {"stack_frames": frames[:40], "covered_lines": covered_lines[:200]}
+    hints = {
+        "stack_frames": frames[:40],
+        "covered_lines": covered_lines[:200],
+    }
+    causal_evidence = (
+        fl_result.get("causal_evidence")
+        if isinstance(fl_result, dict)
+        and isinstance(fl_result.get("causal_evidence"), dict)
+        else {}
+    )
+    dossiers = (
+        (causal_evidence.get("source_investigation") or {}).get("dossiers")
+        if isinstance(causal_evidence.get("source_investigation"), dict)
+        else {}
+    )
+    dossier = (
+        dossiers.get(qualified_name)
+        if isinstance(dossiers, dict)
+        and isinstance(dossiers.get(qualified_name), dict)
+        else {}
+    )
+    source_line = dossier.get("source_line")
+    if str(source_line).isdigit():
+        hints["covered_lines"] = list(dict.fromkeys([
+            int(source_line),
+            *hints["covered_lines"],
+        ]))[:200]
+        hints["fl_source_line"] = int(source_line)
+    if dossier.get("signature"):
+        hints["signature_hint"] = str(dossier["signature"])
+    if dossier.get("source_digest"):
+        hints["fl_source_digest"] = str(dossier["source_digest"])
+    return hints
 
 
 def _normalize_llm_replacement(
@@ -1555,7 +1593,11 @@ def run_apr_pipeline(
             if isinstance(raw_meta, dict):
                 header_context_root = raw_meta.get("buggy_tree_dir") or raw_meta.get("source_repo_dir") or ""
             cpg_source_root = source_root(candidate_path, header_context_root)
-            resolution_hints = _target_resolution_hints(failed_tests_context)
+            resolution_hints = _target_resolution_hints(
+                failed_tests_context,
+                fl_result=result_data,
+                qualified_name=qualified_name,
+            )
             if isinstance(forced_target, dict) and forced_target.get("target_id"):
                 resolution_hints["exact_target"] = forced_target
                 print(

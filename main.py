@@ -10,23 +10,27 @@ from datetime import datetime, timezone
 
 from data_loaders.base_loader import get_loader
 from core.fault_localization import (
-    calculate_fault_localization,
-    calculate_fault_localization_class_level,
-    calculate_fault_localization_file_level,
-    calculate_ir_reranked_class_scores,
-    calculate_ir_reranked_file_scores,
-    calculate_ir_reranked_function_scores,
+    calculate_causal_hierarchy_scores,
     _extract_class_from_key,
     _extract_file_from_key,
+)
+from core.fault_localization.runtime import (
+    collect_regression_runtime_evidence,
+    compact_runtime_evidence,
+    load_cached_runtime_evidence,
+    write_full_runtime_evidence_cache,
+)
+from core.fault_localization.artifacts import (
+    atomic_write_json,
+    write_bug_localization_checkpoint,
 )
 from core.apr_baseline import run_apr_pipeline
 from core.apr.revalidate import run_apr_validation_only
 from core.apr.agent.refix import run_refix_from_saved_artifacts
 from core.apr.common import is_plausible_status
 from core.apr.oracle_target_identity import build_valid_oracle_targets
-from core.reupdate_fl import update_fl_from_apr, write_json
+from core.fault_localization.update import update_fl_from_apr, write_json
 from core.test_filtering import (
-    filter_zero_coverage_pass_tests,
     filtered_bug_record_for_pipeline,
     has_failed_tests,
 )
@@ -39,6 +43,7 @@ VALID_FL_RESULTS_FILENAME = "fault_localization_results_valid.json"
 VALID_APR_RESULTS_FILENAME = "apr_results_valid.json"
 FULL_PIPELINE_DIRNAME = "full_pipeline_runs"
 FULL_PIPELINE_DEFAULT_ROUNDS = 2
+FL_DEFAULT_LLM_PROVIDER = "openrouter"
 
 
 def _extract_file_from_gt(gt_key):
@@ -71,23 +76,42 @@ def run_fl(
     dataset: str = "codeflaws",
     exclude_fixed_fail_tests: bool = True,
     results_dir: str = None,
+    llm_provider: str = None,
+    llm_rerank: bool = True,
+    refresh_runtime_traces: bool = False,
+    cache_only: bool = False,
+    include_bug_ids: set = None,
 ):
     """
-    Bước 1 – Fault Localization (Tarantula).
-    Tính điểm Tarantula ở 3 mức rồi rerank bằng IR metadata:
+    Bước 1 – Input/output-guided dynamic Fault Localization.
+    Build buggy version với ordered function instrumentation, chỉ chạy các
+    regression failed tests rồi rank theo trace/failure contract:
       - Function-level → fault_localization_function_results.json
       - File-level     → fault_localization_file_results.json
       - Class-level    → fault_localization_class_results.json
-    Pipeline:
-      1. Tarantula file → IR reranker → file_score
-      2. Tarantula class + file_score → IR reranker → class_score
-      3. Tarantula function + class/file_score → IR reranker → final function score
-      → fault_localization_results.json
+
+    Output ``scores`` giữ nguyên schema cũ để APR và vòng Update FL không cần
+    thay đổi. Metadata ``covered_methods`` và spectrum score không được dùng.
     """
     print(f"[FL] Đang load bugs từ dataset '{dataset}'...")
     loader = get_loader(dataset)
     bugs = loader.load_all()
-    print(f"[FL] Đã load {len(bugs)} bugs.")
+    requested_bug_ids = {
+        str(bug_id).strip()
+        for bug_id in (include_bug_ids or set())
+        if str(bug_id).strip()
+    }
+    if requested_bug_ids:
+        bugs = [
+            bug for bug in bugs
+            if str(bug.bug_id) in requested_bug_ids
+        ]
+        print(
+            f"[FL] Chọn {len(bugs)}/{len(requested_bug_ids)} bug theo "
+            "per-bug pipeline."
+        )
+    else:
+        print(f"[FL] Đã load {len(bugs)} bugs.")
 
     if not bugs:
         print(f"[FL] Không tìm thấy bug nào. Kiểm tra lại đường dẫn dataset '{dataset}'.")
@@ -95,6 +119,21 @@ def run_fl(
 
     output_dir = os.path.abspath(results_dir or EXPERIMENTS_DIR)
     os.makedirs(output_dir, exist_ok=True)
+    fl_llm_provider = (
+        str(llm_provider or FL_DEFAULT_LLM_PROVIDER).strip().lower()
+    )
+    if llm_rerank:
+        print(
+            f"[FL] LLM trace guide mặc định: {fl_llm_provider} "
+            "(dùng cùng lớp cấu hình/API key với APR)."
+        )
+    # Runtime execution is expensive and independent of the FL/APR round.
+    # Keep one durable per-bug cache instead of duplicating/rebuilding it in
+    # full-pipeline round directories.
+    runtime_cache_root = os.path.join(
+        os.path.abspath(EXPERIMENTS_DIR),
+        "runtime_traces",
+    )
 
     func_results = {}
     file_results = {}
@@ -102,86 +141,154 @@ def run_fl(
     combined_results = {}
 
     total_excluded_fixed_fail = 0
-    total_excluded_zero_coverage = 0
-
+    processed_count = 0
     for bug in bugs:
-        print(f"[FL] Tính điểm Tarantula cho {bug.bug_id}...")
+        print(f"[FL] Input/output runtime localization cho {bug.bug_id}...")
         bug_for_fl, excluded_fixed_fail = filtered_bug_record_for_pipeline(
             bug,
             exclude_fixed_fail_tests=exclude_fixed_fail_tests,
         )
-        zero_test_noop_excluded = (
-            (bug_for_fl.raw or {}).get("pipeline_excluded_zero_test_noop_tests", [])
-            if bug_for_fl and isinstance(bug_for_fl.raw, dict)
-            else []
-        )
-        fl_tests, fl_zero_coverage_excluded = filter_zero_coverage_pass_tests(
-            bug_for_fl.tests if bug_for_fl else []
-        )
-        zero_coverage_excluded = list(dict.fromkeys([
-            *zero_test_noop_excluded,
-            *fl_zero_coverage_excluded,
-        ]))
         total_excluded_fixed_fail += len(excluded_fixed_fail)
-        total_excluded_zero_coverage += len(zero_coverage_excluded)
         if excluded_fixed_fail:
             print(
                 f"    [FL] Loại {len(excluded_fixed_fail)} test buggy+fixed đều FAIL "
                 "khỏi FL."
             )
-        if zero_coverage_excluded:
-            print(
-                f"    [FL] Loại {len(zero_coverage_excluded)} test PASS nhưng coverage rỗng "
-                "khỏi FL/APR scope."
-            )
 
-        tests_for_fl = fl_tests
+        trace_dir = os.path.join(
+            runtime_cache_root,
+            re.sub(
+                r"[^A-Za-z0-9._-]+", "_", str(bug.bug_id)
+            ).strip("._-")
+            or "unknown",
+        )
+        tests_for_fl = bug_for_fl.tests if bug_for_fl else []
         if exclude_fixed_fail_tests and not has_failed_tests(tests_for_fl):
             print("    [FL] Không còn failed test actionable sau khi lọc; ghi score rỗng.")
-            tarantula_func_scores = {}
-            tarantula_file_scores = {}
-            tarantula_class_scores = {}
             file_scores = {}
             class_scores = {}
             func_scores = {}
+            causal_evidence = {
+                "version": 8,
+                "engine": "scenario_first_input_aware_causal_trace",
+                "ground_truth_used": False,
+                "tests": [],
+                "diagnostics": ["no_actionable_failed_tests"],
+            }
         else:
-            # --- Raw Tarantula scores ---
-            tarantula_func_scores = calculate_fault_localization(tests_for_fl)
-            tarantula_file_scores = calculate_fault_localization_file_level(tests_for_fl)
-            tarantula_class_scores = calculate_fault_localization_class_level(tests_for_fl)
-
-            functions_by_file = {}
-            functions_by_class = {}
-            for func_key in tarantula_func_scores:
-                file_key = _extract_file_from_key(func_key)
-                functions_by_file.setdefault(file_key, []).append(func_key)
-
-                class_key = _extract_class_from_key(func_key)
-                if class_key:
-                    functions_by_class.setdefault(class_key, []).append(func_key)
-
-            # --- 1. File-level: Tarantula file → IR reranker → file_score ---
-            file_scores = calculate_ir_reranked_file_scores(
-                tests_for_fl,
-                tarantula_file_scores,
-                functions_by_file=functions_by_file,
-            )
-
-            # --- 2. Class-level: Tarantula class + file_score → IR reranker → class_score ---
-            class_scores = calculate_ir_reranked_class_scores(
-                tests_for_fl,
-                tarantula_class_scores,
-                file_scores,
-                functions_by_class=functions_by_class,
-            )
-
-            # --- 3. Function-level: Tarantula function + class/file score → IR reranker ---
-            func_scores = calculate_ir_reranked_function_scores(
-                tests_for_fl,
-                tarantula_func_scores,
-                class_scores,
-                file_scores,
-            )
+            runtime_evidence = None
+            cache_info = {"hit": False, "diagnostics": []}
+            if not refresh_runtime_traces:
+                runtime_evidence, cache_info = load_cached_runtime_evidence(
+                    bug_for_fl,
+                    artifact_dir=trace_dir,
+                    require_current_instrumentation=not cache_only,
+                )
+            if runtime_evidence is not None:
+                cache_kind = (
+                    "full"
+                    if cache_info.get("full_ordered_events")
+                    else "legacy/compact"
+                )
+                if cache_only and cache_kind != "full":
+                    print(
+                        "    [FL] Cache-only: cache legacy/compact chưa đủ "
+                        "ordered events, bỏ qua bug này."
+                    )
+                    continue
+                print(
+                    f"    [FL] Runtime cache HIT ({cache_kind}); "
+                    "không build/chạy regression test lại."
+                )
+            else:
+                if cache_only:
+                    print(
+                        "    [FL] Cache-only: chưa có runtime cache hợp lệ, "
+                        "bỏ qua bug này."
+                    )
+                    continue
+                if refresh_runtime_traces:
+                    print("    [FL] Ép refresh runtime trace.")
+                else:
+                    print(
+                        "    [FL] Runtime cache MISS; build và chạy regression "
+                        "test để tạo trace."
+                    )
+                runtime_evidence = collect_regression_runtime_evidence(
+                    bug_for_fl,
+                    artifact_dir=trace_dir,
+                )
+            # Runtime collection is the expensive, independently reusable
+            # boundary. Persist it before source investigation or an LLM call
+            # so a later planner/ranker failure never forces another build.
+            if not cache_info.get("hit"):
+                atomic_write_json(
+                    os.path.join(trace_dir, "runtime_evidence.json"),
+                    compact_runtime_evidence(runtime_evidence),
+                )
+                if runtime_evidence.get("fresh_execution"):
+                    full_cache_path = write_full_runtime_evidence_cache(
+                        runtime_evidence,
+                        artifact_dir=trace_dir,
+                    )
+                    if full_cache_path:
+                        print(
+                            "    [FL] Full runtime cache → "
+                            f"{full_cache_path}"
+                        )
+            if not runtime_evidence.get("fresh_execution"):
+                print(
+                    "    [FL] Không thu được fresh runtime trace; "
+                    "không fallback sang coverage metadata."
+                )
+                runtime_diagnostics = list(dict.fromkeys(
+                    str(value)
+                    for value in (
+                        runtime_evidence.get("diagnostics") or []
+                    )
+                    if str(value)
+                ))
+                if runtime_diagnostics:
+                    print(
+                        "    [FL] Diagnostics: "
+                        + ", ".join(runtime_diagnostics[:8])
+                    )
+                compile_record = runtime_evidence.get("compile") or {}
+                if compile_record.get("returncode") not in {None, 0}:
+                    print(
+                        "    [FL] Compile log: "
+                        f"{compile_record.get('artifact') or 'unavailable'}"
+                    )
+                func_scores = {}
+                file_scores = {}
+                class_scores = {}
+                causal_evidence = {
+                    "version": 8,
+                    "engine": "scenario_first_input_aware_causal_trace",
+                    "ground_truth_used": False,
+                    "tests": [],
+                    "runtime_trace": compact_runtime_evidence(
+                        runtime_evidence
+                    ),
+                    "diagnostics": list(dict.fromkeys([
+                        "fresh_runtime_trace_unavailable",
+                        *(runtime_evidence.get("diagnostics") or []),
+                    ])),
+                }
+            else:
+                (
+                    func_scores,
+                    file_scores,
+                    class_scores,
+                    causal_evidence,
+                ) = calculate_causal_hierarchy_scores(
+                    bug=bug_for_fl,
+                    runtime_evidence=runtime_evidence,
+                    llm_provider=fl_llm_provider,
+                    llm_rerank=llm_rerank,
+                    artifact_dir=trace_dir,
+                    targeted_probes=not cache_only,
+                )
 
         # --- Ground truth cho file-level / class-level ---
         gt_functions = bug.ground_truth  # list[str], ví dụ: ["file.c:func"]
@@ -195,40 +302,51 @@ def run_fl(
             "exclude_fixed_fail_tests": exclude_fixed_fail_tests,
             "excluded_fixed_fail_count": len(excluded_fixed_fail),
             "excluded_fixed_fail_tests": list(excluded_fixed_fail),
-            "excluded_zero_coverage_pass_count": len(zero_coverage_excluded),
-            "excluded_zero_coverage_pass_tests": list(zero_coverage_excluded),
+            "regression_only_runtime_trace": True,
         }
 
         func_results[bug.bug_id] = {
             "dataset":      dataset,
-            "formula":      "tarantula",
-            "reranker":     "ir",
+            "formula":      "evidence_driven_causal_proofs_v8",
+            "reranker":     (
+                "scenario+llm_trace_plan+causal_tiers"
+                if llm_rerank
+                else "scenario+deterministic_trace_plan+causal_tiers"
+            ),
             "scores":       func_scores,
-            "tarantula_scores": tarantula_func_scores,
             "ground_truth": gt_functions,
             "test_filter":  test_filter_info,
+            "causal_evidence": causal_evidence,
         }
 
         # Lưu file-level
         file_results[bug.bug_id] = {
             "dataset":      dataset,
-            "formula":      "tarantula",
-            "reranker":     "ir",
+            "formula":      "evidence_driven_causal_proofs_v8",
+            "reranker":     (
+                "scenario+llm_trace_plan+causal_tiers"
+                if llm_rerank
+                else "scenario+deterministic_trace_plan+causal_tiers"
+            ),
             "scores":       file_scores,
-            "tarantula_scores": tarantula_file_scores,
             "ground_truth": gt_files,
             "test_filter":  test_filter_info,
+            "causal_evidence_summary": _causal_evidence_summary(causal_evidence),
         }
 
         # Lưu class-level
         class_results[bug.bug_id] = {
             "dataset":      dataset,
-            "formula":      "tarantula",
-            "reranker":     "ir",
+            "formula":      "evidence_driven_causal_proofs_v8",
+            "reranker":     (
+                "scenario+llm_trace_plan+causal_tiers"
+                if llm_rerank
+                else "scenario+deterministic_trace_plan+causal_tiers"
+            ),
             "scores":       class_scores,
-            "tarantula_scores": tarantula_class_scores,
             "ground_truth": gt_classes,
             "test_filter":  test_filter_info,
+            "causal_evidence_summary": _causal_evidence_summary(causal_evidence),
         }
 
         # Final FL score chính là function score sau pipeline 3 mức.
@@ -236,41 +354,126 @@ def run_fl(
 
         combined_results[bug.bug_id] = {
             "dataset":      dataset,
-            "formula":      "tarantula",
-            "reranker":     "ir",
+            "formula":      "evidence_driven_causal_proofs_v8",
+            "reranker":     (
+                "scenario+llm_trace_plan+causal_tiers"
+                if llm_rerank
+                else "scenario+deterministic_trace_plan+causal_tiers"
+            ),
             "scores":       combined_scores,
-            "tarantula_scores": tarantula_func_scores,
             "ground_truth": gt_functions,
             "test_filter":  test_filter_info,
+            "causal_evidence": causal_evidence,
         }
+        write_bug_localization_checkpoint(
+            artifact_dir=trace_dir,
+            bug_id=bug.bug_id,
+            function_result=func_results[bug.bug_id],
+            file_result=file_results[bug.bug_id],
+            class_result=class_results[bug.bug_id],
+            combined_result=combined_results[bug.bug_id],
+        )
+        processed_count += 1
+        _checkpoint_fl_results(
+            output_dir=output_dir,
+            func_results=func_results,
+            file_results=file_results,
+            class_results=class_results,
+            combined_results=combined_results,
+        )
+        print(
+            f"    [FL] Checkpoint {processed_count}/{len(bugs)} bug đã hoàn tất."
+        )
 
     if exclude_fixed_fail_tests:
         print(f"[FL] Đã loại tổng cộng {total_excluded_fixed_fail} test buggy+fixed đều FAIL.")
-    print(f"[FL] Đã loại tổng cộng {total_excluded_zero_coverage} test PASS có coverage rỗng.")
 
     # --- Ghi file function-level ---
     func_file = os.path.join(output_dir, "fault_localization_function_results.json")
-    with open(func_file, "w") as f:
-        json.dump(func_results, f, indent=4)
+    atomic_write_json(func_file, func_results, indent=4)
     print(f"[FL] Function-level scores → {func_file}")
 
     # --- Ghi file file-level ---
     file_file = os.path.join(output_dir, "fault_localization_file_results.json")
-    with open(file_file, "w") as f:
-        json.dump(file_results, f, indent=4)
+    atomic_write_json(file_file, file_results, indent=4)
     print(f"[FL] File-level scores     → {file_file}")
 
     # --- Ghi file class-level ---
     class_file = os.path.join(output_dir, "fault_localization_class_results.json")
-    with open(class_file, "w") as f:
-        json.dump(class_results, f, indent=4)
+    atomic_write_json(class_file, class_results, indent=4)
     print(f"[FL] Class-level scores    → {class_file}")
 
     # --- Ghi file combined ---
     combined_file = os.path.join(output_dir, "fault_localization_results.json")
-    with open(combined_file, "w") as f:
-        json.dump(combined_results, f, indent=4)
-    print(f"[FL] Final FL scores (file→class→function IR rerank) → {combined_file}")
+    atomic_write_json(combined_file, combined_results, indent=4)
+    print(f"[FL] Final input/output dynamic-trace FL scores → {combined_file}")
+    if cache_only:
+        print(
+            f"[FL] Cache-only hoàn tất: đánh giá được {processed_count}/"
+            f"{len(bugs)} bug đã có cache."
+        )
+
+
+def _checkpoint_fl_results(
+    *,
+    output_dir: str,
+    func_results: dict,
+    file_results: dict,
+    class_results: dict,
+    combined_results: dict,
+) -> None:
+    """Atomically persist progress so an interrupted FL run is evaluable."""
+    records = {
+        "fault_localization_function_results.json": func_results,
+        "fault_localization_file_results.json": file_results,
+        "fault_localization_class_results.json": class_results,
+        "fault_localization_results.json": combined_results,
+    }
+    for filename, data in records.items():
+        atomic_write_json(
+            os.path.join(output_dir, filename),
+            data,
+            indent=4,
+        )
+
+
+def _causal_evidence_summary(evidence: dict) -> dict:
+    """Keep file/class result files compact while retaining audit metadata."""
+    ranking = evidence.get("ranking") or {}
+    slicing = evidence.get("dynamic_producer_slicing") or {}
+    scenarios = evidence.get("scenario_analysis") or {}
+    first_scenario = scenarios.get("first_failing_scenario") or {}
+    trace_plan = evidence.get("trace_plan") or {}
+    tiers = evidence.get("causal_tiers") or {}
+    probes = evidence.get("probe_evidence") or {}
+    targeted = evidence.get("targeted_probe_runtime") or {}
+    return {
+        "version": evidence.get("version"),
+        "engine": evidence.get("engine"),
+        "ground_truth_used": evidence.get("ground_truth_used", False),
+        "failed_test_count": len(evidence.get("tests") or []),
+        "candidate_count": ranking.get("candidate_count", 0),
+        "formula": ranking.get("formula", ""),
+        "dynamic_producer_slicing_used": bool(
+            ranking.get("dynamic_producer_slicing_used")
+        ),
+        "producer_invocation_count": len(slicing.get("invocations") or []),
+        "first_failing_scenario_id": first_scenario.get("scenario_id"),
+        "trace_plan_mode": trace_plan.get("mode"),
+        "supported_hypothesis_count": tiers.get(
+            "supported_hypothesis_count", 0
+        ),
+        "source_dossier_count": tiers.get("source_dossier_count", 0),
+        "probe_observed_count": probes.get("observed_count", 0),
+        "targeted_probe_fresh_execution": bool(
+            targeted.get("fresh_execution")
+        ),
+        "first_bad_transformation_confirmed": bool(
+            tiers.get("first_bad_transformation_confirmed")
+        ),
+        "boundary_data_gap": tiers.get("boundary_data_gap") or "",
+        "diagnostics": evidence.get("diagnostics") or [],
+    }
 
 
 def run_valid_fl(
@@ -280,7 +483,7 @@ def run_valid_fl(
 ) -> str:
     """
     Oracle FL cho kịch bản APR-only: đưa ground-truth function lên top 1.
-    File này tách khỏi FL thường để không trộn kết quả Tarantula/IR.
+    File này tách khỏi FL thường để không trộn kết quả causal FL.
     """
     print(f"[FL-valid] Đang load bugs từ dataset '{dataset}'...")
     loader = get_loader(dataset)
@@ -346,7 +549,6 @@ def run_valid_fl(
             "formula": "oracle",
             "reranker": "ground_truth_top1",
             "scores": scores,
-            "tarantula_scores": {},
             "ground_truth": gt_functions,
             "oracle_top1": oracle_top1,
             "exact_targets": exact_targets,
@@ -414,6 +616,7 @@ def _apr_round_environment(
     round_dir: str,
     dataset: str,
     round_index: int,
+    bug_id: str = "",
 ):
     """Scope all mutable APR outputs to one full-pipeline round."""
     updates = {
@@ -422,6 +625,7 @@ def _apr_round_environment(
         "APR_PATCHES_DIR": os.path.join(os.path.abspath(round_dir), "patches"),
         "APR_RUN_DATASET": dataset,
         "APR_RUN_ROUND": str(round_index),
+        "APR_RUN_BUG_ID": str(bug_id or ""),
     }
     previous = {key: os.environ.get(key) for key in updates}
     os.environ.update(updates)
@@ -442,6 +646,7 @@ def _write_round_evaluation(
     round_index: int,
     has_updated_fl: bool,
     apr_results_filename: str = "apr_results.json",
+    bug_id: str = "",
 ) -> str:
     """Run and persist the complete FL/APR console report for one round."""
     report_path = os.path.join(round_dir, "evaluation.txt")
@@ -449,8 +654,9 @@ def _write_round_evaluation(
         tee = _Tee(sys.stdout, report)
         with redirect_stdout(tee):
             print(
-                f"\n[Full] Evaluation vòng {round_index}: "
-                "FL input + APR"
+                f"\n[Full] Evaluation "
+                + (f"bug {bug_id}, " if bug_id else "")
+                + f"vòng {round_index}: FL input + APR"
                 + (" + FL sau APR feedback" if has_updated_fl else "")
             )
             evaluate_fl(dataset, level="combined", results_dir=round_dir)
@@ -461,6 +667,24 @@ def _write_round_evaluation(
                 results_filename=apr_results_filename,
                 label=f"LLM-based APR — full round {round_index}",
                 results_dir=round_dir,
+            )
+    return report_path
+
+
+def _write_full_run_evaluation(*, dataset: str, run_dir: str) -> str:
+    """Persist aggregate evaluation after every bug-major full run."""
+    report_path = os.path.join(run_dir, "evaluation.txt")
+    with open(report_path, "w") as report:
+        tee = _Tee(sys.stdout, report)
+        with redirect_stdout(tee):
+            print("\n[Full] Evaluation tổng hợp per-bug pipeline")
+            evaluate_fl(dataset, level="combined", results_dir=run_dir)
+            evaluate_fl(dataset, level="apr_feedback", results_dir=run_dir)
+            evaluate_apr(
+                dataset,
+                results_filename="apr_results_cumulative.json",
+                label="LLM-based APR — per-bug unified pipeline",
+                results_dir=run_dir,
             )
     return report_path
 
@@ -476,14 +700,39 @@ def run_full_pipeline(
     same_file_weight: float = 0.0,
     output_root: str = None,
     run_id: str = None,
+    fl_llm_rerank: bool = True,
+    refresh_runtime_traces: bool = False,
+    bug_ids: set = None,
 ) -> str:
-    """Run FL once, then APR → FL update for the requested APR rounds.
+    """Run the complete FL → APR → feedback loop for one bug at a time.
 
-    Every round is isolated under its own directory.  The FL feedback produced
-    after round N becomes ``fault_localization_results.json`` for round N+1.
+    Bug N is fully converged or exhausts its APR-round budget before bug N+1
+    starts.  Per-bug artifacts remain isolated while aggregate result files are
+    checkpointed at run level after each completed bug.
     """
     if rounds < 1:
-        raise ValueError("Số vòng APR của --full phải >= 1.")
+        raise ValueError("Số vòng APR tối đa cho mỗi bug phải >= 1.")
+
+    requested_bug_ids = {
+        str(bug_id).strip()
+        for bug_id in (bug_ids or set())
+        if str(bug_id).strip()
+    }
+    loader = get_loader(dataset)
+    dataset_bugs = loader.load_all()
+    selected_bugs = [
+        bug for bug in dataset_bugs
+        if not requested_bug_ids or str(bug.bug_id) in requested_bug_ids
+    ]
+    found_bug_ids = {str(bug.bug_id) for bug in selected_bugs}
+    missing_bug_ids = sorted(requested_bug_ids - found_bug_ids)
+    if missing_bug_ids:
+        raise ValueError(
+            "Không tìm thấy bug trong dataset "
+            f"'{dataset}': {', '.join(missing_bug_ids)}"
+        )
+    if not selected_bugs:
+        raise ValueError(f"Dataset '{dataset}' không có bug để chạy.")
 
     full_root = os.path.abspath(
         output_root or os.path.join(EXPERIMENTS_DIR, FULL_PIPELINE_DIRNAME)
@@ -493,219 +742,430 @@ def run_full_pipeline(
     run_dir = os.path.join(dataset_dir, selected_run_id)
     if os.path.exists(run_dir):
         raise FileExistsError(f"Full-pipeline run đã tồn tại: {run_dir}")
-    os.makedirs(run_dir, exist_ok=False)
+    bugs_root = os.path.join(run_dir, "bugs")
+    os.makedirs(bugs_root, exist_ok=False)
 
     run_manifest_path = os.path.join(run_dir, "run_manifest.json")
     run_manifest = {
-        "schema": "unified_debugging.full_pipeline.v1",
+        "schema": "unified_debugging.full_pipeline.v2",
+        "execution_order": "bug_major",
         "run_id": selected_run_id,
         "dataset": dataset,
+        "bug_count": len(selected_bugs),
+        "bug_ids": [str(bug.bug_id) for bug in selected_bugs],
         "round_count": rounds,
+        "max_rounds_per_bug": rounds,
         "llm_provider": llm_provider or "default",
+        "fl_llm_guide": bool(fl_llm_rerank),
+        "fl_llm_provider": (
+            llm_provider or FL_DEFAULT_LLM_PROVIDER
+            if fl_llm_rerank else "disabled"
+        ),
         "exclude_fixed_fail_tests": exclude_fixed_fail_tests,
         "apr_strength": apr_strength,
         "same_file_weight": same_file_weight,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "status": "running",
-        "rounds": [],
+        "bugs": [],
     }
     write_json(run_manifest_path, run_manifest)
 
     print(
-        f"[Full] Bắt đầu pipeline '{dataset}' với {rounds} vòng APR. "
+        f"[Full] Bắt đầu per-bug pipeline '{dataset}': "
+        f"{len(selected_bugs)} bug, tối đa {rounds} vòng/bug. "
         f"Run dir: {run_dir}"
     )
 
+    fl_result_filenames = (
+        "fault_localization_results.json",
+        "fault_localization_function_results.json",
+        "fault_localization_file_results.json",
+        "fault_localization_class_results.json",
+    )
+    aggregate_fl_results = {
+        filename: {} for filename in fl_result_filenames
+    }
+    aggregate_final_fl_results = {}
+    aggregate_apr_results = {}
+    plausible_bug_ids = set()
+    completed_round_count = 0
+    active_bug_manifest = None
+    active_bug_manifest_path = ""
     active_round_manifest = None
     active_round_manifest_path = ""
-    converged_bug_ids = set()
-    cumulative_apr_results = {}
-    stop_reason = ""
+
     try:
-        first_round_dir = os.path.join(run_dir, "round_01")
-        os.makedirs(first_round_dir, exist_ok=False)
-        run_fl(
-            dataset,
-            exclude_fixed_fail_tests=exclude_fixed_fail_tests,
-            results_dir=first_round_dir,
-        )
-
-        for round_index in range(1, rounds + 1):
-            round_dir = os.path.join(run_dir, f"round_{round_index:02d}")
-            os.makedirs(round_dir, exist_ok=True)
-            input_fl_path = os.path.join(
-                round_dir,
-                "fault_localization_results.json",
+        for bug_index, bug in enumerate(selected_bugs, start=1):
+            bug_id = str(bug.bug_id)
+            bug_dir = os.path.join(
+                bugs_root,
+                f"bug_{bug_index:03d}__{_safe_run_part(bug_id)}",
             )
-            if not os.path.isfile(input_fl_path):
-                raise FileNotFoundError(
-                    f"Thiếu FL input cho vòng {round_index}: {input_fl_path}"
-                )
-            with open(input_fl_path, "r") as stream:
-                round_fl_results = json.load(stream)
-            scored_bug_ids = {
-                str(bug_id)
-                for bug_id, record in round_fl_results.items()
-                if isinstance(record, dict)
-                and isinstance(record.get("scores"), dict)
-                and record.get("scores")
-            }
-            active_bug_ids = scored_bug_ids - converged_bug_ids
-            if not active_bug_ids:
-                stop_reason = "no_unresolved_scored_bugs"
-                print(
-                    f"[Full] Dừng trước vòng {round_index}: không còn bug có "
-                    "FL scores cần APR."
-                )
-                break
-
-            apr_results_path = os.path.join(round_dir, "apr_results.json")
-            cumulative_apr_results_path = os.path.join(
-                round_dir,
-                "apr_results_cumulative.json",
-            )
-            llm_patches_dir = os.path.join(round_dir, "llm_patches")
-            patches_dir = os.path.join(round_dir, "patches")
-            os.makedirs(llm_patches_dir, exist_ok=True)
-            os.makedirs(patches_dir, exist_ok=True)
-            round_manifest = {
-                "schema": "unified_debugging.full_pipeline.round.v1",
-                "round": round_index,
+            os.makedirs(bug_dir, exist_ok=False)
+            bug_manifest_path = os.path.join(bug_dir, "bug_manifest.json")
+            bug_manifest = {
+                "schema": "unified_debugging.full_pipeline.bug.v1",
+                "bug_index": bug_index,
+                "bug_id": bug_id,
                 "status": "running",
-                "input_fl": _relpath(input_fl_path, run_dir),
-                "apr_results": _relpath(apr_results_path, run_dir),
-                "llm_patches_dir": _relpath(llm_patches_dir, run_dir),
-                "patches_dir": _relpath(patches_dir, run_dir),
-                "active_bug_count": len(active_bug_ids),
-                "active_bug_ids": sorted(active_bug_ids),
-                "skipped_plausible_bug_ids": sorted(converged_bug_ids),
+                "max_rounds": rounds,
+                "rounds": [],
+                "started_at": datetime.now(timezone.utc).isoformat(),
             }
-            round_manifest_path = os.path.join(round_dir, "round_manifest.json")
-            write_json(round_manifest_path, round_manifest)
-            active_round_manifest = round_manifest
-            active_round_manifest_path = round_manifest_path
+            write_json(bug_manifest_path, bug_manifest)
+            active_bug_manifest = bug_manifest
+            active_bug_manifest_path = bug_manifest_path
+            run_manifest["active_bug"] = {
+                "bug_index": bug_index,
+                "bug_id": bug_id,
+                "manifest": _relpath(bug_manifest_path, run_dir),
+            }
+            write_json(run_manifest_path, run_manifest)
 
             print(
-                f"\n[Full] Vòng {round_index}/{rounds}: APR dùng "
-                f"{input_fl_path}"
+                f"\n[Full] Bug {bug_index}/{len(selected_bugs)} — {bug_id}: "
+                "bắt đầu FL → APR → Update FL."
             )
-            with _apr_round_environment(
-                round_dir=round_dir,
-                dataset=dataset,
-                round_index=round_index,
-            ):
-                run_apr_pipeline(
-                    dataset,
-                    llm_provider=llm_provider,
-                    exclude_fixed_fail_tests=exclude_fixed_fail_tests,
-                    fl_results_filename=input_fl_path,
-                    apr_results_filename=apr_results_path,
-                    only_missing=only_missing,
-                    skip_bug_ids=converged_bug_ids,
-                )
+            first_round_dir = os.path.join(bug_dir, "round_01")
+            os.makedirs(first_round_dir, exist_ok=False)
+            run_fl(
+                dataset,
+                exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+                results_dir=first_round_dir,
+                llm_provider=llm_provider,
+                llm_rerank=fl_llm_rerank,
+                refresh_runtime_traces=refresh_runtime_traces,
+                include_bug_ids={bug_id},
+            )
 
-            if not os.path.isfile(apr_results_path):
-                raise RuntimeError(
-                    f"APR vòng {round_index} không tạo kết quả: {apr_results_path}"
-                )
-
-            with open(apr_results_path, "r") as stream:
-                current_apr_results = json.load(stream)
-            for bug_id, result in current_apr_results.items():
-                previous = cumulative_apr_results.get(bug_id)
-                if isinstance(previous, dict) and is_plausible_status(
-                    previous.get("status")
-                ):
+            for filename in fl_result_filenames:
+                path = os.path.join(first_round_dir, filename)
+                if not os.path.isfile(path):
                     continue
-                cumulative_apr_results[bug_id] = result
+                with open(path, "r") as stream:
+                    one_bug_results = json.load(stream)
+                if bug_id in one_bug_results:
+                    aggregate_fl_results[filename][bug_id] = one_bug_results[
+                        bug_id
+                    ]
+                    write_json(
+                        os.path.join(run_dir, filename),
+                        aggregate_fl_results[filename],
+                    )
 
-            plausible_this_round = {
-                str(bug_id)
-                for bug_id, result in current_apr_results.items()
-                if isinstance(result, dict)
-                and is_plausible_status(result.get("status"))
-            }
-            converged_bug_ids.update(plausible_this_round)
-            unresolved_bug_ids = scored_bug_ids - converged_bug_ids
-            write_json(cumulative_apr_results_path, cumulative_apr_results)
-            round_manifest["apr_results_cumulative"] = _relpath(
-                cumulative_apr_results_path,
-                run_dir,
-            )
-            round_manifest["plausible_bug_ids"] = sorted(plausible_this_round)
-            round_manifest["cumulative_plausible_bug_ids"] = sorted(
-                converged_bug_ids
-            )
-            round_manifest["unresolved_bug_count"] = len(unresolved_bug_ids)
+            base_record = aggregate_fl_results[
+                "fault_localization_results.json"
+            ].get(bug_id)
+            if not isinstance(base_record, dict):
+                raise RuntimeError(
+                    f"FL không tạo record cho bug {bug_id}."
+                )
 
-            should_continue = round_index < rounds and bool(unresolved_bug_ids)
-            has_updated_fl = should_continue
-            if has_updated_fl:
-                feedback_path = os.path.join(
-                    round_dir,
-                    "fault_localization_apr_feedback_results.json",
+            latest_bug_fl_results = {bug_id: base_record}
+            bug_apr_results = {}
+            bug_converged = False
+            bug_stop_reason = ""
+            scores = base_record.get("scores") or {}
+            if not isinstance(scores, dict) or not scores:
+                bug_stop_reason = "missing_fl_scores"
+                print(
+                    f"[Full] Bug {bug_id}: FL không có scores; bỏ qua APR."
                 )
-                updated_results, update_summary = update_fl_from_apr(
-                    fl_path=input_fl_path,
-                    apr_path=apr_results_path,
-                    llm_patches_dir=llm_patches_dir,
-                    output_path=feedback_path,
-                    apr_strength=apr_strength,
-                    file_weight=same_file_weight,
-                    skip_bug_ids=converged_bug_ids,
-                )
-                next_round_dir = os.path.join(
+            else:
+                for round_index in range(1, rounds + 1):
+                    round_dir = os.path.join(
+                        bug_dir,
+                        f"round_{round_index:02d}",
+                    )
+                    os.makedirs(round_dir, exist_ok=True)
+                    input_fl_path = os.path.join(
+                        round_dir,
+                        "fault_localization_results.json",
+                    )
+                    if not os.path.isfile(input_fl_path):
+                        raise FileNotFoundError(
+                            f"Thiếu FL input cho {bug_id}, vòng "
+                            f"{round_index}: {input_fl_path}"
+                        )
+
+                    apr_results_path = os.path.join(
+                        round_dir,
+                        "apr_results.json",
+                    )
+                    cumulative_apr_path = os.path.join(
+                        round_dir,
+                        "apr_results_cumulative.json",
+                    )
+                    llm_patches_dir = os.path.join(
+                        round_dir,
+                        "llm_patches",
+                    )
+                    patches_dir = os.path.join(round_dir, "patches")
+                    os.makedirs(llm_patches_dir, exist_ok=True)
+                    os.makedirs(patches_dir, exist_ok=True)
+                    round_manifest = {
+                        "schema": (
+                            "unified_debugging.full_pipeline.bug_round.v1"
+                        ),
+                        "bug_id": bug_id,
+                        "round": round_index,
+                        "status": "running",
+                        "input_fl": _relpath(input_fl_path, bug_dir),
+                        "apr_results": _relpath(
+                            apr_results_path,
+                            bug_dir,
+                        ),
+                        "llm_patches_dir": _relpath(
+                            llm_patches_dir,
+                            bug_dir,
+                        ),
+                        "patches_dir": _relpath(patches_dir, bug_dir),
+                    }
+                    round_manifest_path = os.path.join(
+                        round_dir,
+                        "round_manifest.json",
+                    )
+                    write_json(round_manifest_path, round_manifest)
+                    active_round_manifest = round_manifest
+                    active_round_manifest_path = round_manifest_path
+
+                    print(
+                        f"[Full] Bug {bug_id}, vòng "
+                        f"{round_index}/{rounds}: APR."
+                    )
+                    with _apr_round_environment(
+                        round_dir=round_dir,
+                        dataset=dataset,
+                        round_index=round_index,
+                        bug_id=bug_id,
+                    ):
+                        run_apr_pipeline(
+                            dataset,
+                            llm_provider=llm_provider,
+                            exclude_fixed_fail_tests=(
+                                exclude_fixed_fail_tests
+                            ),
+                            fl_results_filename=input_fl_path,
+                            apr_results_filename=apr_results_path,
+                            only_missing=only_missing,
+                            skip_bug_ids=set(),
+                        )
+
+                    if not os.path.isfile(apr_results_path):
+                        raise RuntimeError(
+                            f"APR không tạo kết quả cho {bug_id}, "
+                            f"vòng {round_index}: {apr_results_path}"
+                        )
+                    with open(apr_results_path, "r") as stream:
+                        current_apr_results = json.load(stream)
+                    current_result = current_apr_results.get(bug_id)
+                    if isinstance(current_result, dict):
+                        previous = bug_apr_results.get(bug_id)
+                        if not (
+                            isinstance(previous, dict)
+                            and is_plausible_status(
+                                previous.get("status")
+                            )
+                        ):
+                            bug_apr_results[bug_id] = current_result
+                    write_json(cumulative_apr_path, bug_apr_results)
+
+                    feedback_path = os.path.join(
+                        round_dir,
+                        "fault_localization_apr_feedback_results.json",
+                    )
+                    updated_results, update_summary = update_fl_from_apr(
+                        fl_path=input_fl_path,
+                        apr_path=apr_results_path,
+                        llm_patches_dir=llm_patches_dir,
+                        output_path=feedback_path,
+                        apr_strength=apr_strength,
+                        file_weight=same_file_weight,
+                        skip_bug_ids=set(),
+                        feedback_round=round_index,
+                    )
+                    latest_bug_fl_results = updated_results
+                    bug_converged = (
+                        isinstance(current_result, dict)
+                        and is_plausible_status(
+                            current_result.get("status")
+                        )
+                    )
+
+                    round_manifest["apr_results_cumulative"] = _relpath(
+                        cumulative_apr_path,
+                        bug_dir,
+                    )
+                    round_manifest["updated_fl"] = _relpath(
+                        feedback_path,
+                        bug_dir,
+                    )
+                    round_manifest["fl_update_summary"] = update_summary
+                    round_manifest["plausible"] = bug_converged
+                    if bug_converged:
+                        bug_stop_reason = "plausible_converged"
+                        round_manifest["stop_reason"] = bug_stop_reason
+                    elif round_index < rounds:
+                        next_round_dir = os.path.join(
+                            bug_dir,
+                            f"round_{round_index + 1:02d}",
+                        )
+                        os.makedirs(next_round_dir, exist_ok=True)
+                        next_fl_path = os.path.join(
+                            next_round_dir,
+                            "fault_localization_results.json",
+                        )
+                        write_json(next_fl_path, updated_results)
+                        round_manifest["next_round_fl"] = _relpath(
+                            next_fl_path,
+                            bug_dir,
+                        )
+                    else:
+                        bug_stop_reason = "max_rounds_exhausted"
+                        round_manifest["stop_reason"] = bug_stop_reason
+
+                    evaluation_path = _write_round_evaluation(
+                        dataset=dataset,
+                        round_dir=round_dir,
+                        round_index=round_index,
+                        has_updated_fl=True,
+                        apr_results_filename=(
+                            "apr_results_cumulative.json"
+                        ),
+                        bug_id=bug_id,
+                    )
+                    round_manifest["evaluation"] = _relpath(
+                        evaluation_path,
+                        bug_dir,
+                    )
+                    round_manifest["status"] = "complete"
+                    write_json(round_manifest_path, round_manifest)
+                    bug_manifest["rounds"].append(round_manifest)
+                    bug_manifest["completed_round_count"] = len(
+                        bug_manifest["rounds"]
+                    )
+                    write_json(bug_manifest_path, bug_manifest)
+                    completed_round_count += 1
+                    active_round_manifest = None
+                    active_round_manifest_path = ""
+                    if bug_converged:
+                        break
+
+            aggregate_final_fl_results[bug_id] = (
+                latest_bug_fl_results.get(bug_id, base_record)
+            )
+            if bug_id in bug_apr_results:
+                aggregate_apr_results[bug_id] = bug_apr_results[bug_id]
+            if bug_converged:
+                plausible_bug_ids.add(bug_id)
+
+            bug_final_fl_path = os.path.join(
+                bug_dir,
+                "fault_localization_apr_feedback_results.json",
+            )
+            bug_final_apr_path = os.path.join(
+                bug_dir,
+                "apr_results_cumulative.json",
+            )
+            write_json(bug_final_fl_path, latest_bug_fl_results)
+            write_json(bug_final_apr_path, bug_apr_results)
+            write_json(
+                os.path.join(
                     run_dir,
-                    f"round_{round_index + 1:02d}",
-                )
-                os.makedirs(next_round_dir, exist_ok=True)
-                next_fl_path = os.path.join(
-                    next_round_dir,
-                    "fault_localization_results.json",
-                )
-                write_json(next_fl_path, updated_results)
-                round_manifest["updated_fl"] = _relpath(feedback_path, run_dir)
-                round_manifest["next_round_fl"] = _relpath(next_fl_path, run_dir)
-                round_manifest["fl_update_summary"] = update_summary
-                print(
-                    f"[Full] Vòng {round_index}: Update FL "
-                    f"{update_summary['updated_records']}/"
-                    f"{update_summary['total_fl_records']} records → {next_fl_path}"
-                )
-            elif round_index < rounds:
-                stop_reason = "all_scored_bugs_plausible"
-                round_manifest["early_stop"] = True
-                round_manifest["stop_reason"] = stop_reason
-                print(
-                    f"[Full] Dừng sớm sau vòng {round_index}: toàn bộ "
-                    f"{len(scored_bug_ids)} bug có FL scores đã plausible."
-                )
-
-            evaluation_path = _write_round_evaluation(
-                dataset=dataset,
-                round_dir=round_dir,
-                round_index=round_index,
-                has_updated_fl=has_updated_fl,
-                apr_results_filename="apr_results_cumulative.json",
+                    "fault_localization_apr_feedback_results.json",
+                ),
+                aggregate_final_fl_results,
             )
-            round_manifest["evaluation"] = _relpath(evaluation_path, run_dir)
-            round_manifest["status"] = "complete"
-            write_json(round_manifest_path, round_manifest)
-            run_manifest["rounds"].append(round_manifest)
-            write_json(run_manifest_path, run_manifest)
-            active_round_manifest = None
-            active_round_manifest_path = ""
-            if stop_reason:
-                break
+            write_json(
+                os.path.join(run_dir, "apr_results_cumulative.json"),
+                aggregate_apr_results,
+            )
 
-        run_manifest["status"] = "complete"
-        run_manifest["completed_round_count"] = len(run_manifest["rounds"])
-        run_manifest["early_stopped"] = bool(
-            stop_reason and len(run_manifest["rounds"]) < rounds
+            bug_manifest["status"] = "complete"
+            bug_manifest["outcome"] = (
+                "plausible" if bug_converged else "unresolved"
+            )
+            bug_manifest["stop_reason"] = (
+                bug_stop_reason or "complete"
+            )
+            bug_manifest["completed_round_count"] = len(
+                bug_manifest["rounds"]
+            )
+            bug_manifest["final_fl_results"] = _relpath(
+                bug_final_fl_path,
+                bug_dir,
+            )
+            bug_manifest["final_apr_results"] = _relpath(
+                bug_final_apr_path,
+                bug_dir,
+            )
+            bug_manifest["completed_at"] = datetime.now(
+                timezone.utc
+            ).isoformat()
+            write_json(bug_manifest_path, bug_manifest)
+            run_manifest["bugs"].append({
+                "bug_index": bug_index,
+                "bug_id": bug_id,
+                "status": bug_manifest["status"],
+                "outcome": bug_manifest["outcome"],
+                "stop_reason": bug_manifest["stop_reason"],
+                "completed_round_count": bug_manifest[
+                    "completed_round_count"
+                ],
+                "manifest": _relpath(bug_manifest_path, run_dir),
+            })
+            run_manifest["completed_bug_count"] = len(
+                run_manifest["bugs"]
+            )
+            run_manifest["completed_round_count"] = completed_round_count
+            run_manifest["plausible_bug_ids"] = sorted(
+                plausible_bug_ids
+            )
+            write_json(run_manifest_path, run_manifest)
+            active_bug_manifest = None
+            active_bug_manifest_path = ""
+            run_manifest.pop("active_bug", None)
+            write_json(run_manifest_path, run_manifest)
+            print(
+                f"[Full] Bug {bug_id}: {bug_manifest['outcome']} sau "
+                f"{bug_manifest['completed_round_count']} vòng."
+            )
+
+        final_apr_path = os.path.join(
+            run_dir,
+            "apr_results_cumulative.json",
         )
-        run_manifest["stop_reason"] = stop_reason
-        run_manifest["cumulative_plausible_bug_ids"] = sorted(converged_bug_ids)
-        run_manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
+        final_fl_path = os.path.join(
+            run_dir,
+            "fault_localization_apr_feedback_results.json",
+        )
+        write_json(final_apr_path, aggregate_apr_results)
+        write_json(final_fl_path, aggregate_final_fl_results)
+        evaluation_path = _write_full_run_evaluation(
+            dataset=dataset,
+            run_dir=run_dir,
+        )
+        run_manifest["status"] = "complete"
+        run_manifest.pop("active_bug", None)
+        run_manifest["completed_bug_count"] = len(run_manifest["bugs"])
+        run_manifest["completed_round_count"] = completed_round_count
+        run_manifest["plausible_bug_ids"] = sorted(plausible_bug_ids)
+        run_manifest["plausible_bug_count"] = len(plausible_bug_ids)
+        run_manifest["final_apr_results"] = _relpath(
+            final_apr_path,
+            run_dir,
+        )
+        run_manifest["final_fl_results"] = _relpath(
+            final_fl_path,
+            run_dir,
+        )
+        run_manifest["evaluation"] = _relpath(
+            evaluation_path,
+            run_dir,
+        )
+        run_manifest["completed_at"] = datetime.now(
+            timezone.utc
+        ).isoformat()
         write_json(run_manifest_path, run_manifest)
         os.makedirs(dataset_dir, exist_ok=True)
         write_json(
@@ -713,31 +1173,50 @@ def run_full_pipeline(
             {
                 "run_id": selected_run_id,
                 "run_dir": _relpath(run_dir, dataset_dir),
-                "manifest": _relpath(run_manifest_path, dataset_dir),
-                "round_count": rounds,
-                "completed_round_count": len(run_manifest["rounds"]),
-                "early_stopped": run_manifest["early_stopped"],
-                "stop_reason": stop_reason,
+                "manifest": _relpath(
+                    run_manifest_path,
+                    dataset_dir,
+                ),
+                "execution_order": "bug_major",
+                "bug_count": len(selected_bugs),
+                "completed_bug_count": len(run_manifest["bugs"]),
+                "plausible_bug_count": len(plausible_bug_ids),
+                "max_rounds_per_bug": rounds,
                 "status": "complete",
             },
         )
     except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
         if active_round_manifest is not None and active_round_manifest_path:
             active_round_manifest["status"] = "failed"
-            active_round_manifest["error"] = f"{type(exc).__name__}: {exc}"
-            write_json(active_round_manifest_path, active_round_manifest)
-            if not any(
-                item.get("round") == active_round_manifest.get("round")
-                for item in run_manifest["rounds"]
-            ):
-                run_manifest["rounds"].append(active_round_manifest)
+            active_round_manifest["error"] = error
+            write_json(
+                active_round_manifest_path,
+                active_round_manifest,
+            )
+        if active_bug_manifest is not None and active_bug_manifest_path:
+            active_bug_manifest["status"] = "failed"
+            active_bug_manifest["error"] = error
+            active_bug_manifest["failed_at"] = datetime.now(
+                timezone.utc
+            ).isoformat()
+            write_json(
+                active_bug_manifest_path,
+                active_bug_manifest,
+            )
         run_manifest["status"] = "failed"
-        run_manifest["error"] = f"{type(exc).__name__}: {exc}"
-        run_manifest["failed_at"] = datetime.now(timezone.utc).isoformat()
+        run_manifest["error"] = error
+        run_manifest["failed_at"] = datetime.now(
+            timezone.utc
+        ).isoformat()
         write_json(run_manifest_path, run_manifest)
         raise
 
-    print(f"[Full] Hoàn tất {rounds} vòng. Manifest: {run_manifest_path}")
+    print(
+        f"[Full] Hoàn tất {len(run_manifest['bugs'])}/"
+        f"{len(selected_bugs)} bug; plausible="
+        f"{len(plausible_bug_ids)}. Manifest: {run_manifest_path}"
+    )
     return run_dir
 
 
@@ -747,7 +1226,11 @@ def main():
         "--dataset", default="codeflaws",
         help="Tên dataset cần chạy: codeflaws (mặc định), defects4c, ..."
     )
-    parser.add_argument("--fl",           action="store_true", help="Chỉ chạy Fault Localization (Tarantula)")
+    parser.add_argument(
+        "--fl",
+        action="store_true",
+        help="Chỉ chạy input/output-guided dynamic Fault Localization",
+    )
     parser.add_argument("--apr",          action="store_true", help="Chỉ chạy APR với LLM")
     parser.add_argument("--apr-validate", action="store_true", help="Chỉ validate lại các patch LLM đã lưu, không gọi LLM")
     parser.add_argument("--refix",        action="store_true", help="Chạy ReFix từ llm_patches đã lưu")
@@ -757,8 +1240,8 @@ def main():
         "--full",
         action="store_true",
         help=(
-            "Chạy pipeline lặp đầy đủ: FL → APR → Update FL → APR...; "
-            "mỗi vòng có artifact và evaluation riêng."
+            "Chạy unified pipeline theo từng bug: hoàn tất "
+            "FL → APR → Update FL → ... cho bug hiện tại rồi mới sang bug kế."
         ),
     )
     parser.add_argument(
@@ -768,8 +1251,8 @@ def main():
         type=int,
         default=FULL_PIPELINE_DEFAULT_ROUNDS,
         help=(
-            "Tổng số vòng APR khi dùng --full (mặc định: 2). "
-            "Update FL được chạy giữa hai vòng liên tiếp."
+            "Số vòng APR tối đa cho mỗi bug khi dùng --full "
+            "(mặc định: 2)."
         ),
     )
     parser.add_argument(
@@ -835,8 +1318,47 @@ def main():
         "--llm",
         default=None,
         choices=["openai", "openrouter"],
-        help="LLM provider cho APR: openai hoặc openrouter. "
-             "Override biến môi trường LLM_PROVIDER.",
+        help=(
+            "LLM provider cho APR và FL guide: openai hoặc openrouter. "
+            "Nếu bỏ trống, APR đọc LLM_PROVIDER còn FL mặc định OpenRouter."
+        ),
+    )
+    fl_llm_group = parser.add_mutually_exclusive_group()
+    fl_llm_group.add_argument(
+        "--fl-llm-guide",
+        "--fl-llm-rerank",
+        dest="fl_llm_rerank",
+        action="store_true",
+        help=(
+            "Dùng LLM phân tích Input/Expected/Actual và lập boundary trace "
+            "plan (mặc định bật). Nếu không truyền --llm, FL dùng OpenRouter "
+            "và OPENROUTER_API_KEY giống APR."
+        ),
+    )
+    fl_llm_group.add_argument(
+        "--no-fl-llm-guide",
+        dest="fl_llm_rerank",
+        action="store_false",
+        help=(
+            "Tắt LLM trace guide của FL và chỉ dùng trace plan deterministic."
+        ),
+    )
+    parser.set_defaults(fl_llm_rerank=True)
+    parser.add_argument(
+        "--refresh-runtime-traces",
+        action="store_true",
+        help=(
+            "Bỏ qua runtime cache và build/chạy lại regression tests cho FL. "
+            "Mặc định tái sử dụng cache hợp lệ theo từng bug."
+        ),
+    )
+    parser.add_argument(
+        "--fl-cache-only",
+        action="store_true",
+        help=(
+            "Chỉ tổng hợp/evaluate các bug đã có runtime cache; không build "
+            "hoặc chạy test cho bug còn thiếu. Chỉ dùng với --fl."
+        ),
     )
     args = parser.parse_args()
 
@@ -844,6 +1366,15 @@ def main():
     llm_provider = args.llm   # None → đọc từ LLM_PROVIDER trong .env
     fl_eval_level = "valid" if args.valid and args.fl_eval_level == "combined" else args.fl_eval_level
     exclude_fixed_fail_tests = not args.include_fixed_fail_tests
+    if args.fl_cache_only and (
+        not args.fl
+        or args.full
+        or args.all
+        or args.apr
+        or args.apr_validate
+        or args.refix
+    ):
+        parser.error("--fl-cache-only chỉ dùng với mode --fl.")
 
     if not (
         args.full
@@ -876,8 +1407,6 @@ def main():
             parser.error(
                 "--full không cần --with-refix vì APR đã chạy ReFix nội tuyến."
             )
-        if args.bug_id:
-            parser.error("--bug-id chưa áp dụng cho --full; hãy chọn dataset riêng.")
         if args.full_rounds < 1:
             parser.error("--full-rounds/--rounds phải >= 1.")
         run_full_pipeline(
@@ -888,6 +1417,9 @@ def main():
             only_missing=args.only_missing,
             apr_strength=args.full_apr_strength,
             same_file_weight=args.full_same_file_weight,
+            fl_llm_rerank=args.fl_llm_rerank,
+            refresh_runtime_traces=args.refresh_runtime_traces,
+            bug_ids={args.bug_id} if args.bug_id else None,
         )
         return
 
@@ -898,7 +1430,13 @@ def main():
         if args.valid:
             run_valid_fl(dataset, exclude_fixed_fail_tests=exclude_fixed_fail_tests)
         else:
-            run_fl(dataset, exclude_fixed_fail_tests=exclude_fixed_fail_tests)
+            run_fl(
+                dataset,
+                exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+                llm_provider=llm_provider,
+                llm_rerank=args.fl_llm_rerank,
+                refresh_runtime_traces=args.refresh_runtime_traces,
+            )
         run_apr_pipeline(
             dataset,
             llm_provider=llm_provider,
@@ -929,7 +1467,14 @@ def main():
             if args.valid:
                 run_valid_fl(dataset, exclude_fixed_fail_tests=exclude_fixed_fail_tests)
             else:
-                run_fl(dataset, exclude_fixed_fail_tests=exclude_fixed_fail_tests)
+                run_fl(
+                    dataset,
+                    exclude_fixed_fail_tests=exclude_fixed_fail_tests,
+                    llm_provider=llm_provider,
+                    llm_rerank=args.fl_llm_rerank,
+                    refresh_runtime_traces=args.refresh_runtime_traces,
+                    cache_only=args.fl_cache_only,
+                )
             evaluate_fl(dataset, level=fl_eval_level)
 
         if args.apr:

@@ -45,15 +45,18 @@ python3 main.py --all --dataset tcpdump --llm openrouter
 FL → APR pipeline mới → Evaluation
 ```
 
-### Chạy full pipeline lặp FL/APR feedback
+### Chạy unified pipeline theo từng bug
 
 ```bash
-# Mặc định 2 vòng APR:
-# FL → APR vòng 1 → Update FL → APR vòng 2
+# Với từng bug: FL → APR → Update FL → ... đến plausible hoặc hết 2 vòng;
+# hoàn tất bug hiện tại rồi mới chuyển sang bug kế tiếp.
 python3 main.py --full --dataset fmt --llm openrouter
 
-# Chạy 4 vòng APR; Update FL được chạy giữa mỗi hai vòng.
+# Tối đa 4 vòng APR cho mỗi bug.
 python3 main.py --full --dataset libyang --rounds 4 --llm openrouter
+
+# Chạy unified pipeline cho đúng một bug.
+python3 main.py --full --dataset fmt --bug-id A.2 --llm openrouter
 ```
 
 Mỗi lần chạy tạo một thư mục độc lập:
@@ -61,36 +64,30 @@ Mỗi lần chạy tạo một thư mục độc lập:
 ```text
 experiments/full_pipeline_runs/<dataset>/<run-id>/
 ├── run_manifest.json
-├── round_01/
-│   ├── fault_localization_results.json
-│   ├── fault_localization_apr_feedback_results.json
-│   ├── apr_results.json
-│   ├── apr_results_cumulative.json
-│   ├── llm_patches/
-│   ├── patches/
-│   ├── evaluation.txt
-│   └── round_manifest.json
-├── round_02/
-│   └── ...
+├── apr_results_cumulative.json
+├── fault_localization_results.json
+├── fault_localization_apr_feedback_results.json
+├── evaluation.txt
+├── bugs/
+│   ├── bug_001__A.2/
+│   │   ├── bug_manifest.json
+│   │   ├── apr_results_cumulative.json
+│   │   ├── fault_localization_apr_feedback_results.json
+│   │   ├── round_01/
+│   │   │   ├── fault_localization_results.json
+│   │   │   ├── fault_localization_apr_feedback_results.json
+│   │   │   ├── apr_results.json
+│   │   │   ├── apr_results_cumulative.json
+│   │   │   ├── llm_patches/
+│   │   │   ├── patches/
+│   │   │   ├── evaluation.txt
+│   │   │   └── round_manifest.json
+│   │   └── round_02/
+│   │       └── ...
+│   └── bug_002__A.3/
+│       └── ...
 └── ...
 ```
-
-`evaluation.txt` của từng vòng lưu đầy đủ evaluation của FL đầu vào, APR và
-FL sau APR feedback (nếu còn vòng tiếp theo). Artifact và manifest của các
-vòng được tách riêng nên không ghi đè lẫn nhau.
-
-Khi một bug đã đạt `plausible`, các vòng sau không Update FL và không chạy APR
-lại cho bug đó. `apr_results_cumulative.json` giữ kết quả plausible từ các vòng
-trước để evaluation của vòng hiện tại vẫn bao phủ đầy đủ kết quả đã có. Nếu
-toàn bộ bug có FL scores đã plausible, pipeline dừng sớm dù chưa hết `--rounds`;
-trạng thái này được ghi trong `run_manifest.json`.
-
-Trong APR pipeline mới, ReFix đã được gọi tự động nếu best FixAgent candidate
-chưa success. Vì vậy, bình thường không cần thêm `--with-refix`.
-
-Mặc định, các mode FL/APR/APR-validate/ReFix/all đều loại khỏi quy trình những test có
-`outcome=FAIL` và `outcome_fixed=FAIL`.
-Nếu cần chạy theo hành vi cũ để so sánh, thêm `--include-fixed-fail-tests`.
 
 ### Chạy từng bước
 
@@ -200,13 +197,17 @@ chính xác:
 | `--valid`       | Dùng oracle FL: ground-truth top 1, APR chỉ thử top 1; đọc/ghi `fault_localization_results_valid.json` và `apr_results_valid.json` |
 | `--eval`        | Chỉ chạy Evaluation (FL + APR), lọc theo dataset   |
 | `--all`         | Chạy FL → APR pipeline mới → Evaluation            |
-| `--full`        | Chạy FL → APR → Update FL → APR lặp nhiều vòng; lưu riêng artifact/evaluation từng vòng |
-| `--rounds`, `--full-rounds` | Tổng số vòng APR của `--full`; mặc định `2` |
+| `--full`        | Chạy trọn FL → APR → Update FL → ... theo từng bug; xong bug hiện tại mới sang bug kế |
+| `--rounds`, `--full-rounds` | Số vòng APR tối đa cho mỗi bug trong `--full`; mặc định `2` |
 | `--full-apr-strength` | Trọng số APR feedback khi Update FL; mặc định `1.0` |
 | `--full-same-file-weight` | Trọng số lan truyền feedback sang function cùng file; mặc định `0.0` |
 | `--include-fixed-fail-tests` | Không loại test có `outcome=FAIL` và `outcome_fixed=FAIL`; mặc định các test này bị loại khỏi FL/APR/validation |
 | `--fl-eval-level` | Chọn file FL để tính Top-K: `combined`, `valid`, `apr_feedback`, `function`, `file`, `class`, hoặc `all` |
 | `--llm`         | Provider APR: `openai` hoặc `openrouter` |
+| `--fl-llm-guide` | Cho LLM lập Input/Expected/Actual boundary trace plan; mặc định bật, alias tương thích: `--fl-llm-rerank` |
+| `--no-fl-llm-guide` | Tắt LLM của FL và dùng deterministic trace plan |
+| `--refresh-runtime-traces` | Bỏ cache và build/chạy lại regression trace |
+| `--fl-cache-only` | Chỉ tổng hợp và evaluation các bug đã có runtime cache; không chạy bug còn thiếu |
 
 ### Biến môi trường APR
 

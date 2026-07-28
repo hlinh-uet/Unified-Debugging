@@ -199,6 +199,7 @@ def enumerate_function_targets(
     *,
     source_path: str = "",
     source_file: str = "",
+    resolution_hints: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Return every AST definition compatible with a requested symbol.
 
@@ -210,7 +211,11 @@ def enumerate_function_targets(
     if tree is None or source_bytes is None:
         return []
     requested = _clean_qualified_name(requested_name)
+    requested_variants = _source_qualified_name_variants(requested)
     requested_scoped = "::" in requested
+    hints = resolution_hints if isinstance(resolution_hints, dict) else {}
+    fl_source_line = int(hints.get("fl_source_line") or 0)
+    fl_source_digest = str(hints.get("fl_source_digest") or "")
     out = []
     for node in walk_nodes(tree.root_node):
         if node.type != "function_definition":
@@ -221,19 +226,50 @@ def enumerate_function_targets(
         actual = function_name_from_declarator(declarator, source_bytes)
         names = _function_candidate_names(node, actual, source_bytes)
         qualified = max(names, key=lambda value: value.count("::"), default=actual)
+        code = node_text(node, source_bytes)
+        digest = hashlib.sha256(code.encode("utf-8", errors="replace")).hexdigest()
         if requested_scoped:
-            matched = any(
-                name == requested or name.endswith("::" + requested)
-                for name in names
-            )
+            matched_variant = next((
+                variant
+                for variant in requested_variants
+                if any(
+                    name == variant or name.endswith("::" + variant)
+                    for name in names
+                )
+            ), "")
+            matched = bool(matched_variant)
         else:
             matched = any(name.rsplit("::", 1)[-1] == requested for name in names)
+            matched_variant = requested if matched else ""
+        exact_fl_source_identity = bool(
+            fl_source_line
+            and fl_source_digest
+            and int(node.start_point[0]) + 1 <= fl_source_line
+            <= int(node.end_point[0]) + 1
+            and digest == fl_source_digest
+        )
+        if not matched and exact_fl_source_identity:
+            # Runtime/demangled names can be malformed for lambdas or differ
+            # completely from their source spelling.  A source line plus the
+            # exact AST-body digest produced by FL is a stronger identity than
+            # the symbol string and is safe to use as the APR target.
+            matched = True
+            matched_variant = (
+                requested_variants[-1]
+                if _is_plausible_compiled_qualified_name(requested)
+                else qualified or actual
+            )
+            if matched_variant:
+                qualified = matched_variant
         if not matched:
             continue
-        code = node_text(node, source_bytes)
+        if matched_variant and matched_variant != requested:
+            # Hand the source spelling to APR.  Tree-sitter ancestor scopes can
+            # contain duplicated/missing namespaces around unexpanded macros;
+            # the matched compiled-name suffix is the stable spelling here.
+            qualified = matched_variant
         header = signature_without_constructor_initializers(code)
         scopes = qualified.split("::")[:-1] if "::" in qualified else []
-        digest = hashlib.sha256(code.encode("utf-8", errors="replace")).hexdigest()
         target_identity = {
             "identity_version": 1,
             "source_file": os.path.normpath(source_file or source_path or "").replace("\\", "/"),
@@ -262,10 +298,55 @@ def enumerate_function_targets(
             "end_line": int(node.end_point[0]) + 1,
             "ast_hash": digest,
             "code": code,
-            "resolution_strategy": "tree_sitter_ast_enumeration",
+            "resolution_strategy": (
+                "tree_sitter_ast_exact_fl_source_identity"
+                if exact_fl_source_identity
+                else
+                "tree_sitter_ast_qualified_suffix"
+                if matched_variant != requested
+                else "tree_sitter_ast_enumeration"
+            ),
+            "matched_source_name": matched_variant,
+            "discarded_build_scope_prefix": (
+                requested[: -(len(matched_variant) + 2)]
+                if (
+                    matched_variant
+                    and matched_variant != requested
+                    and requested.endswith("::" + matched_variant)
+                )
+                else ""
+            ),
             "resolution_confidence": "high" if len(names) > 1 or actual == requested else "medium",
         })
     return out
+
+
+def _source_qualified_name_variants(requested_name: str) -> List[str]:
+    """Return source-spelling candidates for a compiled qualified symbol.
+
+    Compilers and instrumentation report namespaces introduced by preprocessing
+    (for example an ABI/version namespace), while a source-only parser sees the
+    macro invocation rather than that expanded namespace.  Drop leading scopes
+    progressively, but retain an owner plus the function leaf.  The caller
+    still preserves every AST match and must disambiguate overloads by exact
+    source evidence; this function never selects a target by itself.
+    """
+    requested = _clean_qualified_name(requested_name)
+    parts = [part for part in requested.split("::") if part]
+    if len(parts) <= 2:
+        return [requested] if requested else []
+    return dedup_keep_order([
+        "::".join(parts[index:])
+        for index in range(0, len(parts) - 1)
+    ])
+
+
+def _is_plausible_compiled_qualified_name(value: str) -> bool:
+    parts = [part for part in str(value or "").split("::") if part]
+    if not parts:
+        return False
+    identifier = re.compile(r"^(?:~?[A-Za-z_]\w*|operator(?:\(\)|\[\]|[-+*/%<>=!&|^~]+))$")
+    return all(identifier.fullmatch(part.strip()) for part in parts)
 
 
 def build_repair_scope(units: List[Dict[str, Any]], *, atomic: bool = True) -> Dict[str, Any]:
@@ -306,17 +387,39 @@ def disambiguate_function_targets(
     signature_hint = "".join(
         str(signature_hint or hints.get("signature") or hints.get("signature_hint") or "").split()
     )
+    fl_source_digest = str(hints.get("fl_source_digest") or "")
+    fl_source_line = int(hints.get("fl_source_line") or 0)
     covered_lines = {int(item) for item in (line_hints or hints.get("covered_lines") or []) if str(item).isdigit()}
     exact_sets = []
     discriminators = []
+    if fl_source_digest:
+        digest_ids = {
+            str(item.get("target_id") or item.get("id") or "")
+            for item in candidates
+            if str(item.get("ast_hash") or "") == fl_source_digest
+        }
+        if digest_ids:
+            exact_sets.append(digest_ids)
+            discriminators.append("exact_fl_source_digest")
+    if fl_source_line:
+        fl_line_ids = {
+            str(item.get("target_id") or item.get("id") or "")
+            for item in candidates
+            if int(item.get("start_line") or 0) <= fl_source_line
+            <= int(item.get("end_line") or 0)
+        }
+        if fl_line_ids:
+            exact_sets.append(fl_line_ids)
+            discriminators.append("exact_fl_source_line_containment")
     if signature_hint:
         signature_ids = {
             str(item.get("target_id") or item.get("id") or "")
             for item in candidates
             if "".join(str(item.get("signature") or "").split()) == signature_hint
         }
-        exact_sets.append(signature_ids)
-        discriminators.append("exact_signature")
+        if signature_ids:
+            exact_sets.append(signature_ids)
+            discriminators.append("exact_signature")
     if covered_lines:
         line_ids = {
             str(item.get("target_id") or item.get("id") or "")
@@ -326,8 +429,9 @@ def disambiguate_function_targets(
                 for line in covered_lines
             )
         }
-        exact_sets.append(line_ids)
-        discriminators.append("exact_source_line_containment")
+        if line_ids:
+            exact_sets.append(line_ids)
+            discriminators.append("exact_source_line_containment")
     matched_ids = set.intersection(*exact_sets) if exact_sets else set()
     matched = [
         item for item in candidates

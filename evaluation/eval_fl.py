@@ -58,6 +58,8 @@ def evaluate_fl(dataset: str = "", level: str = "combined", results_dir: str = N
     skipped_no_gt  = 0
     skipped_no_scores = 0
     skipped_other_dataset = 0
+    namespace_equivalent_matches = 0
+    unmatched_ground_truths = 0
     total_bugs = 0
 
     dataset_key = (dataset or "").strip().lower()
@@ -74,7 +76,11 @@ def evaluate_fl(dataset: str = "", level: str = "combined", results_dir: str = N
 
         scores = result_data.get('scores', {})
         ground_truth = result_data.get('ground_truth', [])
-        ground_truth = _normalize_ground_truth_for_score_keys(ground_truth, scores)
+        ground_truth = [
+            item.strip()
+            for item in ground_truth
+            if isinstance(item, str) and item.strip()
+        ] if isinstance(ground_truth, list) else []
 
         if not ground_truth:
             skipped_no_gt += 1
@@ -92,11 +98,17 @@ def evaluate_fl(dataset: str = "", level: str = "combined", results_dir: str = N
         func_ranks = _assign_worst_case_ranks(sorted_funcs)
 
         gt_ranks = []
+        any_ground_truth_matched = False
         for gt_func in ground_truth:
-            if gt_func in func_ranks:
-                gt_ranks.append(func_ranks[gt_func])
-            else:
+            matched_keys = _equivalent_score_keys(gt_func, func_ranks)
+            if not matched_keys:
                 gt_ranks.append(total_funcs + 1)
+                unmatched_ground_truths += 1
+                continue
+            any_ground_truth_matched = True
+            gt_ranks.append(min(func_ranks[key] for key in matched_keys))
+            if gt_func not in func_ranks:
+                namespace_equivalent_matches += 1
 
         first_rank = min(gt_ranks)
         avg_rank   = sum(gt_ranks) / len(gt_ranks)
@@ -105,15 +117,15 @@ def evaluate_fl(dataset: str = "", level: str = "combined", results_dir: str = N
         all_avg_ranks.append(avg_rank)
 
         if total_funcs > 0:
-            all_exam_scores.append(first_rank / total_funcs)
+            all_exam_scores.append(min(first_rank, total_funcs) / total_funcs)
 
-        if first_rank <= 1:
+        if any_ground_truth_matched and first_rank <= 1:
             top_1_hit += 1
-        if first_rank <= 3:
+        if any_ground_truth_matched and first_rank <= 3:
             top_3_hit += 1
-        if first_rank <= 5:
+        if any_ground_truth_matched and first_rank <= 5:
             top_5_hit += 1
-        if first_rank <= 10:
+        if any_ground_truth_matched and first_rank <= 10:
             top_10_hit += 1
 
     print(f"Tổng số bugs: {total_bugs}")
@@ -122,6 +134,8 @@ def evaluate_fl(dataset: str = "", level: str = "combined", results_dir: str = N
     print(f"  Bỏ qua (thiếu scores/format):   {skipped_no_scores}")
     if skipped_other_dataset:
         print(f"  Bỏ qua (khác dataset):          {skipped_other_dataset}")
+    print(f"  GT khớp qua namespace suffix:   {namespace_equivalent_matches}")
+    print(f"  GT không có candidate tương ứng:{unmatched_ground_truths:5d}")
     print()
 
     if evaluated_bugs > 0:
@@ -184,6 +198,74 @@ def _normalize_ground_truth_for_score_keys(ground_truth, scores):
             continue
         normalized.append(_normalize_gt_key(item))
     return normalized
+
+
+def _equivalent_score_keys(ground_truth_key, score_keys):
+    """Return score keys denoting the same source symbol as a GT key.
+
+    Runtime symbolization retains complete namespaces such as ``lib::v7``.
+    Dataset ground truth often omits those leading scopes. A prediction is
+    therefore equivalent when it has the same source-file basename and its
+    qualified symbol ends with the GT symbol at a ``::`` boundary.
+    """
+    if not isinstance(ground_truth_key, str):
+        return []
+    ground_truth_key = ground_truth_key.strip()
+    if not ground_truth_key:
+        return []
+
+    keys = [key for key in score_keys if isinstance(key, str)]
+    if ground_truth_key in keys:
+        return [ground_truth_key]
+
+    gt_file, gt_symbol = _split_localization_key(ground_truth_key)
+    if not gt_file:
+        return []
+    matches = []
+    for score_key in keys:
+        score_file, score_symbol = _split_localization_key(score_key)
+        if score_file != gt_file:
+            continue
+        if not gt_symbol or not score_symbol:
+            if gt_symbol == score_symbol:
+                matches.append(score_key)
+            continue
+        if _qualified_symbols_equivalent(gt_symbol, score_symbol):
+            matches.append(score_key)
+    return matches
+
+
+def _split_localization_key(value):
+    """Normalize ``path/file.ext:{:|::}symbol`` without losing C++ scopes."""
+    value = str(value or "").strip().replace("\\", "/")
+    match = re.match(
+        r"^(?P<file>.+\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx))"
+        r"(?P<separator>::|:)(?P<symbol>.+)$",
+        value,
+        re.IGNORECASE,
+    )
+    if match:
+        return (
+            os.path.basename(match.group("file")),
+            match.group("symbol").strip(),
+        )
+    if re.match(
+        r"^.+\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx)$",
+        value,
+        re.IGNORECASE,
+    ):
+        return os.path.basename(value), ""
+    return "", value
+
+
+def _qualified_symbols_equivalent(left, right):
+    left = re.sub(r"\s+", "", str(left or ""))
+    right = re.sub(r"\s+", "", str(right or ""))
+    return (
+        left == right
+        or left.endswith("::" + right)
+        or right.endswith("::" + left)
+    )
 
 
 def _normalize_gt_key(value: str) -> str:

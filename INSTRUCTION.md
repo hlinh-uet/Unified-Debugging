@@ -17,11 +17,11 @@
                   │  (một lần duy nhất, dùng chung cho FL + APR)
         ┌─────────┴───────────────────┐
         │                             │
-┌───────▼──────┐        ┌─────────────▼──────────────────────────┐
-│  core/        │        │  core/                                 │
-│ fault_localization │    │  apr/ + apr_baseline.py wrapper        │
-│  .py          │        │                                      │
-└───────┬──────┘        │                                      │
+┌───────▼──────────────┐  ┌─────────────▼──────────────────────────┐
+│ core/                │  │  core/                                 │
+│ fault_localization/  │  │  apr/ + apr_baseline.py wrapper        │
+│ package              │  │                                      │
+└───────┬──────────────┘  │                                      │
         │                └─────────────┬──────────────────────────┘
         │                              │
         │                ┌─────────────▼───────────────────────────┐
@@ -134,7 +134,21 @@ if dataset_name.lower() == "defects4c":
 
 ## 3. Fault Localization (FL)
 
-**File:** `core/fault_localization.py`  
+**Package:** `core/fault_localization/`
+
+- `runtime.py` – build instrumented và thu ordered regression trace
+- `markers.py` – chèn stable scenario marker và targeted branch probe
+- `scenario.py` – tách assertion, fingerprint và chọn scenario sai đầu tiên
+- `investigation.py` – source dossier và kiểm chứng dynamic causal chain
+- `trace_plan.py` – lập source/runtime-supported investigation plan
+- `probes.py` – resolve information-needs và concrete branch observations
+- `artifacts.py` – cache/checkpoint nguyên tử theo bug và identity
+- `semantic.py` – source/Clang semantic evidence
+- `causal.py` – producer slicing và evidence-driven proof ranking
+- `keys.py` – chuẩn hóa key function/file/class tương thích APR
+- `update.py` – cập nhật ranking bằng APR feedback
+- `__init__.py` – API công khai của FL
+
 **Input:** `List[BugRecord]` từ `get_loader()`  
 **Output:**
 - `experiments/fault_localization_results.json` – combined score
@@ -142,40 +156,78 @@ if dataset_name.lower() == "defects4c":
 - `experiments/fault_localization_file_results.json` – file-level score
 - `experiments/fault_localization_class_results.json` – class/scope-level score cho C++ keys dạng `file:class::function`
 
-### Thuật toán Tarantula + IR reranker
+### Thuật toán evidence-driven dynamic FL v8
 
-Với mỗi hàm $m$, điểm số nghi ngờ được tính:
+1. Parse đúng definition của regression test đang fail thành scenario với
+   fingerprint ổn định. Marker được chèn cùng dòng trước producer/assertion
+   trong disposable build workspace; preprocessor, macro và constexpr helper
+   không bị xem là assertion.
+2. Map fresh failure output vào assertion và chọn scenario sai đầu tiên.
+3. Ghép input test, assertion, Expected và Actual; tạo edit-script mô tả phần
+   dữ liệu mâu thuẫn.
+4. Resolve producer call trong scenario vào exact function key đã executed.
+5. Dùng scenario marker, invocation/parent/callsite identity và dynamic edges
+   để khóa đúng concrete invocation.
+6. Trích source dossier cho mọi executed function: signature, branch, return,
+   assignment, call, throw và quan hệ caller/callee.
+7. LLM lập causal hypothesis và information-needs. Hypothesis chỉ được nhận
+   nếu exact keys, source observation và dynamic causal chain đều kiểm chứng.
+8. Targeted pass instrument branch trong causal chain và chạy lại failed test
+   để thu concrete outcomes. Evidence không instrument được phải ghi rõ.
+9. Xếp hạng lexicographic theo proof tier; không dùng fitted coefficient.
 
-$$\text{score}(m) = \frac{ \frac{f_m}{T_f} }{ \frac{f_m}{T_f} + \frac{p_m}{T_p} }$$
+Không có coefficient được fit theo dataset hoặc rule riêng cho một benchmark.
+LLM trace guide được bật mặc định và dùng OpenRouter/
+`OPENROUTER_API_KEY` nếu không truyền `--llm`. Nó chỉ lập kế hoạch trace từ
+Input/Expected/Actual, source dossier và runtime chain; nó chỉ được tham chiếu
+exact function key có trong runtime inventory và không được đề xuất patch.
+Dùng
+`--no-fl-llm-guide` để chạy deterministic-only.
 
-Trong đó:
-- $f_m$ = số test FAIL có cover hàm $m$
-- $p_m$ = số test PASS có cover hàm $m$
-- $T_f$, $T_p$ = tổng số test FAIL / PASS
+Mỗi bug có một control-trace build; khi investigation plan yêu cầu concrete
+branch evidence, FL có thêm một targeted-probe build được cache theo exact
+probe identity. Chỉ test buggy=FAIL, fixed=PASS được chạy. `covered_methods`
+cũ và passing tests không tham gia candidate hay score. Nếu build/trace thất
+bại, FL ghi score rỗng cùng diagnostics; không fallback sang baseline.
 
-Sau khi tính Tarantula raw, pipeline rerank theo 3 mức:
-1. `Tarantula file → IR reranker → file_score`
-2. `Tarantula class + file_score → IR reranker → class_score`
-3. `Tarantula function + class/file_score → IR reranker → final function score`
+Runtime artifacts được giữ bền vững tại
+`experiments/runtime_traces/<bug>/` và dùng chung cho FL-only lẫn `--full`.
+Nếu schema, bug identity, tập regression tests, output log, raw trace và
+ordered events đều hợp lệ thì FL load cache theo từng bug, không build/chạy
+lại. Lần trace mới lưu full events ở `runtime_evidence.full.json.gz`; dùng
+`--refresh-runtime-traces` để chủ động vô hiệu cache.
 
-IR reranker dùng `test_id`, `fail_reason`, và các dòng tín hiệu trong `actual_output`; không dùng `expected_output`.
+Normal FL run còn kiểm tra generation của source instrumentation: cache cũ
+chưa có `scenario_marker_instrumentation` sẽ được trace lại đúng một lần.
+`--fl-cache-only` vẫn đọc cache legacy nhằm phục vụ đánh giá offline.
+
+Cache legacy chỉ giữ tail của ordered events vẫn được tái sử dụng, nhưng nếu
+producer invocation đã bị cắt khỏi tail thì FL chuyển sang aggregate dynamic
+graph và ghi diagnostic `full_events_unavailable_used_aggregate_graph`.
+Fallback này không được giả là một invocation chính xác.
+
+Producer slicing không rút output xuống một function duy nhất. FL vẫn ghi
+toàn bộ function scores theo thứ tự giảm dần; APR mặc định lấy ba phần tử đầu
+qua `APR_TOP_K=3`.
 
 ### Output format
 
 ```json
 {
 	  "476-A-bug-16608008-16608059": {
-	    "formula": "tarantula",
-	    "reranker": "ir",
+	    "formula": "evidence_driven_causal_proofs_v8",
+	    "reranker": "scenario+deterministic_trace_plan+causal_tiers",
 	    "scores": {
 	      "solve": 1.0,
 	      "main": 0.5
 	    },
-	    "tarantula_scores": {
-	      "solve": 1.0,
-	      "main": 0.5
-	    },
-	    "ground_truth": ["solve"]
+	    "ground_truth": ["solve"],
+	    "causal_evidence": {
+	      "ground_truth_used": false,
+	      "runtime_trace": {
+	        "fresh_execution": true
+	      }
+	    }
 	  }
 }
 ```
