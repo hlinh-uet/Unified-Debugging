@@ -1,7 +1,7 @@
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from core.apr.program_analysis import analyze_target_operations
+from core.program_analysis import analyze_target_operations
 
 
 MAX_TEXT = 360

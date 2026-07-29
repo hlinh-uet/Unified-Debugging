@@ -8,11 +8,15 @@ import math
 from collections import defaultdict, deque
 from typing import Any, Dict, Iterable, List, Tuple
 
-from core.apr.common import (
+from core.program_analysis.source_utils import (
     node_text,
     parse_tree,
     source_language_from_path,
     walk_nodes,
+)
+from core.failure_context import (
+    build_regression_fail_context,
+    reusable_fail_context,
 )
 from .keys import (
     _extract_class_from_key,
@@ -22,13 +26,12 @@ from .keys import (
 from .semantic import extract_io_semantics, semantic_tokens
 from .scenario import build_scenario_analysis
 from .trace_plan import build_trace_plan
-from .investigation import load_or_build_source_evidence
-from .probes import (
-    merge_targeted_runtime_observations,
-    resolve_probe_evidence,
+from .investigation import (
+    hypothesis_support,
+    load_or_build_source_evidence,
 )
+from .probes import resolve_probe_evidence
 from .artifacts import atomic_write_json
-from .runtime import collect_targeted_probe_runtime_evidence
 
 
 CAUSAL_FL_VERSION = 8
@@ -71,12 +74,19 @@ def calculate_causal_hierarchy_scores(
     llm_provider: str = None,
     llm_rerank: bool = True,
     artifact_dir: str = "",
-    targeted_probes: bool = True,
+    fail_context: Dict[str, Any] = None,
 ) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float], Dict[str, Any]]:
     """Run scenario-first, input-aware causal-tier fault localization."""
+    shared_fail_context = reusable_fail_context(fail_context)
+    if shared_fail_context is None:
+        shared_fail_context = build_regression_fail_context(
+            bug,
+            runtime_evidence=runtime_evidence,
+        )
     evidence = collect_failure_evidence(
         bug,
         runtime_evidence=runtime_evidence,
+        fail_context=shared_fail_context,
     )
     scenario_analysis = build_scenario_analysis(evidence)
     if artifact_dir:
@@ -119,15 +129,31 @@ def calculate_causal_hierarchy_scores(
         invocation_keys=invocation_keys,
         artifact_dir=artifact_dir,
     )
-    trace_plan = build_trace_plan(
-        scenario_analysis=scenario_analysis,
+    trace_plan = _broker_trace_plan(
         runtime_evidence=runtime_evidence,
-        use_llm=llm_rerank,
-        provider=llm_provider,
-        artifact_dir=artifact_dir,
-        source_evidence=source_evidence,
-        invocation_keys=invocation_keys,
+        scenario_analysis=scenario_analysis,
+        allowed_functions=set(runtime_functions),
     )
+    if not trace_plan:
+        trace_plan = build_trace_plan(
+            scenario_analysis=scenario_analysis,
+            runtime_evidence=runtime_evidence,
+            use_llm=llm_rerank,
+            provider=llm_provider,
+            artifact_dir=artifact_dir,
+            source_evidence=source_evidence,
+            invocation_keys=invocation_keys,
+        )
+    elif trace_plan.get("hypotheses"):
+        trace_plan = _revalidate_broker_trace_plan(
+            trace_plan=trace_plan,
+            source_evidence=source_evidence,
+            invocation_keys=invocation_keys,
+            dynamic_edges=runtime_evidence.get(
+                "dynamic_edges"
+            )
+            or [],
+        )
     probe_evidence = resolve_probe_evidence(
         trace_plan=trace_plan,
         source_evidence=source_evidence,
@@ -135,30 +161,20 @@ def calculate_causal_hierarchy_scores(
         invocation_keys=invocation_keys,
         artifact_dir=artifact_dir,
     )
-    targeted_runtime = {}
-    if (
-        targeted_probes
-        and llm_rerank
-        and probe_evidence.get("targeted_probes")
-    ):
-        targeted_runtime = collect_targeted_probe_runtime_evidence(
-            bug,
-            probe_plan=probe_evidence,
-            artifact_dir=artifact_dir,
+    # All runtime questions are now planned after census and installed in the
+    # single slice-probe build.  A post-ranking planner may expose a missing
+    # question as unknown, but it must never start an independent clean/build/
+    # regression pass.
+    if probe_evidence.get("runtime_probe_requests"):
+        probe_evidence.setdefault("diagnostics", []).append(
+            "unanswered_probe_not_reexecuted_single_broker_policy"
         )
-        probe_evidence = merge_targeted_runtime_observations(
-            probe_evidence=probe_evidence,
-            targeted_runtime=targeted_runtime,
-        )
-        if artifact_dir:
-            written = atomic_write_json(
-                os.path.join(
-                    artifact_dir, "causal_probe_evidence.json"
-                ),
-                probe_evidence,
-            )
-            if written:
-                probe_evidence["artifact"] = written
+    probe_evidence["execution_policy"] = {
+        "planner": "shared_investigation_query_broker",
+        "probe_build_pass_limit": 1,
+        "post_ranking_runtime_passes": 0,
+        "missing_evidence_policy": "unknown_never_negative",
+    }
     semantic_affinities, semantic_audit = _semantic_io_affinities(
         runtime_functions=runtime_functions,
         evidence=ranking_evidence,
@@ -182,14 +198,41 @@ def calculate_causal_hierarchy_scores(
     class_scores = _aggregate_parent_scores(
         function_scores, key_func=_extract_class_from_key
     )
+    trace_scope_tests = (
+        (runtime_evidence.get("trace_scope") or {}).get("tests")
+        or {}
+    )
+    if isinstance(trace_scope_tests, dict):
+        trace_scope_iterable = trace_scope_tests.values()
+    elif isinstance(trace_scope_tests, list):
+        trace_scope_iterable = trace_scope_tests
+    else:
+        trace_scope_iterable = ()
+    bounded_scope_available = any(
+        bool((item or {}).get("enabled"))
+        for item in trace_scope_iterable
+        if isinstance(item, dict)
+    )
+    census_only_available = any(
+        isinstance(item, dict)
+        and item.get("trace_collection_strategy")
+        == "census_only_detailed_scope_unavailable"
+        for item in runtime_evidence.get("tests") or []
+    )
     evidence["ranking"] = {
         "formula": "evidence_driven_lexicographic_causal_proofs_v8",
         "weight_policy": "no_fitted_coefficients",
         "dynamic_producer_slicing_used": bool(
             slicing_audit.get("available")
         ),
-        "coverage_metadata_used": False,
-        "runtime_scope": "fresh_ordered_trace_of_regression_failed_tests",
+        "coverage_metadata_used": bounded_scope_available,
+        "runtime_scope": (
+            "query_driven_census_then_producer_sink_targeted_evidence"
+            if bounded_scope_available
+            else "count_edge_census_only"
+            if census_only_available
+            else "fresh_ordered_trace_of_regression_failed_tests"
+        ),
         "candidate_count": len(function_scores),
         "persisted_candidate_limit": MAX_PERSISTED_CANDIDATES,
         "candidate_features": {
@@ -198,13 +241,18 @@ def calculate_causal_hierarchy_scores(
         },
     }
     evidence["scenario_analysis"] = scenario_analysis
+    evidence["fail_context"] = shared_fail_context
+    evidence["fail_context_id"] = shared_fail_context.get(
+        "context_id",
+        "",
+    )
     evidence["trace_plan"] = trace_plan
     evidence["causal_tiers"] = tier_audit
     evidence["dynamic_producer_slicing"] = slicing_audit
     evidence["semantic_io_analysis"] = semantic_audit
     evidence["source_investigation"] = source_evidence
     evidence["probe_evidence"] = probe_evidence
-    evidence["targeted_probe_runtime"] = targeted_runtime
+    evidence["trace_queries"] = runtime_evidence.get("trace_queries") or {}
     evidence["llm_reranking"] = {
         "enabled": bool(llm_rerank),
         "applied": bool((trace_plan.get("llm") or {}).get("applied")),
@@ -222,18 +270,112 @@ def calculate_causal_hierarchy_scores(
     )
 
 
+def _broker_trace_plan(
+    *,
+    runtime_evidence: Dict[str, Any],
+    scenario_analysis: Dict[str, Any],
+    allowed_functions: set,
+) -> Dict[str, Any]:
+    """Reuse the one plan whose probes were installed before detailed runs."""
+    broker = runtime_evidence.get("investigation_query_broker") or {}
+    plan = broker.get("trace_plan") or {}
+    if (
+        not isinstance(plan, dict)
+        or str(broker.get("status") or "") not in {
+            "planned",
+            "planned_without_runtime_probes",
+        }
+    ):
+        return {}
+    scenario = scenario_analysis.get("first_failing_scenario") or {}
+    expected_scenario = str(
+        scenario.get("scenario_id")
+        or scenario.get("scenario_fingerprint")
+        or ""
+    )
+    planned_scenario = str(
+        plan.get("first_failing_scenario_id") or ""
+    )
+    if (
+        expected_scenario
+        and planned_scenario
+        and expected_scenario != planned_scenario
+    ):
+        return {}
+    referenced = {
+        str(value)
+        for value in plan.get("trace_anchors") or []
+        if str(value)
+    }
+    referenced.update(
+        str(item.get("candidate_function") or "")
+        for item in plan.get("hypotheses") or []
+        if isinstance(item, dict)
+        and str(item.get("candidate_function") or "")
+    )
+    if not referenced.issubset(allowed_functions):
+        return {}
+    reused = dict(plan)
+    reused["query_broker_reused"] = True
+    return reused
+
+
+def _revalidate_broker_trace_plan(
+    *,
+    trace_plan: Dict[str, Any],
+    source_evidence: Dict[str, Any],
+    invocation_keys: List[str],
+    dynamic_edges: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Recheck census-time hypotheses against exact detailed invocations."""
+    hypotheses = []
+    information_needs = []
+    for raw in trace_plan.get("hypotheses") or []:
+        if not isinstance(raw, dict):
+            continue
+        hypothesis = dict(raw)
+        support = hypothesis_support(
+            hypothesis=hypothesis,
+            source_evidence=source_evidence,
+            invocation_keys=invocation_keys,
+            dynamic_edges=dynamic_edges,
+        )
+        hypothesis["support"] = support
+        hypotheses.append(hypothesis)
+        if support.get("status") == "source_runtime_supported":
+            information_needs.extend(
+                support.get("valid_information_needs") or []
+            )
+    revalidated = dict(trace_plan)
+    revalidated["hypotheses"] = hypotheses
+    revalidated["information_needs"] = information_needs[:80]
+    revalidated["query_broker_revalidated_after_detail"] = True
+    revalidated["detailed_supported_hypothesis_count"] = sum(
+        (item.get("support") or {}).get("status")
+        == "source_runtime_supported"
+        for item in hypotheses
+    )
+    return revalidated
+
+
 def collect_failure_evidence(
     bug: Any,
     *,
     runtime_evidence: Dict[str, Any] = None,
+    fail_context: Dict[str, Any] = None,
 ) -> Dict[str, Any]:
-    """Extract test-code and failure-output seeds without using ground truth."""
+    """Derive localization seeds from the canonical shared Fail Context."""
     diagnostics: List[str] = []
     raw = bug.raw if isinstance(getattr(bug, "raw", None), dict) else {}
     context = _build_test_source_contexts(bug, raw)
     context_by_id = {
         str(item.get("test_id") or ""): item
         for item in context.get("tests") or []
+        if isinstance(item, dict)
+    }
+    shared_context_by_id = {
+        str(item.get("test_id") or ""): item
+        for item in (fail_context or {}).get("tests") or []
         if isinstance(item, dict)
     }
     runtime_by_id = {
@@ -255,9 +397,22 @@ def collect_failure_evidence(
         if not _is_regression_failure(record):
             continue
         test_id = str(record.get("test_id") or "")
-        focused = context_by_id.get(test_id) or {}
+        shared_test = shared_context_by_id.get(test_id) or {}
+        focused = {
+            **(context_by_id.get(test_id) or {}),
+            **({
+                "test_source_path": shared_test.get("test_source_path"),
+                "test_source_range": shared_test.get("test_source_range"),
+                "test_source": shared_test.get("test_source"),
+            } if shared_test else {}),
+        }
         runtime_test = runtime_by_id.get(test_id) or {}
-        failure_text = str(runtime_test.get("fresh_output") or "")
+        failure_text = str(
+            (shared_test.get("regression_output") or {}).get("text")
+            or shared_test.get("failure_log")
+            or runtime_test.get("fresh_output")
+            or ""
+        )
         if not failure_text:
             failure_text = "\n".join(
                 str(value or "")
@@ -268,6 +423,16 @@ def collect_failure_evidence(
                 if value
             )
         observations = _failure_observations(failure_text)
+        shared_observation = shared_test.get("failure_observation") or {}
+        if observations and shared_observation:
+            observations[0] = {
+                **observations[0],
+                **{
+                    key: value
+                    for key, value in shared_observation.items()
+                    if value is not None and value != ""
+                },
+            }
         observation = observations[0]
         source_path, source_text, source_start_line = _resolve_test_source(
             raw=raw,
@@ -375,7 +540,25 @@ def collect_failure_evidence(
             "exception_events": exception_events[:40],
             "output_symbols": sorted(output_symbols)[:40],
             "observed_output": observed_output,
-            "input_literals": _extract_input_literals(near_source or source_text),
+            "input_literals": _extract_input_literals(
+                str(
+                    (shared_test.get("test_input") or {}).get(
+                        "source"
+                    )
+                    or near_source
+                    or source_text
+                )
+            ),
+            "test_input": shared_test.get("test_input") or {},
+            "failing_assertion": (
+                shared_test.get("failing_assertion") or {}
+            ),
+            "test_dependency_slice": (
+                shared_test.get("test_dependency_slice") or {}
+            ),
+            "fail_context_id": (
+                (fail_context or {}).get("context_id") or ""
+            ),
             "producer_call_sites": producer_call_sites,
             "io_semantics": io_semantics,
             "runtime_output_artifact": runtime_test.get("output_artifact", ""),
@@ -387,6 +570,7 @@ def collect_failure_evidence(
         "version": CAUSAL_FL_VERSION,
         "engine": "scenario_first_input_aware_causal_trace",
         "ground_truth_used": False,
+        "fail_context_id": (fail_context or {}).get("context_id", ""),
         "tests": tests,
         "failure_seeds": {
             "near_failure_call_symbols": sorted(all_near_calls),
@@ -525,7 +709,7 @@ def _rank_scenario_causal_tiers(
     observed_probe_functions = defaultdict(int)
     for request in (probe_evidence or {}).get("requests") or []:
         if (
-            request.get("status") == "observed"
+            request.get("status") in {"observed", "observed_boundary"}
             and request.get("kind") in {
                 "argument",
                 "return_value",
@@ -756,8 +940,9 @@ def _rank_scenario_causal_tiers(
             ""
             if confirmed_bad
             else (
-                "function enter/exit is available, but arguments, return "
-                "values and output-reaching writes are not instrumented"
+                "bounded slice boundaries and branch outcomes are available; "
+                "arbitrary typed argument/return/write values are not cast "
+                "unless a targeted scalar probe can observe them safely"
             )
         ),
         "selected_invocation_count": len(invocations),
@@ -952,21 +1137,6 @@ def _dynamic_producer_slices(
             continue
         runtime_test = runtime_by_id.get(test_id) or {}
         events = runtime_test.get("events") or []
-        if not events:
-            diagnostics.append(f"{test_id}:ordered_events_unavailable")
-            continue
-        marker_id = str(
-            (selected_scenario or {}).get("source_marker_id") or ""
-        )
-        window_start, window_end = _scenario_event_window(
-            events, marker_id=marker_id
-        )
-        if window_start or window_end < len(events):
-            diagnostics.append(
-                f"{test_id}:scenario_marker_window_used:"
-                f"{window_start}:{window_end}"
-            )
-        scoped_events = events[window_start:window_end]
         sites_by_observation = defaultdict(list)
         for site in test.get("producer_call_sites") or []:
             selected_observation = (
@@ -983,6 +1153,54 @@ def _dynamic_producer_slices(
             ].append(site)
         if not sites_by_observation:
             sites_by_observation[0] = []
+        if not events:
+            recovered = False
+            for observation_index, producer_sites in sorted(
+                sites_by_observation.items(),
+                reverse=True,
+            ):
+                graph_invocation = _aggregate_graph_producer_invocation(
+                    runtime_test=runtime_test,
+                    producer_sites=producer_sites,
+                    test_id=test_id,
+                    observation_index=observation_index,
+                )
+                if not graph_invocation:
+                    continue
+                recovered = True
+                for key in graph_invocation["member_keys"]:
+                    record = features.setdefault(key, {
+                        "test_ids": set(),
+                        "roots": set(),
+                        "max_depth_score": 0.0,
+                        "max_span_score": 0.0,
+                    })
+                    record["test_ids"].add(test_id)
+                    record["roots"].update(
+                        graph_invocation["root_keys"]
+                    )
+                invocations.append(graph_invocation)
+            diagnostics.append(
+                f"{test_id}:ordered_events_unavailable:"
+                + (
+                    "used_aggregate_graph"
+                    if recovered
+                    else "producer_graph_unresolved"
+                )
+            )
+            continue
+        marker_id = str(
+            (selected_scenario or {}).get("source_marker_id") or ""
+        )
+        window_start, window_end = _scenario_event_window(
+            events, marker_id=marker_id
+        )
+        if window_start or window_end < len(events):
+            diagnostics.append(
+                f"{test_id}:scenario_marker_window_used:"
+                f"{window_start}:{window_end}"
+            )
+        scoped_events = events[window_start:window_end]
         selected_ranges = set()
         event_end_before = len(scoped_events)
         for observation_index, producer_sites in sorted(
@@ -1404,10 +1622,11 @@ def _invocation_spans(events: List[Dict[str, Any]]) -> Dict[str, int]:
 def _invocation_boundary_records(
     events: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Record control boundaries and explicitly mark unavailable data values."""
+    """Attach bounded slice probes to their concrete function invocation."""
     open_entries = {}
     stack_by_thread = defaultdict(dict)
     records = []
+    observations_by_invocation = defaultdict(list)
     for index, item in enumerate(events):
         pid = item.get("pid")
         tid = item.get("tid")
@@ -1415,6 +1634,14 @@ def _invocation_boundary_records(
         key = str(item.get("key") or "")
         slot = (pid, tid, depth)
         thread_stack = stack_by_thread[(pid, tid)]
+        if item.get("event") in {"marker", "value"}:
+            invocation_id = str(item.get("invocation_id") or "")
+            if invocation_id:
+                observations_by_invocation[invocation_id].append({
+                    **item,
+                    "event_index": index,
+                })
+            continue
         if item.get("event") == "enter":
             parent = str(thread_stack.get(depth - 1) or "")
             thread_stack[depth] = key
@@ -1427,23 +1654,66 @@ def _invocation_boundary_records(
                 "caller": parent,
                 "enter_event": index,
                 "depth": depth,
+                "invocation_id": str(
+                    item.get("invocation_id") or ""
+                ),
                 "call_source_path": item.get("call_source_path") or "",
                 "call_source_line": int(
                     item.get("call_source_line") or 0
                 ),
             }
             continue
+        if item.get("event") != "exit":
+            continue
         opened = open_entries.pop(slot, None)
         if not opened or opened["function"] != key:
             continue
+        observations = observations_by_invocation.get(
+            str(opened.get("invocation_id") or ""),
+            [],
+        )
+        arguments = [
+            item for item in observations
+            if item.get("marker_kind") == "slice_argument"
+        ]
+        returns = [
+            item for item in observations
+            if item.get("marker_kind") == "slice_return"
+        ]
+        writes = [
+            item for item in observations
+            if item.get("marker_kind") == "slice_write"
+        ]
+        branches = [
+            item for item in observations
+            if item.get("event") == "value"
+            and str(item.get("probe_id") or "")
+        ]
+        observed = bool(arguments or returns or writes or branches)
         records.append({
             **opened,
             "exit_event": index,
             "event_span": index - int(opened["enter_event"]),
-            "arguments": {"status": "not_instrumented"},
-            "return_value": {"status": "not_instrumented"},
-            "output_writes": {"status": "not_instrumented"},
-            "causal_status": "control_boundary_only",
+            "arguments": {
+                "status": "observed_boundary" if arguments else "not_observed",
+                "observations": arguments,
+            },
+            "return_value": {
+                "status": "observed_boundary" if returns else "not_observed",
+                "observations": returns,
+            },
+            "output_writes": {
+                "status": "observed_boundary" if writes else "not_observed",
+                "observations": writes,
+            },
+            "branch_outcomes": {
+                "status": "observed" if branches else "not_observed",
+                "observations": branches,
+            },
+            "causal_status": (
+                "slice_boundary_observed"
+                if observed else "control_boundary_only"
+            ),
         })
         thread_stack.pop(depth, None)
     records.sort(key=lambda item: int(item["enter_event"]))
@@ -1485,6 +1755,12 @@ def _compact_runtime_evidence(value: Dict[str, Any]) -> Dict[str, Any]:
         "function_count": len(value.get("functions") or {}),
         "dynamic_edge_count": len(value.get("dynamic_edges") or []),
         "compile": value.get("compile") or {},
+        "slice_probe_instrumentation": (
+            value.get("slice_probe_instrumentation") or {}
+        ),
+        "investigation_query_broker": _compact_query_broker(
+            value.get("investigation_query_broker") or {}
+        ),
         "tests": [
             {
                 "test_id": item.get("test_id"),
@@ -1493,6 +1769,44 @@ def _compact_runtime_evidence(value: Dict[str, Any]) -> Dict[str, Any]:
                 "raw_trace_event_count": item.get("raw_trace_event_count"),
                 "trace_event_count": item.get("trace_event_count"),
                 "trace_truncated": item.get("trace_truncated"),
+                "trace_complete": item.get("trace_complete"),
+                "trace_event_limit": item.get("trace_event_limit"),
+                "coverage_record_count": item.get(
+                    "coverage_record_count"
+                ),
+                "coverage_function_count": item.get(
+                    "coverage_function_count"
+                ),
+                "slice_boundary_observation_count": len(
+                    item.get("slice_boundary_observations") or []
+                ),
+                "scenario_window": item.get("scenario_window"),
+                "probe_only": item.get("probe_only"),
+                "postprocess_seconds": item.get(
+                    "postprocess_seconds"
+                ),
+                "trace_collection_strategy": item.get(
+                    "trace_collection_strategy"
+                ),
+                "failure_signature_match": item.get(
+                    "failure_signature_match"
+                ),
+                "trace_query_evidence": item.get(
+                    "trace_query_evidence"
+                ) or {},
+                "trace_query_recovery": item.get(
+                    "trace_query_recovery"
+                ) or {},
+                "trace_scope": item.get("trace_scope") or {},
+                "adaptive_trace_retry_count": item.get(
+                    "adaptive_trace_retry_count"
+                ),
+                "adaptive_trace_attempts": item.get(
+                    "adaptive_trace_attempts"
+                ) or [],
+                "infrastructure_error": item.get(
+                    "infrastructure_error"
+                ),
                 "persisted_event_count": item.get("persisted_event_count"),
                 "events_tail_truncated": item.get("events_tail_truncated"),
                 "output_artifact": item.get("output_artifact"),
@@ -1503,6 +1817,33 @@ def _compact_runtime_evidence(value: Dict[str, Any]) -> Dict[str, Any]:
             for item in value.get("tests") or []
         ],
         "diagnostics": value.get("diagnostics") or [],
+    }
+
+
+def _compact_query_broker(value: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    policy = value.get("execution_policy") or {}
+    return {
+        "schema": value.get("schema"),
+        "status": value.get("status"),
+        "phase": value.get("phase"),
+        "fail_context_id": value.get("fail_context_id"),
+        "scenario_id": value.get("scenario_id"),
+        "planned_probe_count": int(
+            value.get("planned_probe_count") or 0
+        ),
+        "budget_dropped_probe_count": int(
+            value.get("budget_dropped_probe_count") or 0
+        ),
+        "probe_build_pass_limit": int(
+            policy.get("probe_build_pass_limit") or 0
+        ),
+        "post_ranking_runtime_passes": int(
+            policy.get("post_ranking_runtime_passes") or 0
+        ),
+        "diagnostics": value.get("diagnostics") or [],
+        "artifact": value.get("artifact") or "",
     }
 
 
@@ -1535,9 +1876,13 @@ def _build_test_source_contexts(bug: Any, raw: Dict[str, Any]) -> Dict[str, Any]
         for path in paths:
             language = source_language_from_path(path)
             try:
-                source = open(
-                    path, "r", encoding="utf-8", errors="replace"
-                ).read()
+                with open(
+                    path,
+                    "r",
+                    encoding="utf-8",
+                    errors="replace",
+                ) as stream:
+                    source = stream.read()
             except OSError:
                 continue
             tree, source_bytes = parse_tree(source, language)
@@ -1680,7 +2025,13 @@ def _existing_source_path(value: str, raw: Dict[str, Any]) -> str:
 
 def _read_source_range(path: str, source_range: Dict[str, Any]) -> Tuple[str, int]:
     try:
-        source = open(path, "r", encoding="utf-8", errors="replace").read()
+        with open(
+            path,
+            "r",
+            encoding="utf-8",
+            errors="replace",
+        ) as stream:
+            source = stream.read()
     except OSError:
         return "", 1
     start_byte = int(source_range.get("start_byte") or -1)

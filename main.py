@@ -12,27 +12,32 @@ from data_loaders.base_loader import get_loader
 from core.fault_localization import (
     calculate_causal_hierarchy_scores,
     _extract_class_from_key,
-    _extract_file_from_key,
 )
-from core.fault_localization.runtime import (
-    collect_regression_runtime_evidence,
-    compact_runtime_evidence,
-    load_cached_runtime_evidence,
-    write_full_runtime_evidence_cache,
-)
+from core.fault_localization.runtime import compact_runtime_evidence
 from core.fault_localization.artifacts import (
     atomic_write_json,
+    load_bug_localization_checkpoints,
+    write_causal_evidence_artifact,
     write_bug_localization_checkpoint,
 )
 from core.apr_baseline import run_apr_pipeline
 from core.apr.revalidate import run_apr_validation_only
 from core.apr.agent.refix import run_refix_from_saved_artifacts
-from core.apr.common import is_plausible_status
+from core.apr.common import (
+    APR_TOP_K,
+    is_plausible_status,
+    select_untried_fl_functions,
+)
 from core.apr.oracle_target_identity import build_valid_oracle_targets
 from core.fault_localization.update import update_fl_from_apr, write_json
 from core.test_filtering import (
     filtered_bug_record_for_pipeline,
     has_failed_tests,
+)
+from core.failure_context import (
+    build_regression_fail_context,
+    fail_context_runtime_dir,
+    run_fail_context_agent,
 )
 from evaluation.eval_fl import evaluate_fl
 from evaluation.eval_apr import evaluate_apr
@@ -84,14 +89,16 @@ def run_fl(
 ):
     """
     Bước 1 – Input/output-guided dynamic Fault Localization.
-    Build buggy version với ordered function instrumentation, chỉ chạy các
-    regression failed tests rồi rank theo trace/failure contract:
+    Chạy regression failed tests để dựng shared Fail Context từ fresh output
+    và exact test input, sau đó rank theo selective trace/failure contract:
       - Function-level → fault_localization_function_results.json
       - File-level     → fault_localization_file_results.json
       - Class-level    → fault_localization_class_results.json
 
     Output ``scores`` giữ nguyên schema cũ để APR và vòng Update FL không cần
-    thay đổi. Metadata ``covered_methods`` và spectrum score không được dùng.
+    thay đổi. Coverage production-source có sẵn trong metadata chỉ xác định
+    candidate universe; count/edge census và detailed scope đều không dùng
+    ground truth hay spectrum score để xếp hạng.
     """
     print(f"[FL] Đang load bugs từ dataset '{dataset}'...")
     loader = get_loader(dataset)
@@ -127,22 +134,130 @@ def run_fl(
             f"[FL] LLM trace guide mặc định: {fl_llm_provider} "
             "(dùng cùng lớp cấu hình/API key với APR)."
         )
-    # Runtime execution is expensive and independent of the FL/APR round.
-    # Keep one durable per-bug cache instead of duplicating/rebuilding it in
-    # full-pipeline round directories.
-    runtime_cache_root = os.path.join(
-        os.path.abspath(EXPERIMENTS_DIR),
-        "runtime_traces",
-    )
-
     func_results = {}
     file_results = {}
     class_results = {}
     combined_results = {}
+    if requested_bug_ids:
+        result_maps = (
+            (
+                "fault_localization_function_results.json",
+                func_results,
+            ),
+            (
+                "fault_localization_file_results.json",
+                file_results,
+            ),
+            (
+                "fault_localization_class_results.json",
+                class_results,
+            ),
+            (
+                "fault_localization_results.json",
+                combined_results,
+            ),
+        )
+        for filename, target in result_maps:
+            path = os.path.join(output_dir, filename)
+            try:
+                with open(path, "r", encoding="utf-8") as stream:
+                    previous = json.load(stream)
+            except (
+                OSError,
+                UnicodeError,
+                json.JSONDecodeError,
+            ):
+                previous = {}
+            if not isinstance(previous, dict):
+                continue
+            for previous_bug_id, record in previous.items():
+                if (
+                    isinstance(record, dict)
+                    and str(record.get("dataset") or "") == str(dataset)
+                ):
+                    target[str(previous_bug_id)] = record
+
+    progress_records = {}
+    recovered_bug_ids = set()
+    recovered = load_bug_localization_checkpoints(
+        output_dir=output_dir,
+    )
+    recovered_manifest = recovered.get("manifest") or {}
+    if (
+        recovered_manifest
+        and recovered_manifest.get("aggregate_materialized") is False
+    ):
+        selected_ids = {
+            str(bug.bug_id) for bug in bugs
+        }
+        for level, target in (
+            ("function", func_results),
+            ("file", file_results),
+            ("class", class_results),
+            ("combined", combined_results),
+        ):
+            for recovered_bug_id, record in (
+                (recovered.get(level) or {}).items()
+            ):
+                if (
+                    recovered_bug_id in selected_ids
+                    and isinstance(record, dict)
+                    and str(record.get("dataset") or "")
+                    == str(dataset)
+                ):
+                    target[recovered_bug_id] = record
+        recovered_bug_ids = {
+            bug_id
+            for bug_id in (
+                set(recovered.get("checkpoint_paths") or {})
+                & selected_ids
+            )
+            if all(
+                isinstance(
+                    (recovered.get(level) or {}).get(bug_id),
+                    dict,
+                )
+                and str(
+                    (
+                        (recovered.get(level) or {}).get(bug_id)
+                        or {}
+                    ).get("dataset")
+                    or ""
+                )
+                == str(dataset)
+                for level in (
+                    "function",
+                    "file",
+                    "class",
+                    "combined",
+                )
+            )
+        }
+        progress_records.update({
+            bug_id: path
+            for bug_id, path in (
+                recovered.get("checkpoint_paths") or {}
+            ).items()
+            if bug_id in recovered_bug_ids
+        })
+        if recovered_bug_ids:
+            print(
+                f"[FL] Khôi phục {len(recovered_bug_ids)} bug từ "
+                "per-bug checkpoint chưa materialize."
+            )
 
     total_excluded_fixed_fail = 0
     processed_count = 0
     for bug in bugs:
+        if (
+            str(bug.bug_id) in recovered_bug_ids
+            and not refresh_runtime_traces
+        ):
+            processed_count += 1
+            print(
+                f"[FL] Resume {bug.bug_id}: dùng checkpoint hoàn chỉnh."
+            )
+            continue
         print(f"[FL] Input/output runtime localization cho {bug.bug_id}...")
         bug_for_fl, excluded_fixed_fail = filtered_bug_record_for_pipeline(
             bug,
@@ -155,14 +270,14 @@ def run_fl(
                 "khỏi FL."
             )
 
-        trace_dir = os.path.join(
-            runtime_cache_root,
-            re.sub(
-                r"[^A-Za-z0-9._-]+", "_", str(bug.bug_id)
-            ).strip("._-")
-            or "unknown",
+        trace_dir = fail_context_runtime_dir(
+            root=EXPERIMENTS_DIR,
+            dataset=dataset,
+            bug_id=bug.bug_id,
         )
         tests_for_fl = bug_for_fl.tests if bug_for_fl else []
+        fail_context = None
+        fail_context_artifact = ""
         if exclude_fixed_fail_tests and not has_failed_tests(tests_for_fl):
             print("    [FL] Không còn failed test actionable sau khi lọc; ghi score rỗng.")
             file_scores = {}
@@ -175,67 +290,142 @@ def run_fl(
                 "tests": [],
                 "diagnostics": ["no_actionable_failed_tests"],
             }
+            fail_context = build_regression_fail_context(bug_for_fl)
+            causal_evidence["fail_context"] = fail_context
+            causal_evidence["fail_context_id"] = fail_context.get(
+                "context_id",
+                "",
+            )
         else:
-            runtime_evidence = None
-            cache_info = {"hit": False, "diagnostics": []}
-            if not refresh_runtime_traces:
-                runtime_evidence, cache_info = load_cached_runtime_evidence(
-                    bug_for_fl,
-                    artifact_dir=trace_dir,
-                    require_current_instrumentation=not cache_only,
+            if refresh_runtime_traces:
+                print("    [FailContext] Ép refresh runtime evidence.")
+            fail_context_run = run_fail_context_agent(
+                bug=bug_for_fl,
+                artifact_dir=trace_dir,
+                refresh_runtime=refresh_runtime_traces,
+                cache_only=cache_only,
+                query_llm_provider=fl_llm_provider,
+                query_llm_enabled=llm_rerank,
+            )
+            if fail_context_run.get("status") in {
+                "cache_miss",
+                "cache_incomplete",
+            }:
+                print(
+                    "    [FailContext] Cache-only không có full ordered "
+                    "runtime evidence hợp lệ; bỏ qua bug này."
                 )
-            if runtime_evidence is not None:
+                continue
+            runtime_evidence = (
+                fail_context_run.get("runtime_evidence") or {}
+            )
+            cache_info = fail_context_run.get("runtime_cache") or {}
+            if cache_info.get("hit"):
                 cache_kind = (
                     "full"
                     if cache_info.get("full_ordered_events")
                     else "legacy/compact"
                 )
-                if cache_only and cache_kind != "full":
-                    print(
-                        "    [FL] Cache-only: cache legacy/compact chưa đủ "
-                        "ordered events, bỏ qua bug này."
-                    )
-                    continue
                 print(
-                    f"    [FL] Runtime cache HIT ({cache_kind}); "
+                    f"    [FailContext] Runtime cache HIT ({cache_kind}); "
                     "không build/chạy regression test lại."
                 )
             else:
-                if cache_only:
-                    print(
-                        "    [FL] Cache-only: chưa có runtime cache hợp lệ, "
-                        "bỏ qua bug này."
-                    )
-                    continue
-                if refresh_runtime_traces:
-                    print("    [FL] Ép refresh runtime trace.")
-                else:
-                    print(
-                        "    [FL] Runtime cache MISS; build và chạy regression "
-                        "test để tạo trace."
-                    )
-                runtime_evidence = collect_regression_runtime_evidence(
-                    bug_for_fl,
-                    artifact_dir=trace_dir,
+                print(
+                    "    [FailContext] Runtime cache MISS; regression "
+                    "evidence đã được thu thập."
                 )
-            # Runtime collection is the expensive, independently reusable
-            # boundary. Persist it before source investigation or an LLM call
-            # so a later planner/ranker failure never forces another build.
-            if not cache_info.get("hit"):
-                atomic_write_json(
-                    os.path.join(trace_dir, "runtime_evidence.json"),
-                    compact_runtime_evidence(runtime_evidence),
-                )
-                if runtime_evidence.get("fresh_execution"):
-                    full_cache_path = write_full_runtime_evidence_cache(
-                        runtime_evidence,
-                        artifact_dir=trace_dir,
+            fail_context = fail_context_run.get("fail_context") or {}
+            fail_context_artifact = str(
+                fail_context_run.get("fail_context_artifact") or ""
+            )
+            print(
+                "    [FailContext] Shared context "
+                f"{fail_context.get('context_id') or 'unavailable'}: "
+                f"{len(fail_context.get('tests') or [])} failing test(s), "
+                f"artifact={fail_context_artifact or 'unavailable'}."
+            )
+            for trace_test in runtime_evidence.get("tests") or []:
+                trace_scope = trace_test.get("trace_scope") or {}
+                if trace_scope.get("enabled"):
+                    print(
+                        "    [FL] Census → detailed trace scope "
+                        f"{trace_test.get('test_id')}: "
+                        f"{trace_scope.get('matched_function_count', 0)} "
+                        "functions, "
+                        f"{trace_scope.get('range_count', 0)} ranges."
                     )
-                    if full_cache_path:
+                    if trace_scope.get("selection_strategy"):
                         print(
-                            "    [FL] Full runtime cache → "
-                            f"{full_cache_path}"
+                            "    [FL] Query-driven trace budget: "
+                            f"{trace_scope.get('estimated_total_event_count', 0)} "
+                            "/ "
+                            f"{trace_scope.get('detailed_event_budget', 0)} "
+                            "events; "
+                            f"{trace_scope.get('path_function_count', 0)} "
+                            "path functions, "
+                            f"{trace_scope.get('slice_probe_count', 0)} "
+                            "source probes, "
+                            f"{trace_scope.get('aggregate_only_function_count', 0)} "
+                            "hot/aggregate-only functions."
                         )
+                elif trace_scope.get("diagnostics"):
+                    print(
+                        "    [FL] Census/detailed trace scope fallback: "
+                        f"{trace_scope.get('diagnostics')[0]}"
+                    )
+                retry_count = int(
+                    trace_test.get("adaptive_trace_retry_count") or 0
+                )
+                if retry_count:
+                    mode = (
+                        "scenario-window"
+                        if trace_test.get("scenario_window")
+                        else "full"
+                    )
+                    print(
+                        "    [FL] Adaptive trace "
+                        f"{trace_test.get('test_id')}: "
+                        f"{retry_count} retry, "
+                        f"limit={trace_test.get('trace_event_limit')}, "
+                        f"mode={mode}, "
+                        f"complete={trace_test.get('trace_complete')}"
+                    )
+                elif (
+                    trace_test.get("trace_truncated")
+                    and trace_test.get("trace_collection_strategy")
+                    == "bounded_slice_single_pass"
+                ):
+                    print(
+                        "    [FL] Ordered slice reached its budget "
+                        f"{trace_test.get('trace_event_limit')} events; "
+                        "giữ census aggregate và query completeness cho "
+                        "phần còn lại."
+                    )
+                query_evidence = (
+                    trace_test.get("trace_query_evidence") or {}
+                )
+                if query_evidence:
+                    print(
+                        "    [FL] TraceQuery "
+                        f"{trace_test.get('test_id')}: "
+                        f"status={query_evidence.get('status')}, "
+                        "probe_recovery="
+                        f"{bool(query_evidence.get('probe_recovery_used'))}, "
+                        "answers="
+                        f"{query_evidence.get('status_counts') or {}}."
+                    )
+            full_cache_path = str(
+                fail_context_run.get(
+                    "full_runtime_cache_artifact"
+                )
+                or ""
+            )
+            if full_cache_path:
+                print(
+                    "    [FailContext] Bounded runtime evidence cache → "
+                    f"{full_cache_path}"
+                )
             if not runtime_evidence.get("fresh_execution"):
                 print(
                     "    [FL] Không thu được fresh runtime trace; "
@@ -274,6 +464,12 @@ def run_fl(
                         "fresh_runtime_trace_unavailable",
                         *(runtime_evidence.get("diagnostics") or []),
                     ])),
+                    "fail_context": fail_context,
+                    "fail_context_id": fail_context.get(
+                        "context_id",
+                        "",
+                    ),
+                    "fail_context_artifact": fail_context_artifact,
                 }
             else:
                 (
@@ -287,8 +483,29 @@ def run_fl(
                     llm_provider=fl_llm_provider,
                     llm_rerank=llm_rerank,
                     artifact_dir=trace_dir,
-                    targeted_probes=not cache_only,
+                    fail_context=fail_context,
                 )
+                causal_evidence["fail_context_artifact"] = (
+                    fail_context_artifact
+                )
+
+        causal_evidence_ref = write_causal_evidence_artifact(
+            artifact_dir=trace_dir,
+            bug_id=bug.bug_id,
+            evidence=causal_evidence,
+        )
+        causal_evidence_summary = _causal_evidence_summary(
+            causal_evidence
+        )
+        causal_result_fields = {
+            "causal_evidence_ref": causal_evidence_ref,
+            "causal_evidence_summary": causal_evidence_summary,
+        }
+        if not causal_evidence_ref.get("path"):
+            # A failed artifact write must not make the result unusable.
+            causal_result_fields["causal_evidence"] = (
+                causal_evidence
+            )
 
         # --- Ground truth cho file-level / class-level ---
         gt_functions = bug.ground_truth  # list[str], ví dụ: ["file.c:func"]
@@ -316,7 +533,7 @@ def run_fl(
             "scores":       func_scores,
             "ground_truth": gt_functions,
             "test_filter":  test_filter_info,
-            "causal_evidence": causal_evidence,
+            **causal_result_fields,
         }
 
         # Lưu file-level
@@ -331,7 +548,7 @@ def run_fl(
             "scores":       file_scores,
             "ground_truth": gt_files,
             "test_filter":  test_filter_info,
-            "causal_evidence_summary": _causal_evidence_summary(causal_evidence),
+            **causal_result_fields,
         }
 
         # Lưu class-level
@@ -346,7 +563,7 @@ def run_fl(
             "scores":       class_scores,
             "ground_truth": gt_classes,
             "test_filter":  test_filter_info,
-            "causal_evidence_summary": _causal_evidence_summary(causal_evidence),
+            **causal_result_fields,
         }
 
         # Final FL score chính là function score sau pipeline 3 mức.
@@ -363,23 +580,22 @@ def run_fl(
             "scores":       combined_scores,
             "ground_truth": gt_functions,
             "test_filter":  test_filter_info,
-            "causal_evidence": causal_evidence,
+            **causal_result_fields,
         }
-        write_bug_localization_checkpoint(
-            artifact_dir=trace_dir,
+        checkpoint_path = write_bug_localization_checkpoint(
+            artifact_dir=output_dir,
             bug_id=bug.bug_id,
             function_result=func_results[bug.bug_id],
             file_result=file_results[bug.bug_id],
             class_result=class_results[bug.bug_id],
             combined_result=combined_results[bug.bug_id],
         )
+        progress_records[bug.bug_id] = checkpoint_path
         processed_count += 1
-        _checkpoint_fl_results(
+        _checkpoint_fl_progress(
             output_dir=output_dir,
-            func_results=func_results,
-            file_results=file_results,
-            class_results=class_results,
-            combined_results=combined_results,
+            checkpoint_paths=progress_records,
+            aggregate_materialized=False,
         )
         print(
             f"    [FL] Checkpoint {processed_count}/{len(bugs)} bug đã hoàn tất."
@@ -407,6 +623,11 @@ def run_fl(
     combined_file = os.path.join(output_dir, "fault_localization_results.json")
     atomic_write_json(combined_file, combined_results, indent=4)
     print(f"[FL] Final input/output dynamic-trace FL scores → {combined_file}")
+    _checkpoint_fl_progress(
+        output_dir=output_dir,
+        checkpoint_paths=progress_records,
+        aggregate_materialized=True,
+    )
     if cache_only:
         print(
             f"[FL] Cache-only hoàn tất: đánh giá được {processed_count}/"
@@ -414,27 +635,27 @@ def run_fl(
         )
 
 
-def _checkpoint_fl_results(
+def _checkpoint_fl_progress(
     *,
     output_dir: str,
-    func_results: dict,
-    file_results: dict,
-    class_results: dict,
-    combined_results: dict,
+    checkpoint_paths: dict,
+    aggregate_materialized: bool,
 ) -> None:
-    """Atomically persist progress so an interrupted FL run is evaluable."""
-    records = {
-        "fault_localization_function_results.json": func_results,
-        "fault_localization_file_results.json": file_results,
-        "fault_localization_class_results.json": class_results,
-        "fault_localization_results.json": combined_results,
-    }
-    for filename, data in records.items():
-        atomic_write_json(
-            os.path.join(output_dir, filename),
-            data,
-            indent=4,
-        )
+    """Checkpoint O(number-of-bugs) references, not four growing payloads."""
+    atomic_write_json(
+        os.path.join(
+            output_dir, "fault_localization_progress.json"
+        ),
+        {
+            "schema": "unified_debugging.fl_progress.v2",
+            "aggregate_materialized": bool(
+                aggregate_materialized
+            ),
+            "completed_bug_count": len(checkpoint_paths),
+            "bug_checkpoints": checkpoint_paths,
+        },
+        indent=2,
+    )
 
 
 def _causal_evidence_summary(evidence: dict) -> dict:
@@ -446,11 +667,21 @@ def _causal_evidence_summary(evidence: dict) -> dict:
     trace_plan = evidence.get("trace_plan") or {}
     tiers = evidence.get("causal_tiers") or {}
     probes = evidence.get("probe_evidence") or {}
-    targeted = evidence.get("targeted_probe_runtime") or {}
+    broker = (
+        (evidence.get("runtime_trace") or {}).get(
+            "investigation_query_broker"
+        )
+        or {}
+    )
     return {
         "version": evidence.get("version"),
         "engine": evidence.get("engine"),
         "ground_truth_used": evidence.get("ground_truth_used", False),
+        "fail_context_id": evidence.get("fail_context_id", ""),
+        "fail_context_artifact": evidence.get(
+            "fail_context_artifact",
+            "",
+        ),
         "failed_test_count": len(evidence.get("tests") or []),
         "candidate_count": ranking.get("candidate_count", 0),
         "formula": ranking.get("formula", ""),
@@ -465,8 +696,14 @@ def _causal_evidence_summary(evidence: dict) -> dict:
         ),
         "source_dossier_count": tiers.get("source_dossier_count", 0),
         "probe_observed_count": probes.get("observed_count", 0),
-        "targeted_probe_fresh_execution": bool(
-            targeted.get("fresh_execution")
+        "probe_build_pass_limit": broker.get(
+            "probe_build_pass_limit", 0
+        ),
+        "post_ranking_runtime_passes": broker.get(
+            "post_ranking_runtime_passes", 0
+        ),
+        "broker_planned_probe_count": broker.get(
+            "planned_probe_count", 0
         ),
         "first_bad_transformation_confirmed": bool(
             tiers.get("first_bad_transformation_confirmed")
@@ -689,6 +926,27 @@ def _write_full_run_evaluation(*, dataset: str, run_dir: str) -> str:
     return report_path
 
 
+def _apr_consumed_functions(apr_result: dict) -> set:
+    """Return exact FL keys consumed by one APR round."""
+    if not isinstance(apr_result, dict):
+        return set()
+    values = apr_result.get("attempted_functions") or []
+    if not values:
+        values = (
+            (apr_result.get("candidate_selection") or {}).get(
+                "selected_functions"
+            )
+            or []
+        )
+    if not values and apr_result.get("selected_function"):
+        values = [apr_result["selected_function"]]
+    return {
+        str(value).strip()
+        for value in values
+        if str(value).strip()
+    }
+
+
 def run_full_pipeline(
     dataset: str,
     *,
@@ -865,6 +1123,7 @@ def run_full_pipeline(
             bug_apr_results = {}
             bug_converged = False
             bug_stop_reason = ""
+            attempted_fl_functions = set()
             scores = base_record.get("scores") or {}
             if not isinstance(scores, dict) or not scores:
                 bug_stop_reason = "missing_fl_scores"
@@ -949,6 +1208,11 @@ def run_full_pipeline(
                             apr_results_filename=apr_results_path,
                             only_missing=only_missing,
                             skip_bug_ids=set(),
+                            exclude_functions_by_bug={
+                                bug_id: set(
+                                    attempted_fl_functions
+                                ),
+                            },
                         )
 
                     if not os.path.isfile(apr_results_path):
@@ -959,14 +1223,30 @@ def run_full_pipeline(
                     with open(apr_results_path, "r") as stream:
                         current_apr_results = json.load(stream)
                     current_result = current_apr_results.get(bug_id)
+                    candidate_space_exhausted = (
+                        isinstance(current_result, dict)
+                        and current_result.get("validation_error")
+                        == "no_untried_fl_candidates"
+                    )
+                    round_attempted_functions = (
+                        _apr_consumed_functions(current_result)
+                    )
+                    attempted_fl_functions.update(
+                        round_attempted_functions
+                    )
                     if isinstance(current_result, dict):
                         previous = bug_apr_results.get(bug_id)
-                        if not (
-                            isinstance(previous, dict)
-                            and is_plausible_status(
-                                previous.get("status")
+                        if (
+                            not candidate_space_exhausted
+                            and not (
+                                isinstance(previous, dict)
+                                and is_plausible_status(
+                                    previous.get("status")
+                                )
                             )
                         ):
+                            bug_apr_results[bug_id] = current_result
+                        elif previous is None:
                             bug_apr_results[bug_id] = current_result
                     write_json(cumulative_apr_path, bug_apr_results)
 
@@ -991,6 +1271,33 @@ def run_full_pipeline(
                             current_result.get("status")
                         )
                     )
+                    next_round_selection = {}
+                    if (
+                        not bug_converged
+                        and not candidate_space_exhausted
+                        and round_index < rounds
+                    ):
+                        next_record = (
+                            updated_results.get(bug_id) or {}
+                        )
+                        next_scores = (
+                            next_record.get("scores") or {}
+                            if isinstance(next_record, dict)
+                            else {}
+                        )
+                        (
+                            next_round_candidates,
+                            next_round_selection,
+                        ) = select_untried_fl_functions(
+                            next_scores,
+                            top_k=APR_TOP_K,
+                            excluded_functions=(
+                                attempted_fl_functions
+                            ),
+                        )
+                        candidate_space_exhausted = not bool(
+                            next_round_candidates
+                        )
 
                     round_manifest["apr_results_cumulative"] = _relpath(
                         cumulative_apr_path,
@@ -1002,9 +1309,29 @@ def run_full_pipeline(
                     )
                     round_manifest["fl_update_summary"] = update_summary
                     round_manifest["plausible"] = bug_converged
+                    round_manifest["candidate_selection"] = (
+                        (current_result or {}).get(
+                            "candidate_selection"
+                        )
+                        if isinstance(current_result, dict)
+                        else {}
+                    )
+                    round_manifest["attempted_functions"] = sorted(
+                        round_attempted_functions
+                    )
+                    round_manifest[
+                        "cumulative_attempted_functions"
+                    ] = sorted(attempted_fl_functions)
                     if bug_converged:
                         bug_stop_reason = "plausible_converged"
                         round_manifest["stop_reason"] = bug_stop_reason
+                    elif candidate_space_exhausted:
+                        bug_stop_reason = "candidate_space_exhausted"
+                        round_manifest["stop_reason"] = bug_stop_reason
+                        if next_round_selection:
+                            round_manifest[
+                                "next_round_candidate_selection"
+                            ] = next_round_selection
                     elif round_index < rounds:
                         next_round_dir = os.path.join(
                             bug_dir,
@@ -1020,6 +1347,9 @@ def run_full_pipeline(
                             next_fl_path,
                             bug_dir,
                         )
+                        round_manifest[
+                            "next_round_candidate_selection"
+                        ] = next_round_selection
                     else:
                         bug_stop_reason = "max_rounds_exhausted"
                         round_manifest["stop_reason"] = bug_stop_reason
@@ -1048,7 +1378,7 @@ def run_full_pipeline(
                     completed_round_count += 1
                     active_round_manifest = None
                     active_round_manifest_path = ""
-                    if bug_converged:
+                    if bug_converged or candidate_space_exhausted:
                         break
 
             aggregate_final_fl_results[bug_id] = (
@@ -1090,6 +1420,9 @@ def run_full_pipeline(
             )
             bug_manifest["completed_round_count"] = len(
                 bug_manifest["rounds"]
+            )
+            bug_manifest["attempted_functions"] = sorted(
+                attempted_fl_functions
             )
             bug_manifest["final_fl_results"] = _relpath(
                 bug_final_fl_path,
@@ -1474,6 +1807,9 @@ def main():
                     llm_rerank=args.fl_llm_rerank,
                     refresh_runtime_traces=args.refresh_runtime_traces,
                     cache_only=args.fl_cache_only,
+                    include_bug_ids=(
+                        {args.bug_id} if args.bug_id else None
+                    ),
                 )
             evaluate_fl(dataset, level=fl_eval_level)
 

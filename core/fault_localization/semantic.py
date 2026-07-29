@@ -6,11 +6,11 @@ import os
 import re
 from typing import Any, Dict, Iterable, List
 
-from core.apr.agent.correctness_repair.clang_semantic_provider import (
+from core.program_analysis.clang_provider import (
     resolve_target_semantics,
 )
-from core.apr.agent.correctness_repair.models import stable_id
-from core.apr.common import (
+from core.program_analysis.utils import stable_id
+from core.program_analysis.source_utils import (
     node_text,
     parse_tree,
     source_language_from_path,

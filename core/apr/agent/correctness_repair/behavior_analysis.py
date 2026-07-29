@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Set, Tuple
 
-from .clang_semantic_provider import resolve_target_semantics
+from core.program_analysis.clang_provider import resolve_target_semantics
 from .models import clip, stable_id
 
 

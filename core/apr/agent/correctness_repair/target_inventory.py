@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Tuple
 
-from core.apr.common import parse_tree, walk_nodes
+from core.program_analysis.source_utils import parse_tree, walk_nodes
 
 from .models import clip, stable_id
 from .syntax_queries import build_target_syntax_ir, syntax_ir_entities

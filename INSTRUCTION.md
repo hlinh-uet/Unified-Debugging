@@ -137,10 +137,11 @@ if dataset_name.lower() == "defects4c":
 **Package:** `core/fault_localization/`
 
 - `runtime.py` – build instrumented và thu ordered regression trace
-- `markers.py` – chèn stable scenario marker và targeted branch probe
+- `markers.py` – chèn stable scenario marker và bounded slice probes
 - `scenario.py` – tách assertion, fingerprint và chọn scenario sai đầu tiên
-- `investigation.py` – source dossier và kiểm chứng dynamic causal chain
+- `investigation.py` – cached source index/dossier và kiểm chứng dynamic causal chain
 - `trace_plan.py` – lập source/runtime-supported investigation plan
+- `query_broker.py` – hợp nhất deterministic/LLM questions trước probe build duy nhất
 - `probes.py` – resolve information-needs và concrete branch observations
 - `artifacts.py` – cache/checkpoint nguyên tử theo bug và identity
 - `semantic.py` – source/Clang semantic evidence
@@ -156,7 +157,7 @@ if dataset_name.lower() == "defects4c":
 - `experiments/fault_localization_file_results.json` – file-level score
 - `experiments/fault_localization_class_results.json` – class/scope-level score cho C++ keys dạng `file:class::function`
 
-### Thuật toán evidence-driven dynamic FL v8
+### Thuật toán evidence-driven dynamic FL v9
 
 1. Parse đúng definition của regression test đang fail thành scenario với
    fingerprint ổn định. Marker được chèn cùng dòng trước producer/assertion
@@ -172,8 +173,9 @@ if dataset_name.lower() == "defects4c":
    assignment, call, throw và quan hệ caller/callee.
 7. LLM lập causal hypothesis và information-needs. Hypothesis chỉ được nhận
    nếu exact keys, source observation và dynamic causal chain đều kiểm chứng.
-8. Targeted pass instrument branch trong causal chain và chạy lại failed test
-   để thu concrete outcomes. Evidence không instrument được phải ghi rõ.
+8. Query broker nhập branch questions vào cùng slice-probe plan trước detailed
+   run. Không có targeted build/test pass sau ranking; evidence không thu được
+   phải giữ trạng thái unknown.
 9. Xếp hạng lexicographic theo proof tier; không dùng fitted coefficient.
 
 Không có coefficient được fit theo dataset hoặc rule riêng cho một benchmark.
@@ -184,14 +186,15 @@ exact function key có trong runtime inventory và không được đề xuất 
 Dùng
 `--no-fl-llm-guide` để chạy deterministic-only.
 
-Mỗi bug có một control-trace build; khi investigation plan yêu cầu concrete
-branch evidence, FL có thêm một targeted-probe build được cache theo exact
-probe identity. Chỉ test buggy=FAIL, fixed=PASS được chạy. `covered_methods`
+Mỗi bug có một control-trace build và tối đa một slice-probe rebuild. Concrete
+branch questions được lập sau census và cài trong rebuild này; không có build
+probe độc lập thứ hai. Chỉ test buggy=FAIL, fixed=PASS được chạy. `covered_methods`
 cũ và passing tests không tham gia candidate hay score. Nếu build/trace thất
 bại, FL ghi score rỗng cùng diagnostics; không fallback sang baseline.
 
 Runtime artifacts được giữ bền vững tại
-`experiments/runtime_traces/<bug>/` và dùng chung cho FL-only lẫn `--full`.
+`experiments/runtime_traces/<dataset>/<bug>/` và dùng chung cho FL-only lẫn
+`--full`.
 Nếu schema, bug identity, tập regression tests, output log, raw trace và
 ordered events đều hợp lệ thì FL load cache theo từng bug, không build/chạy
 lại. Lần trace mới lưu full events ở `runtime_evidence.full.json.gz`; dùng
@@ -210,6 +213,12 @@ Producer slicing không rút output xuống một function duy nhất. FL vẫn 
 toàn bộ function scores theo thứ tự giảm dần; APR mặc định lấy ba phần tử đầu
 qua `APR_TOP_K=3`.
 
+Trong `--full`, candidate đã được APR xét ở round trước được carry-forward
+bằng exact FL function key. Round tiếp theo lọc các key này trước khi cắt
+`APR_TOP_K`, vì vậy top-k trùng sẽ được thay bằng các hàm chưa thử phía dưới.
+Nếu không còn hàm có score khác 0 chưa thử, pipeline dừng bug với
+`candidate_space_exhausted`.
+
 ### Output format
 
 ```json
@@ -222,11 +231,12 @@ qua `APR_TOP_K=3`.
 	      "main": 0.5
 	    },
 	    "ground_truth": ["solve"],
-	    "causal_evidence": {
-	      "ground_truth_used": false,
-	      "runtime_trace": {
-	        "fresh_execution": true
-	      }
+	    "causal_evidence_ref": {
+	      "schema": "unified_debugging.causal_evidence_ref.v1",
+	      "path": "experiments/runtime_traces/.../causal_evidence.json.gz"
+	    },
+	    "causal_evidence_summary": {
+	      "ground_truth_used": false
 	    }
 	  }
 }

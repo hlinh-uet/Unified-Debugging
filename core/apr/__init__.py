@@ -2,11 +2,14 @@
 
 Public entrypoints stay small for backward compatibility. Implementation is
 split by responsibility:
-- agent/: CodeContext, FailContext, and FixAgent logic
+- agent/: APR-specific context, diagnosis, and patch-generation policies
 - pipeline.py: APR orchestration
 - llm.py: OpenAI/OpenRouter-compatible client
 - common.py: APR settings, source/context helpers, and result helpers
 - artifacts.py/validation.py: output metadata and sandbox helpers
+
+Shared FailContext and program-analysis providers live in
+``core.failure_context`` and ``core.program_analysis`` respectively.
 """
 
 __all__ = ["call_llm", "run_apr_pipeline", "validate_patch"]

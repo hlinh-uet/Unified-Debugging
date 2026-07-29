@@ -1,4 +1,4 @@
-"""Compact, source-backed failure contracts.
+"""Shared compact, source-backed failure contracts.
 
 This module does not infer expected/actual values with log regexes.  It keeps
 the failing assertion/test definition and the runner output as oracle evidence
@@ -11,9 +11,18 @@ import os
 import re
 from typing import Any, Dict, List, Set
 
-from core.apr.common import node_text, parse_tree, source_language_from_path, walk_nodes
+from core.program_analysis.source_utils import (
+    node_text,
+    parse_tree,
+    source_language_from_path,
+    walk_nodes,
+)
 
-from .models import clip, compact_strings, stable_id
+from .utils import (
+    clip,
+    compact_strings,
+    stable_id,
+)
 
 
 def build_failure_contract(context: Dict[str, Any]) -> Dict[str, Any]:
@@ -30,6 +39,13 @@ def build_failure_contract(context: Dict[str, Any]) -> Dict[str, Any]:
         dependency_slice = _compact_dependency_slice(
             focused.get("test_dependency_slice") or {}
         )
+        test_input = _compact_test_input(test.get("test_input") or {})
+        expected_oracle = _compact_expected_oracle(
+            test.get("expected_oracle") or {}
+        )
+        regression_output = _compact_regression_output(
+            test.get("regression_output") or {}
+        )
         observation = focused.get("failure_observation") or {}
         failure_log = str(test.get("failure_log") or test.get("fail_reason") or "")
         actual_output = str(test.get("actual_output") or "")
@@ -39,10 +55,14 @@ def build_failure_contract(context: Dict[str, Any]) -> Dict[str, Any]:
             "test_source_range": test.get("test_source_range") or {},
             "failing_assertion": assertion,
             "test_dependency_slice": dependency_slice,
+            "test_input": test_input,
+            "expected_oracle": expected_oracle,
+            "regression_output": regression_output,
             "failure_observation": observation,
             "proof_obligation": _proof_obligation(
                 assertion=assertion,
                 observation=observation,
+                expected_oracle=expected_oracle,
             ),
             # Kept only as an audit fallback. Causal reasoning should use the
             # assertion and dependency slice above instead of the function head.
@@ -55,11 +75,10 @@ def build_failure_contract(context: Dict[str, Any]) -> Dict[str, Any]:
                 "" if _normalized_output(actual_output) == _normalized_output(failure_log)
                 else clip(actual_output, 1000)
             ),
-            "covered_target": bool(test.get("covered_target")),
         })
     contract = {
-        "version": 2,
-        "oracle_kind": "assertion_centered_test_behavior",
+        "version": 3,
+        "oracle_kind": "regression_input_output_behavior",
         "tests": compact_tests,
         "runtime_facts": compact_strings(behavior.get("runtime_facts"), limit=12, chars=300),
         "validation_feedback": _compact_validation_feedback(
@@ -118,6 +137,45 @@ def _compact_dependency_slice(value: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _compact_test_input(value: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, dict) or not value:
+        return {}
+    return {
+        "kind": value.get("kind"),
+        "selection_basis": value.get("selection_basis"),
+        "source_path": value.get("source_path"),
+        "source_ranges": [
+            item
+            for item in value.get("source_ranges") or []
+            if isinstance(item, dict)
+        ][:12],
+        "source": clip(value.get("source"), 3_000),
+        "symbols": (value.get("symbols") or [])[:32],
+    }
+
+
+def _compact_expected_oracle(value: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, dict) or not value:
+        return {}
+    return {
+        "kind": value.get("kind"),
+        "source_path": value.get("source_path"),
+        "source": clip(value.get("source"), 2_000),
+    }
+
+
+def _compact_regression_output(value: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, dict) or not value:
+        return {}
+    return {
+        "source": value.get("source"),
+        "returncode": value.get("returncode"),
+        "failed_as_expected": value.get("failed_as_expected"),
+        "test_executed": value.get("test_executed"),
+        "text": clip(value.get("text"), 2_000),
+    }
+
+
 def _normalized_output(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
@@ -152,7 +210,10 @@ def _diagnostic_log_excerpt(
 
 
 def _proof_obligation(
-    *, assertion: Dict[str, Any], observation: Dict[str, Any]
+    *,
+    assertion: Dict[str, Any],
+    observation: Dict[str, Any],
+    expected_oracle: Dict[str, Any] = None,
 ) -> Dict[str, Any]:
     if observation.get("failure_mode") == "signal":
         return {
@@ -162,6 +223,15 @@ def _proof_obligation(
             "source_location_status": observation.get("source_location_status"),
         }
     if not assertion:
+        if expected_oracle:
+            return {
+                "kind": "match_expected_regression_output",
+                "expected_output": expected_oracle.get("source"),
+                "oracle_source": expected_oracle.get("source_path"),
+                "runner_observation": (
+                    observation.get("runner_assertion_observation")
+                ),
+            }
         return {
             "kind": "resolve_assertion_oracle",
             "runner_observation": observation.get("runner_assertion_observation"),

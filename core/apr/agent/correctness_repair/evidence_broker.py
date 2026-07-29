@@ -6,9 +6,9 @@ import os
 import re
 from typing import Any, Dict, Iterable, List, Tuple
 
-from core.apr.program_analysis.service import query_cpg_tools
+from core.program_analysis.service import query_cpg_tools
+from core.program_analysis.clang_provider import retrieve_semantic_evidence
 
-from .clang_semantic_provider import retrieve_semantic_evidence
 from .semantic_queries import (
     RUNTIME_EVIDENCE_REQUIREMENT,
     STATIC_EVIDENCE_REQUIREMENT,

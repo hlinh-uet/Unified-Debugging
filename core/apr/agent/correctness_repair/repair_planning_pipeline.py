@@ -9,7 +9,7 @@ from core.apr.artifacts import write_related_code_context_artifact, write_repair
 from .behavior_analysis import analyze_target_behavior, merge_expansion_context
 from .causal_reasoner import adjudicate_and_plan, diagnose
 from .evidence_broker import execute_behavior_queries, merge_information_needs
-from .failure_contract import build_failure_contract
+from core.failure_context import build_failure_contract
 from .models import ARCHITECTURE, STATE_VERSION, new_repair_state, unique_dicts
 from .source_model import build_target_contract
 from .target_inventory import build_target_inventory

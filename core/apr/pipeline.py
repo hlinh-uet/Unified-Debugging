@@ -1,4 +1,5 @@
 import hashlib
+import gzip
 import json
 import os
 import re
@@ -11,17 +12,11 @@ from configs.path import (
     get_llm_patches_dir,
     get_patches_dir,
 )
-from core.apr.agent.correctness_repair.fail_context_agent import (
-    run_correctness_fail_context_agent,
-)
 from core.apr.agent.correctness_repair.fix_agent import (
     run_correctness_fix_agent,
 )
 from core.apr.agent.correctness_repair.repair_planning_pipeline import (
     run_correctness_repair_planning,
-)
-from core.apr.agent.security_repair.fail_context_agent import (
-    run_security_fail_context_agent,
 )
 from core.apr.agent.security_repair.fix_agent import (
     run_security_fix_agent,
@@ -45,15 +40,25 @@ from core.apr.common import (
     is_plausible_status,
     is_defects4c_dataset,
     parser_diagnostics,
+    select_untried_fl_functions,
     source_slice_by_byte_range,
     source_root,
     source_language_from_path,
+)
+from core.failure_context import (
+    fail_context_runtime_dir,
+    reusable_fail_context,
+    run_fail_context_agent,
+)
+from core.fault_localization.artifacts import (
+    load_causal_evidence_reference,
 )
 from core.apr.artifacts import (
     build_initial_test_snapshot,
     build_invalid_snapshot,
     build_validation_snapshot,
     extract_evaluation_snapshot,
+    write_fail_context_artifact,
     write_llm_patch_artifact,
     write_replacement_target_artifact,
     write_repair_objective_artifact,
@@ -74,6 +79,68 @@ from core.utils import (
 )
 from data_loaders.base_loader import get_loader
 from data_loaders.sandbox_adapter import defects4c_docker_ready, get_sandbox_adapter
+
+
+_CAUSAL_EVIDENCE_REFERENCE_CACHE = {}
+
+
+def _causal_evidence_for_fl_result(fl_result: dict) -> dict:
+    """Resolve old inline evidence or the new canonical artifact reference."""
+    if not isinstance(fl_result, dict):
+        return {}
+    inline = fl_result.get("causal_evidence")
+    if isinstance(inline, dict):
+        return inline
+    reference = fl_result.get("causal_evidence_ref")
+    if not isinstance(reference, dict):
+        return {}
+    path = str(reference.get("path") or "")
+    try:
+        stat = os.stat(path)
+        fingerprint = (
+            path,
+            int(stat.st_mtime_ns),
+            int(stat.st_size),
+        )
+    except OSError:
+        fingerprint = (path, 0, 0)
+    cached = _CAUSAL_EVIDENCE_REFERENCE_CACHE.get(fingerprint)
+    if isinstance(cached, dict):
+        return cached
+    evidence = load_causal_evidence_reference(reference)
+    if evidence:
+        _CAUSAL_EVIDENCE_REFERENCE_CACHE.clear()
+        _CAUSAL_EVIDENCE_REFERENCE_CACHE[fingerprint] = evidence
+    return evidence
+
+
+def _source_investigation_for_causal(
+    causal_evidence: dict,
+) -> dict:
+    source = (
+        causal_evidence.get("source_investigation")
+        if isinstance(causal_evidence, dict)
+        else {}
+    ) or {}
+    if isinstance(source.get("dossiers"), dict):
+        return source
+    reference = source.get("artifact_ref") or {}
+    path = str(reference.get("path") or "")
+    if not path or not os.path.isfile(path):
+        return source
+    try:
+        opener = gzip.open if path.endswith(".gz") else open
+        with opener(path, "rt", encoding="utf-8") as stream:
+            loaded = json.load(stream)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return source
+    if not isinstance(loaded, dict):
+        return source
+    expected = str(reference.get("identity") or "")
+    actual = str(loaded.get("identity") or "")
+    if expected and actual and expected != actual:
+        return source
+    return loaded
 
 
 def _build_candidate_validation_context(
@@ -368,17 +435,77 @@ def _repair_route(repair_objective: dict) -> str:
 def _repair_branch_agents(repair_objective: dict) -> tuple:
     if _repair_route(repair_objective) == "security_repair":
         return (
-            run_security_fail_context_agent,
             run_security_related_code_context_agent,
             run_security_repair_constraints_agent,
             run_security_fix_agent,
         )
     return (
-        run_correctness_fail_context_agent,
         None,
         None,
         run_correctness_fix_agent,
     )
+
+
+def _shared_fail_context_for_apr(
+    *,
+    bug,
+    bug_id: str,
+    fl_result: dict,
+) -> tuple:
+    causal_evidence = _causal_evidence_for_fl_result(fl_result)
+    context = reusable_fail_context(
+        causal_evidence.get("fail_context")
+    )
+    reused_from_fl = context is not None
+    reused_from_shared_agent = False
+    if context is None:
+        trace_dir = fail_context_runtime_dir(
+            root=EXPERIMENTS_DIR,
+            dataset=str(getattr(bug, "dataset", "") or ""),
+            bug_id=bug_id,
+        )
+        shared_run = run_fail_context_agent(
+            bug=bug,
+            artifact_dir=trace_dir,
+            cache_only=True,
+            require_full_runtime=False,
+            query_llm_enabled=False,
+        )
+        context = reusable_fail_context(
+            shared_run.get("fail_context")
+        )
+        reused_from_shared_agent = context is not None
+    if context is None:
+        # Metadata-only output is not a reproducible failure observation.
+        # Fail closed rather than presenting stale dataset text as fresh.
+        context = {}
+    tests = context.get("tests") or []
+    artifact = write_fail_context_artifact(
+        bug_id=bug_id,
+        attempt_index=0,
+        qualified_name="test_fail_context",
+        candidate_relpath="",
+        fail_context=context,
+        step_name=(
+            "shared_fail_context_from_fl"
+            if reused_from_fl
+            else "shared_fail_context_from_agent_cache"
+            if reused_from_shared_agent
+            else "shared_fail_context_unavailable"
+        ),
+        status=(
+            "reused"
+            if reused_from_fl or reused_from_shared_agent
+            else "empty"
+        ),
+        error="" if tests else "fresh_fail_context_unavailable",
+    )
+    artifact["context_id"] = context.get("context_id", "")
+    artifact["reused_from_fl"] = reused_from_fl
+    artifact["reused_from_shared_agent"] = (
+        reused_from_shared_agent
+    )
+    return context, artifact
 
 
 def _resolve_target_for_repair(
@@ -686,17 +813,10 @@ def _target_resolution_hints(
         "stack_frames": frames[:40],
         "covered_lines": covered_lines[:200],
     }
-    causal_evidence = (
-        fl_result.get("causal_evidence")
-        if isinstance(fl_result, dict)
-        and isinstance(fl_result.get("causal_evidence"), dict)
-        else {}
-    )
-    dossiers = (
-        (causal_evidence.get("source_investigation") or {}).get("dossiers")
-        if isinstance(causal_evidence.get("source_investigation"), dict)
-        else {}
-    )
+    causal_evidence = _causal_evidence_for_fl_result(fl_result)
+    dossiers = _source_investigation_for_causal(
+        causal_evidence
+    ).get("dossiers") or {}
     dossier = (
         dossiers.get(qualified_name)
         if isinstance(dossiers, dict)
@@ -715,6 +835,102 @@ def _target_resolution_hints(
     if dossier.get("source_digest"):
         hints["fl_source_digest"] = str(dossier["source_digest"])
     return hints
+
+
+def _compilation_context_from_fl(
+    *,
+    fl_result: dict,
+    source_root: str,
+    source_path: str,
+) -> dict:
+    """Reuse the exact database exported by the instrumented FL build."""
+    causal_evidence = _causal_evidence_for_fl_result(fl_result)
+    runtime_trace = causal_evidence.get("runtime_trace") or {}
+    compile_record = runtime_trace.get("compile") or {}
+    database_path = str(
+        compile_record.get("compilation_database") or ""
+    )
+    if not database_path or not os.path.isfile(database_path):
+        return {
+            "available": False,
+            "diagnostics": [
+                "fl_compilation_database_unavailable"
+            ],
+        }
+    try:
+        with open(
+            database_path, "r", encoding="utf-8"
+        ) as stream:
+            entries = json.load(stream)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return {
+            "available": False,
+            "diagnostics": [
+                "fl_compilation_database_read_failed:"
+                f"{type(exc).__name__}"
+            ],
+        }
+    if not isinstance(entries, list) or not any(
+        isinstance(item, dict) for item in entries
+    ):
+        return {
+            "available": False,
+            "diagnostics": [
+                "fl_compilation_database_has_no_commands"
+            ],
+        }
+    evidence_root = str(
+        (
+            causal_evidence.get("source_investigation") or {}
+        ).get("source_root")
+        or source_root
+        or ""
+    )
+    analysis_root = os.path.realpath(evidence_root) if evidence_root else ""
+    target = os.path.realpath(source_path) if source_path else ""
+    try:
+        target_within_root = (
+            not analysis_root
+            or not target
+            or os.path.commonpath([analysis_root, target])
+            == analysis_root
+        )
+    except ValueError:
+        target_within_root = False
+    if not target_within_root:
+        return {
+            "available": False,
+            "diagnostics": [
+                "fl_compilation_database_source_root_mismatch"
+            ],
+        }
+    allowed_roots = list(dict.fromkeys(
+        value
+        for value in (
+            analysis_root,
+            os.path.realpath(source_root)
+            if source_root else "",
+        )
+        if value and os.path.isdir(value)
+    ))
+    return {
+        "version": 1,
+        "available": True,
+        "database_path": os.path.realpath(database_path),
+        "source_database": os.path.realpath(database_path),
+        "command_count": sum(
+            isinstance(item, dict) for item in entries
+        ),
+        "build_source_root": analysis_root,
+        "analysis_source_root": analysis_root,
+        "allowed_source_roots": allowed_roots,
+        "provider": "fault_localization_runtime_build",
+        "reused_from_fl": True,
+        "fail_context_id": causal_evidence.get(
+            "fail_context_id", ""
+        ),
+        "diagnostics": [],
+    }
 
 
 def _normalize_llm_replacement(
@@ -1277,6 +1493,7 @@ def run_apr_pipeline(
     valid_mode: bool = False,
     only_missing: bool = False,
     skip_bug_ids: Optional[set] = None,
+    exclude_functions_by_bug: Optional[dict] = None,
 ):
     """
     Pipeline APR (LLM-based).
@@ -1286,6 +1503,10 @@ def run_apr_pipeline(
         dataset:      Tên dataset (mặc định 'codeflaws').
         llm_provider: 'openai' | 'openrouter'.
                       Nếu None, đọc từ LLM_PROVIDER trong .env.
+        exclude_functions_by_bug:
+                      Exact FL keys đã được round trước tiêu thụ. Chúng được
+                      lọc trước khi lấy top-k; CLI APR đơn lẻ mặc định không
+                      loại function nào.
     """
     os.makedirs(get_apr_runtime_dir(), exist_ok=True)
 
@@ -1301,6 +1522,16 @@ def run_apr_pipeline(
     with open(fl_results_file, "r") as f:
         fl_results = json.load(f)
     top_k = APR_TOP_K if apr_top_k is None else apr_top_k
+    excluded_functions = {
+        str(bug_id): {
+            str(function).strip()
+            for function in functions or []
+            if str(function).strip()
+        }
+        for bug_id, functions in (
+            exclude_functions_by_bug or {}
+        ).items()
+    }
 
     ds_lc = (dataset or "").lower()
     if is_defects4c_dataset(ds_lc):
@@ -1452,9 +1683,39 @@ def run_apr_pipeline(
         if not scores:
             continue
 
-        sorted_funcs = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        top_funcs = sorted_funcs[:top_k] if top_k > 0 else sorted_funcs
-        print(f"[APR] Xử lý bug {bug_id}... (top-{top_k if top_k > 0 else 'all'})")
+        top_funcs, candidate_selection = (
+            select_untried_fl_functions(
+                scores,
+                top_k=top_k,
+                excluded_functions=excluded_functions.get(
+                    str(bug_id), set()
+                ),
+            )
+        )
+        print(
+            f"[APR] Xử lý bug {bug_id}... "
+            f"(top-{top_k if top_k > 0 else 'all'} chưa thử)"
+        )
+        if not valid_mode and not top_funcs:
+            print(
+                "    [APR] Không còn FL function chưa thử; "
+                "không gọi agent/LLM."
+            )
+            apr_results[bug_id] = {
+                "dataset": dataset,
+                "valid_mode": valid_mode,
+                "fl_results_file": os.path.basename(
+                    fl_results_file
+                ),
+                "status": "skipped",
+                "real_status": "skipped",
+                "validation_error": "no_untried_fl_candidates",
+                "candidate_selection": candidate_selection,
+                "attempted_functions": [],
+            }
+            with open(apr_results_file, "w") as stream:
+                json.dump(apr_results, stream, indent=4)
+            continue
 
         try:
             adapter = get_sandbox_adapter(dataset, bug_id)
@@ -1476,8 +1737,8 @@ def run_apr_pipeline(
             bug_id=bug_id,
             dataset=dataset,
         )
+        repair_route = _repair_route(repair_objective)
         (
-            run_branch_fail_context_agent,
             run_branch_related_code_context_agent,
             run_constraints_agent,
             run_branch_fix_agent,
@@ -1489,14 +1750,52 @@ def run_apr_pipeline(
             f"(oracle={repair_objective.get('validation_oracle')}, "
             f"confidence={repair_objective.get('confidence')})"
         )
-        failed_tests_context, fail_context_agent_artifact = run_branch_fail_context_agent(
-            bug=bug_record,
-            bug_id=bug_id,
-            llm_provider=llm_provider,
+        failed_tests_context, fail_context_agent_artifact = (
+            _shared_fail_context_for_apr(
+                bug=bug_record,
+                bug_id=bug_id,
+                fl_result=result_data,
+            )
+        )
+        branch_failed_tests_context = (
+            failed_tests_context
+            if repair_route == "correctness_repair"
+            else json.dumps(
+                failed_tests_context,
+                ensure_ascii=False,
+                default=str,
+            )
         )
         if not failed_tests_context:
-            print(f"    [ERROR] FailContextAgent trả về None. Bỏ qua bug {bug_id}.")
+            print(
+                f"    [ERROR] Không có fresh Fail Context cho "
+                f"{bug_id}; bỏ qua APR."
+            )
+            apr_results[bug_id] = {
+                "dataset": dataset,
+                "valid_mode": valid_mode,
+                "fl_results_file": os.path.basename(
+                    fl_results_file
+                ),
+                "status": "skipped",
+                "real_status": "skipped",
+                "validation_error": (
+                    "fresh_fail_context_unavailable"
+                ),
+                "fail_context_agent_artifact": (
+                    fail_context_agent_artifact
+                ),
+                "candidate_selection": candidate_selection,
+                "attempted_functions": [],
+            }
+            with open(apr_results_file, "w") as stream:
+                json.dump(apr_results, stream, indent=4)
             continue
+        print(
+            "    [FAIL-CONTEXT] "
+            f"{fail_context_agent_artifact.get('context_id') or 'legacy'}; "
+            f"reused_from_fl={bool(fail_context_agent_artifact.get('reused_from_fl'))}"
+        )
         initial = build_initial_test_snapshot(
             bug_record.tests if bug_record else [],
             exclude_fixed_fail_tests=exclude_fixed_fail_tests,
@@ -1509,6 +1808,7 @@ def run_apr_pipeline(
         llm_patch_attempt_index = 0
         candidate_results = []
         best_candidate = None
+        attempted_functions = set()
 
         exact_targets = (
             list(result_data.get("exact_targets") or [])
@@ -1530,10 +1830,18 @@ def run_apr_pipeline(
                 "dataset": dataset,
                 "valid_mode": True,
                 "fl_results_file": os.path.basename(fl_results_file),
+                "fail_context_id": (
+                    fail_context_agent_artifact.get("context_id") or ""
+                ),
+                "fail_context_agent_artifact": (
+                    fail_context_agent_artifact
+                ),
                 "status": "skipped",
                 "real_status": "skipped",
                 "validation_error": "exact_oracle_target_missing",
                 "exact_target_resolution": exact_resolution,
+                "candidate_selection": candidate_selection,
+                "attempted_functions": [],
             }
             with open(apr_results_file, "w") as f:
                 json.dump(apr_results, f, indent=4)
@@ -1556,6 +1864,7 @@ def run_apr_pipeline(
             qualified_name, score, forced_target = pending_funcs.pop(0)
             if score == 0.0:
                 continue
+            attempted_functions.add(str(qualified_name))
 
             file_hint, func_name = parse_sbfl_qualified_name(qualified_name)
             if not func_name:
@@ -1735,7 +2044,6 @@ def run_apr_pipeline(
             )
             related_code_context = {}
             related_code_context_agent_artifact = {}
-            repair_route = _repair_route(repair_objective)
             if (
                 repair_route != "correctness_repair"
                 and run_branch_related_code_context_agent is not None
@@ -1757,21 +2065,44 @@ def run_apr_pipeline(
                     repair_objective=repair_objective,
                 )
             if repair_route == "correctness_repair":
-                try:
-                    compilation_context = adapter.prepare_compilation_database(
-                        source_root=cpg_source_root,
-                        source_path=candidate_path,
-                        src_relpath=candidate_relpath,
+                compilation_context = _compilation_context_from_fl(
+                    fl_result=result_data,
+                    source_root=cpg_source_root,
+                    source_path=candidate_path,
+                )
+                if not compilation_context.get("available"):
+                    fl_database_diagnostics = list(
+                        compilation_context.get("diagnostics") or []
                     )
-                except Exception as exc:
-                    compilation_context = {
-                        "version": 1,
-                        "available": False,
-                        "database_path": "",
-                        "diagnostics": [
-                            f"sandbox_compilation_database_exception:{type(exc).__name__}"
-                        ],
-                    }
+                    try:
+                        compilation_context = (
+                            adapter.prepare_compilation_database(
+                                source_root=cpg_source_root,
+                                source_path=candidate_path,
+                                src_relpath=candidate_relpath,
+                            )
+                            or {}
+                        )
+                    except Exception as exc:
+                        compilation_context = {
+                            "version": 1,
+                            "available": False,
+                            "database_path": "",
+                            "diagnostics": [
+                                f"sandbox_compilation_database_exception:{type(exc).__name__}"
+                            ],
+                        }
+                    compilation_context["diagnostics"] = list(
+                        dict.fromkeys([
+                            *fl_database_diagnostics,
+                            *(
+                                compilation_context.get(
+                                    "diagnostics"
+                                )
+                                or []
+                            ),
+                        ])
+                    )
                 repair_context, repair_context_agent_artifact = run_correctness_repair_planning(
                     bug_id=bug_id,
                     attempt_index=llm_patch_attempt_index,
@@ -1783,7 +2114,7 @@ def run_apr_pipeline(
                     func_code=target_replacement_unit,
                     source_root=cpg_source_root,
                     source_path=candidate_path,
-                    failed_tests_context=failed_tests_context,
+                    failed_tests_context=branch_failed_tests_context,
                     replacement_target=replacement_target,
                     repair_objective=repair_objective,
                     output_contract=output_contract,
@@ -1808,7 +2139,7 @@ def run_apr_pipeline(
                     func_code=target_replacement_unit,
                     replacement_target=replacement_target,
                     related_code_context=related_code_context,
-                    failed_tests_context=failed_tests_context,
+                    failed_tests_context=branch_failed_tests_context,
                     repair_objective=repair_objective,
                 )
                 first_hazard = (((repair_context.get("repair_constraints") or {}).get("risk_operations") or [{}])[0])
@@ -1835,7 +2166,7 @@ def run_apr_pipeline(
                     "func_name": source_func_name,
                     "cand_label": cand_label,
                     "func_code": target_replacement_unit,
-                    "failed_tests_context": failed_tests_context,
+                    "failed_tests_context": branch_failed_tests_context,
                     "repair_objective": repair_objective,
                 }
                 if repair_route == "correctness_repair":
@@ -2043,6 +2374,12 @@ def run_apr_pipeline(
                 "dataset": dataset,
                 "valid_mode": valid_mode,
                 "fl_results_file": os.path.basename(fl_results_file),
+                "fail_context_id": (
+                    fail_context_agent_artifact.get("context_id") or ""
+                ),
+                "fail_context_agent_artifact": (
+                    fail_context_agent_artifact
+                ),
                 "repair_objective": repair_objective,
                 "repair_objective_artifact": repair_objective_artifact,
                 "patched_function": best_candidate.get("patched_function"),
@@ -2069,6 +2406,10 @@ def run_apr_pipeline(
                     raw_meta,
                 ) or best_candidate.get("repair_target_relpath", ""),
                 "selected_function": best_candidate.get("function"),
+                "candidate_selection": candidate_selection,
+                "attempted_functions": sorted(
+                    attempted_functions
+                ),
                 **extract_evaluation_snapshot(best_candidate),
             }
         else:
@@ -2076,11 +2417,21 @@ def run_apr_pipeline(
                 "dataset": dataset,
                 "valid_mode": valid_mode,
                 "fl_results_file": os.path.basename(fl_results_file),
+                "fail_context_id": (
+                    fail_context_agent_artifact.get("context_id") or ""
+                ),
+                "fail_context_agent_artifact": (
+                    fail_context_agent_artifact
+                ),
                 "repair_objective": repair_objective,
                 "repair_objective_artifact": repair_objective_artifact,
                 "status": "llm_failed" if attempted and not llm_attempted else "skipped",
                 "real_status": "llm_failed" if attempted and not llm_attempted else "skipped",
                 "validation_error": "",
+                "candidate_selection": candidate_selection,
+                "attempted_functions": sorted(
+                    attempted_functions
+                ),
                 **initial["fields"],
                 "fixed_fail_excluded_tests": list(initial["excluded"]),
             }

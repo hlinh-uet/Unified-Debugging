@@ -1,6 +1,7 @@
 """APR-feedback update for fault-localization rankings."""
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -63,6 +64,83 @@ def test_set(record: dict, key: str) -> set:
     if not isinstance(values, list):
         return set()
     return {str(value).strip() for value in values if str(value).strip()}
+
+
+def patch_attempt_function(candidate: dict) -> str:
+    return str(candidate.get("function") or candidate.get("selected_function") or "").strip()
+
+
+def candidate_feedback_id(candidate: dict) -> str:
+    """Return a stable identity for one validated APR evidence record.
+
+    The identity includes both artifact provenance and the observed validation
+    outcome.  Reprocessing the same artifact is therefore idempotent, while a
+    revalidated artifact whose test delta changed remains new evidence.
+    """
+    validation_details = (
+        candidate.get("validation_details")
+        if isinstance(candidate.get("validation_details"), dict)
+        else {}
+    )
+    post_failed = filter_zero_test_artifact_failures(
+        test_set(candidate, "post_failed_tests"),
+        validation_details,
+    )
+    patch_artifact = (
+        candidate.get("llm_patch_artifact")
+        if isinstance(candidate.get("llm_patch_artifact"), dict)
+        else {}
+    )
+    artifact_reference = str(
+        candidate.get("metadata_path")
+        or candidate.get("_artifact_path")
+        or candidate.get("raw_patch_path")
+        or patch_artifact.get("metadata_path")
+        or patch_artifact.get("raw_patch_path")
+        or ""
+    )
+    identity = {
+        "source_without_artifact": (
+            ""
+            if artifact_reference
+            else str(candidate.get("_feedback_source") or "apr_results")
+        ),
+        "artifact": artifact_reference,
+        "bug_id": str(candidate.get("bug_id") or ""),
+        "pipeline_round": (
+            candidate.get("pipeline_round")
+            if candidate.get("pipeline_round") is not None
+            else patch_artifact.get("pipeline_round")
+        ),
+        "attempt_index": (
+            candidate.get("attempt_index")
+            if candidate.get("attempt_index") is not None
+            else patch_artifact.get("attempt_index")
+        ),
+        "refix_round": (
+            candidate.get("refix_round")
+            if candidate.get("refix_round") is not None
+            else patch_artifact.get("refix_round")
+        ),
+        "function": patch_attempt_function(candidate),
+        "resolved_function": str(
+            candidate.get("_resolved_feedback_function") or ""
+        ),
+        "status": str(candidate.get("status") or "").strip().lower(),
+        "validation_error": str(
+            candidate.get("validation_error") or ""
+        ).strip(),
+        "init_failed_tests": sorted(test_set(candidate, "init_failed_tests")),
+        "post_failed_tests": sorted(post_failed),
+    }
+    encoded = json.dumps(
+        identity,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return "apr-feedback-v1:" + hashlib.sha256(encoded).hexdigest()
 
 
 def extract_file(score_key: str) -> str:
@@ -158,10 +236,6 @@ def apr_feedback_signal(
         "still_failed_count": len(still_failed),
         "regression_count": len(regressions),
     }
-
-
-def patch_attempt_function(candidate: dict) -> str:
-    return str(candidate.get("function") or candidate.get("selected_function") or "").strip()
 
 
 def score_key_symbol(score_key: str) -> str:
@@ -360,19 +434,36 @@ def update_one_bug_scores(
     file_weight: float,
     signal_min: float,
     signal_max: float,
+    existing_feedback_ids: set = None,
 ) -> Tuple[Dict[str, float], dict]:
     updated = {key: float(value) for key, value in fl_scores.items()}
-    apr_evidence = {key: 0.0 for key in updated}
+    direct_apr_evidence = {key: 0.0 for key in updated}
     update_unit = score_update_unit(fl_scores)
     candidate_feedback = []
     candidate_not_in_fl_scores = 0
     miss_penalty = 1.0 / max(1, len(apr_candidates))
+    seen_feedback_ids = {
+        str(value).strip()
+        for value in (existing_feedback_ids or set())
+        if str(value).strip()
+    }
+    processed_feedback_ids = []
+    duplicate_candidate_count = 0
+    selected_feedback_id_by_function = {}
 
     for candidate in apr_candidates:
+        evidence_id = candidate_feedback_id(candidate)
+        duplicate_evidence = evidence_id in seen_feedback_ids
+        if duplicate_evidence:
+            duplicate_candidate_count += 1
+        else:
+            seen_feedback_ids.add(evidence_id)
+            processed_feedback_ids.append(evidence_id)
+
         requested_function = patch_attempt_function(candidate)
         candidate_function, function_resolution = candidate_feedback_function(
             candidate,
-            apr_evidence.keys(),
+            direct_apr_evidence.keys(),
         )
         signal, feedback = apr_feedback_signal(
             candidate,
@@ -380,6 +471,10 @@ def update_one_bug_scores(
             signal_min=signal_min,
             signal_max=signal_max,
         )
+        applied_signal = 0.0 if duplicate_evidence else signal
+        feedback["feedback_id"] = evidence_id
+        feedback["duplicate_evidence"] = duplicate_evidence
+        feedback["applied_signal"] = applied_signal
         feedback["requested_function"] = requested_function
         feedback["function"] = candidate_function
         feedback["function_resolution"] = function_resolution
@@ -390,23 +485,45 @@ def update_one_bug_scores(
         feedback["attempt_index"] = candidate.get("attempt_index")
         feedback["metadata_path"] = candidate.get("metadata_path") or candidate.get("_artifact_path", "")
         feedback["source"] = candidate.get("_feedback_source", "apr_results")
-        feedback["function_in_fl_scores"] = candidate_function in apr_evidence
+        feedback["function_in_fl_scores"] = candidate_function in direct_apr_evidence
+        feedback["same_file_boosted_count"] = 0
 
-        if candidate_function and candidate_function in apr_evidence:
-            apr_evidence[candidate_function] += signal
-
-            if signal > 0.0 and file_weight > 0.0:
-                peer_keys = same_file_keys(apr_evidence.keys(), candidate_function)
-                for key in peer_keys:
-                    apr_evidence[key] += file_weight * signal
-                feedback["same_file_boosted_count"] = len(peer_keys)
-            else:
-                feedback["same_file_boosted_count"] = 0
+        if candidate_function and candidate_function in direct_apr_evidence:
+            if applied_signal > direct_apr_evidence[candidate_function]:
+                direct_apr_evidence[candidate_function] = applied_signal
+                selected_feedback_id_by_function[candidate_function] = evidence_id
         else:
             candidate_not_in_fl_scores += 1
-            feedback["same_file_boosted_count"] = 0
 
         candidate_feedback.append(feedback)
+
+    # Multiple patch plans and ReFix artifacts for one function are correlated
+    # hypotheses, not independent localization observations.  Use the strongest
+    # validated signal once per function and only then propagate optional
+    # same-file evidence.
+    apr_evidence = dict(direct_apr_evidence)
+    same_file_boosted_count_by_function = {}
+    if file_weight > 0.0:
+        for function, signal in direct_apr_evidence.items():
+            if signal <= 0.0:
+                continue
+            peer_keys = same_file_keys(apr_evidence.keys(), function)
+            for key in peer_keys:
+                apr_evidence[key] += file_weight * signal
+            same_file_boosted_count_by_function[function] = len(peer_keys)
+
+    for feedback in candidate_feedback:
+        function = feedback.get("function") or ""
+        selected = (
+            bool(function)
+            and feedback.get("feedback_id")
+            == selected_feedback_id_by_function.get(function)
+        )
+        feedback["selected_for_function_evidence"] = selected
+        if selected:
+            feedback["same_file_boosted_count"] = (
+                same_file_boosted_count_by_function.get(function, 0)
+            )
 
     bounded_apr_evidence = {}
     for key, value in apr_evidence.items():
@@ -418,12 +535,31 @@ def update_one_bug_scores(
         updated[key] += apr_strength * update_unit * bounded
 
     final_scores = sort_scores(updated)
+    score_changed = any(
+        abs(float(final_scores.get(key, 0.0)) - float(value)) > 1e-12
+        for key, value in fl_scores.items()
+    )
     return final_scores, {
         "candidate_count": len(apr_candidates),
         "candidate_not_in_fl_scores": candidate_not_in_fl_scores,
+        "new_candidate_evidence_count": len(processed_feedback_ids),
+        "duplicate_candidate_evidence_count": duplicate_candidate_count,
+        "direct_function_evidence": {
+            key: value
+            for key, value in direct_apr_evidence.items()
+            if value > 0.0
+        },
+        "bounded_apr_evidence": {
+            key: value
+            for key, value in bounded_apr_evidence.items()
+            if value > 0.0
+        },
+        "score_changed": score_changed,
+        "evidence_aggregation": "max_signal_per_function_per_round",
         "apr_strength": apr_strength,
         "score_update_unit": update_unit,
         "miss_penalty": miss_penalty,
+        "miss_penalty_applied": False,
         "candidate_feedback": candidate_feedback,
     }
 
@@ -448,6 +584,23 @@ def apr_feedback_history(fl_record: dict) -> List[dict]:
     return history
 
 
+def apr_feedback_ids(fl_record: dict) -> set:
+    """Return evidence identities already processed by prior FL updates."""
+    feedback_ids = set()
+    for event in apr_feedback_history(fl_record):
+        for value in event.get("processed_feedback_ids") or []:
+            text = str(value).strip()
+            if text:
+                feedback_ids.add(text)
+        for candidate in event.get("candidate_feedback") or []:
+            if not isinstance(candidate, dict):
+                continue
+            text = str(candidate.get("feedback_id") or "").strip()
+            if text:
+                feedback_ids.add(text)
+    return feedback_ids
+
+
 def feedback_event(payload: dict, feedback_round: int = None) -> dict:
     event = dict(payload)
     if feedback_round is not None:
@@ -462,7 +615,8 @@ def attach_feedback_event(
     prior_record: dict,
 ) -> None:
     history = apr_feedback_history(prior_record)
-    history.append(dict(event))
+    if not history or history[-1] != event:
+        history.append(dict(event))
     record["apr_feedback"] = event
     record["apr_feedback_history"] = history
 
@@ -487,11 +641,16 @@ def build_apr_feedback_fl_results(
     }
     summary = {
         "total_fl_records": 0,
+        "feedback_processed_records": 0,
         "updated_records": 0,
+        "neutral_feedback_records": 0,
+        "duplicate_feedback_records": 0,
         "skipped_plausible_records": 0,
         "updated_from_llm_patches": 0,
         "updated_from_apr_results_fallback": 0,
         "candidate_records": 0,
+        "new_candidate_evidence_records": 0,
+        "duplicate_candidate_evidence_records": 0,
         "missing_apr_records": 0,
         "missing_scores_records": 0,
         "candidate_not_in_fl_scores": 0,
@@ -566,9 +725,16 @@ def build_apr_feedback_fl_results(
             file_weight=file_weight,
             signal_min=signal_min,
             signal_max=signal_max,
+            existing_feedback_ids=apr_feedback_ids(fl_record),
         )
 
         summary["candidate_records"] += feedback["candidate_count"]
+        summary["new_candidate_evidence_records"] += feedback[
+            "new_candidate_evidence_count"
+        ]
+        summary["duplicate_candidate_evidence_records"] += feedback[
+            "duplicate_candidate_evidence_count"
+        ]
         summary["candidate_not_in_fl_scores"] += feedback["candidate_not_in_fl_scores"]
         if source == "llm_patches":
             summary["updated_from_llm_patches"] += 1
@@ -577,7 +743,17 @@ def build_apr_feedback_fl_results(
         for candidate in feedback["candidate_feedback"]:
             status = candidate.get("status") or "<empty>"
             summary["status_counts"][status] = summary["status_counts"].get(status, 0) + 1
-        summary["updated_records"] += 1
+        summary["feedback_processed_records"] += 1
+        if feedback["score_changed"]:
+            summary["updated_records"] += 1
+        else:
+            summary["neutral_feedback_records"] += 1
+        if (
+            feedback["candidate_count"] > 0
+            and feedback["duplicate_candidate_evidence_count"]
+            == feedback["candidate_count"]
+        ):
+            summary["duplicate_feedback_records"] += 1
 
         new_record = dict(fl_record)
         new_record["scores"] = new_scores
@@ -586,8 +762,21 @@ def build_apr_feedback_fl_results(
             "formula", "io_scenario_first_causal_tiers_v7"
         )
         new_record["reranker"] = "ir+apr_feedback"
+        if feedback["score_changed"]:
+            application_reason = "positive_apr_evidence_applied"
+        elif (
+            feedback["candidate_count"] > 0
+            and feedback["duplicate_candidate_evidence_count"]
+            == feedback["candidate_count"]
+        ):
+            application_reason = "duplicate_apr_feedback"
+        else:
+            application_reason = "neutral_or_unmapped_apr_feedback"
         event = feedback_event({
-            "applied": True,
+            "applied": feedback["score_changed"],
+            "feedback_processed": True,
+            "score_changed": feedback["score_changed"],
+            "reason": application_reason,
             "normalization": (
                 "raw_fl_score + apr_strength * score_update_unit * "
                 "bounded_nonnegative_apr_evidence"
@@ -596,6 +785,7 @@ def build_apr_feedback_fl_results(
                 "patch failures are neutral; original-test fixes are positive; "
                 "regressions discount positive evidence"
             ),
+            "evidence_aggregation": "max_signal_per_function_per_round",
             "apr_strength": apr_strength,
             "same_file_weight": file_weight,
             "signal_min": signal_min,
@@ -696,8 +886,8 @@ def parse_args():
         type=float,
         default=1.0,
         help=(
-            "Mức tác động của APR log-evidence lên phân phối FL. "
-            "Default 1.0 nghĩa là dùng trực tiếp signal như log-likelihood ratio."
+            "Mức tác động của APR validation evidence lên FL ranking. "
+            "Signal được scale theo score_update_unit trước khi cộng vào score."
         ),
     )
     parser.add_argument(
@@ -749,7 +939,11 @@ def main():
     print(f"[APR-FL] Wrote {output_path}")
     print(
         "[APR-FL] Summary: "
-        f"updated={summary['updated_records']}/{summary['total_fl_records']}, "
+        f"score_changed={summary['updated_records']}/"
+        f"{summary['total_fl_records']}, "
+        f"feedback_processed={summary['feedback_processed_records']}, "
+        f"neutral={summary['neutral_feedback_records']}, "
+        f"duplicates={summary['duplicate_feedback_records']}, "
         f"from_llm_patches={summary['updated_from_llm_patches']}, "
         f"fallback_apr_results={summary['updated_from_apr_results_fallback']}, "
         f"candidate_records={summary['candidate_records']}, "

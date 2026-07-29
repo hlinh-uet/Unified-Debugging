@@ -36,6 +36,57 @@ def resolve_probe_evidence(
     dossiers = (source_evidence or {}).get("dossiers") or {}
     members = {str(value) for value in invocation_keys if str(value)}
     executed = set(runtime_evidence.get("functions") or {})
+    trace_scope_tests = (
+        (runtime_evidence.get("trace_scope") or {}).get("tests")
+        or {}
+    )
+    if isinstance(trace_scope_tests, dict):
+        trace_scope_iterable = trace_scope_tests.values()
+    elif isinstance(trace_scope_tests, list):
+        trace_scope_iterable = trace_scope_tests
+    else:
+        trace_scope_iterable = ()
+    slice_probes_by_id = {
+        str(probe.get("probe_id") or ""): probe
+        for scope in trace_scope_iterable
+        if isinstance(scope, dict)
+        for probe in scope.get("slice_probes") or []
+        if str(probe.get("probe_id") or "")
+    }
+    slice_observations_by_id: Dict[str, List[Dict[str, Any]]] = {}
+    for observation in [
+        *(runtime_evidence.get("value_observations") or []),
+        *(runtime_evidence.get("slice_boundary_observations") or []),
+    ]:
+        probe_id = str(
+            observation.get("probe_id")
+            or observation.get("marker_id")
+            or ""
+        )
+        if probe_id in slice_probes_by_id:
+            slice_observations_by_id.setdefault(
+                probe_id, []
+            ).append(observation)
+    trace_query_status_by_probe_id: Dict[str, str] = {}
+    trace_query_tests = (
+        (runtime_evidence.get("trace_queries") or {}).get("tests") or {}
+    )
+    if isinstance(trace_query_tests, dict):
+        trace_query_iterable = trace_query_tests.values()
+    elif isinstance(trace_query_tests, list):
+        trace_query_iterable = trace_query_tests
+    else:
+        trace_query_iterable = ()
+    for query_plan in trace_query_iterable:
+        if not isinstance(query_plan, dict):
+            continue
+        for request in (
+            (query_plan.get("evidence") or {}).get("requests") or []
+        ):
+            probe_id = str(request.get("probe_id") or "")
+            status = str(request.get("status") or "")
+            if probe_id and status:
+                trace_query_status_by_probe_id[probe_id] = status
     exception_by_key: Dict[str, List[Dict[str, Any]]] = {}
     for event in runtime_evidence.get("exception_events") or []:
         key = str(
@@ -72,7 +123,7 @@ def resolve_probe_evidence(
                     ),
                     "origin": "supported_causal_chain",
                 })
-    targeted_probes = []
+    planned_runtime_probes = []
     for need in planned_needs:
         if not isinstance(need, dict):
             continue
@@ -121,6 +172,54 @@ def resolve_probe_evidence(
                 expression=expression,
             )
             record["static_probe_sites"] = static_matches
+            matching_slice_ids = [
+                probe_id
+                for probe_id, probe in slice_probes_by_id.items()
+                if str(probe.get("function") or "") == function
+                and str(probe.get("kind") or "") == kind
+                and (
+                    not expression
+                    or str(probe.get("expression") or "") == expression
+                )
+            ]
+            concrete_slice_observations = [
+                observation
+                for probe_id in matching_slice_ids
+                for observation in (
+                    slice_observations_by_id.get(probe_id) or []
+                )
+            ]
+            if concrete_slice_observations:
+                base_status = (
+                    "observed"
+                    if kind == "branch_outcome"
+                    else "observed_boundary"
+                )
+                query_statuses = sorted({
+                    trace_query_status_by_probe_id.get(probe_id, "")
+                    for probe_id in matching_slice_ids
+                    if trace_query_status_by_probe_id.get(probe_id, "")
+                })
+                sampled = any(
+                    status.endswith("_sampled")
+                    for status in query_statuses
+                )
+                record["status"] = (
+                    base_status + "_sampled"
+                    if sampled
+                    else base_status
+                )
+                record["observations"] = (
+                    concrete_slice_observations[:40]
+                )
+                record["probe_ids"] = matching_slice_ids
+                record["trace_query_statuses"] = query_statuses
+                if sampled:
+                    record["diagnostics"].append(
+                        "hot_probe_sample_is_partial_evidence"
+                    )
+                requests.append(record)
+                continue
             if static_matches:
                 record["status"] = "targeted_runtime_probe_required"
                 if kind == "branch_outcome":
@@ -133,7 +232,7 @@ def resolve_probe_evidence(
                                 site.get("expression") or ""
                             ),
                         )
-                        targeted_probes.append({
+                        planned_runtime_probes.append({
                             "probe_id": probe_id,
                             "function": function,
                             "kind": kind,
@@ -148,22 +247,31 @@ def resolve_probe_evidence(
         else:
             record["diagnostics"].append("unsupported_probe_kind")
         requests.append(record)
+    runtime_probe_requests = list({
+        item["probe_id"]: item for item in planned_runtime_probes
+    }.values())
     result = {
         "schema": PROBE_SCHEMA,
         "scenario_id": trace_plan.get("first_failing_scenario_id"),
         "source_marker_id": trace_plan.get("source_marker_id"),
         "requests": requests,
         "observed_count": sum(
-            item.get("status") in {"observed", "observed_absent"}
+            item.get("status") in {
+                "observed",
+                "observed_absent",
+                "observed_boundary",
+            }
             for item in requests
         ),
-        "targeted_runtime_probe_count": sum(
+        "partial_observed_count": sum(
+            str(item.get("status") or "").endswith("_sampled")
+            for item in requests
+        ),
+        "runtime_probe_request_count": sum(
             item.get("status") == "targeted_runtime_probe_required"
             for item in requests
         ),
-        "targeted_probes": list({
-            item["probe_id"]: item for item in targeted_probes
-        }.values()),
+        "runtime_probe_requests": runtime_probe_requests,
         "ground_truth_used": False,
     }
     if artifact_dir:
@@ -174,55 +282,6 @@ def resolve_probe_evidence(
         if path:
             result["artifact"] = path
     return result
-
-
-def merge_targeted_runtime_observations(
-    *,
-    probe_evidence: Dict[str, Any],
-    targeted_runtime: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Attach concrete second-pass values to their source-resolved requests."""
-    observations_by_id: Dict[str, List[Dict[str, Any]]] = {}
-    for observation in targeted_runtime.get("value_observations") or []:
-        probe_id = str(observation.get("probe_id") or "")
-        if probe_id:
-            observations_by_id.setdefault(probe_id, []).append(observation)
-    probes_by_function_expression = {}
-    for probe in probe_evidence.get("targeted_probes") or []:
-        probes_by_function_expression.setdefault((
-            str(probe.get("function") or ""),
-            str(probe.get("kind") or ""),
-            str(probe.get("expression") or ""),
-        ), []).append(str(probe.get("probe_id") or ""))
-    for request in probe_evidence.get("requests") or []:
-        identity = (
-            str(request.get("function") or ""),
-            str(request.get("kind") or ""),
-            str(request.get("expression") or ""),
-        )
-        probe_ids = probes_by_function_expression.get(identity) or []
-        concrete = [
-            item
-            for probe_id in probe_ids
-            for item in observations_by_id.get(probe_id) or []
-        ]
-        if concrete:
-            request["status"] = "observed"
-            request["observations"] = concrete
-            request["probe_ids"] = probe_ids
-    probe_evidence["targeted_runtime"] = {
-        "schema": targeted_runtime.get("schema"),
-        "identity": targeted_runtime.get("identity"),
-        "fresh_execution": bool(targeted_runtime.get("fresh_execution")),
-        "observed_probe_count": len(observations_by_id),
-        "diagnostics": targeted_runtime.get("diagnostics") or [],
-        "cache": targeted_runtime.get("cache") or {},
-    }
-    probe_evidence["observed_count"] = sum(
-        item.get("status") in {"observed", "observed_absent"}
-        for item in probe_evidence.get("requests") or []
-    )
-    return probe_evidence
 
 
 def _static_probe_sites(

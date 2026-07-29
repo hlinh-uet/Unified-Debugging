@@ -6,7 +6,7 @@ import hashlib
 import os
 from typing import Any, Dict, List, Tuple
 
-from core.apr.common import node_text, parse_tree, walk_nodes
+from core.program_analysis.source_utils import node_text, parse_tree, walk_nodes
 
 from .models import stable_id
 

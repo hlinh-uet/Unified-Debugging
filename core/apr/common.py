@@ -69,6 +69,58 @@ def is_defects4c_dataset(dataset: str) -> bool:
     return (dataset or "").strip().lower() != "codeflaws"
 
 
+def select_untried_fl_functions(
+    scores: Dict[str, Any],
+    *,
+    top_k: int,
+    excluded_functions: set = None,
+) -> Tuple[List[Tuple[str, float]], dict]:
+    """Fill the APR round from ranked functions not consumed earlier."""
+    excluded = {
+        str(value).strip()
+        for value in (excluded_functions or set())
+        if str(value).strip()
+    }
+    ranked = []
+    invalid_score_functions = []
+    for function, raw_score in (scores or {}).items():
+        key = str(function or "").strip()
+        if not key:
+            continue
+        try:
+            score = float(raw_score)
+        except (TypeError, ValueError):
+            invalid_score_functions.append(key)
+            continue
+        ranked.append((key, score))
+    ranked.sort(key=lambda item: item[1], reverse=True)
+    eligible = [
+        item
+        for item in ranked
+        if item[0] not in excluded and item[1] != 0.0
+    ]
+    selected = (
+        eligible[:top_k]
+        if top_k > 0
+        else eligible
+    )
+    return selected, {
+        "policy": "ranked_untried_functions_fill_top_k",
+        "top_k": int(top_k),
+        "ranked_function_count": len(ranked),
+        "eligible_untried_count": len(eligible),
+        "excluded_prior_functions": [
+            function
+            for function, _score in ranked
+            if function in excluded
+        ],
+        "invalid_score_functions": invalid_score_functions,
+        "selected_functions": [
+            function for function, _score in selected
+        ],
+    }
+
+
 def candidate_relpath_from_buggy_tree(candidate_path: str, raw_meta: Optional[dict]) -> str:
     if not candidate_path or not raw_meta:
         return ""

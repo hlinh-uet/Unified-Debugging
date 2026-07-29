@@ -8,7 +8,7 @@ from core.apr.common import (
     source_language_from_path,
     source_root,
 )
-from core.apr.program_analysis import analyze_target_operations
+from core.program_analysis import analyze_target_operations
 
 from .contracts import _api_macro_type_contract_engine
 from .inventories import (

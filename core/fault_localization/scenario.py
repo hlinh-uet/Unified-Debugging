@@ -8,7 +8,7 @@ import os
 import re
 from typing import Any, Dict, List
 
-from core.apr.common import (
+from core.program_analysis.source_utils import (
     node_text,
     parse_tree,
     source_language_from_path,

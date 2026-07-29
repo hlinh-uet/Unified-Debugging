@@ -12,15 +12,17 @@ import gzip
 import json
 import os
 import re
-from collections import defaultdict
+import copy
+from collections import OrderedDict, defaultdict
 from typing import Any, Dict, Iterable, List, Tuple
 
-from core.apr.common import (
+from core.program_analysis.source_utils import (
     node_text,
     parse_tree,
     source_language_from_path,
     walk_nodes,
 )
+from core.program_analysis.evidence import register_program_evidence
 
 from .semantic import semantic_tokens
 from .artifacts import (
@@ -46,6 +48,10 @@ _ASSIGNMENT_TYPES = {
 }
 _CALL_TYPES = {"call_expression"}
 _THROW_TYPES = {"throw_statement"}
+_SOURCE_FILE_CACHE_LIMIT = 128
+_SOURCE_DOSSIER_CACHE_LIMIT = 4096
+_SOURCE_FILE_INDEX_CACHE: OrderedDict = OrderedDict()
+_SOURCE_DOSSIER_CACHE: OrderedDict = OrderedDict()
 
 
 def load_or_build_source_evidence(
@@ -57,13 +63,14 @@ def load_or_build_source_evidence(
     artifact_dir: str = "",
 ) -> Dict[str, Any]:
     """Reuse source dossiers when bug/scenario/executed inventory is unchanged."""
-    request_identity = _source_request_identity(
-        bug=bug,
-        runtime_evidence=runtime_evidence,
-        scenario=scenario,
-    )
+    request_identity = ""
     path = ""
     if artifact_dir:
+        request_identity = _source_request_identity(
+            bug=bug,
+            runtime_evidence=runtime_evidence,
+            scenario=scenario,
+        )
         path = os.path.join(
             artifact_dir,
             "source_evidence",
@@ -79,7 +86,18 @@ def load_or_build_source_evidence(
             and cached.get("schema") == SOURCE_EVIDENCE_SCHEMA
             and cached.get("request_identity") == request_identity
         ):
+            _apply_invocation_projection(
+                cached,
+                invocation_keys=invocation_keys,
+            )
             cached["cache"] = {"hit": True, "source": path}
+            _register_source_evidence_index(
+                request_identity=request_identity,
+                result=cached,
+                path=path,
+                bug=bug,
+                cache_hit=True,
+            )
             return cached
     result = build_source_evidence(
         bug=bug,
@@ -87,11 +105,78 @@ def load_or_build_source_evidence(
         scenario=scenario,
         invocation_keys=invocation_keys,
     )
+    if not request_identity:
+        # Transient per-test refinement has no persistent lookup to perform.
+        # Its source-backed result identity avoids hashing every file again.
+        request_identity = str(result.get("identity") or "")
     result["request_identity"] = request_identity
     result["cache"] = {"hit": False, "source": path}
     if path:
         atomic_write_gzip_json(path, result)
+    _register_source_evidence_index(
+        request_identity=request_identity,
+        result=result,
+        path=path,
+        bug=bug,
+        cache_hit=False,
+    )
     return result
+
+
+def _apply_invocation_projection(
+    source_evidence: Dict[str, Any],
+    *,
+    invocation_keys: Iterable[str],
+) -> None:
+    """Refresh request-specific membership on cached structural dossiers."""
+    members = {
+        str(value) for value in invocation_keys if str(value)
+    }
+    for key, dossier in (
+        source_evidence.get("dossiers") or {}
+    ).items():
+        if isinstance(dossier, dict):
+            dossier["in_selected_invocation"] = (
+                str(key) in members
+            )
+
+
+def _register_source_evidence_index(
+    *,
+    request_identity: str,
+    result: Dict[str, Any],
+    path: str,
+    bug: Any,
+    cache_hit: bool,
+) -> None:
+    """Publish a compact index, never a duplicate of every source dossier."""
+    raw = bug.raw if isinstance(getattr(bug, "raw", None), dict) else {}
+    try:
+        register_program_evidence(
+            namespace="fl_source_evidence",
+            identity=request_identity,
+            payload={
+                "schema": result.get("schema"),
+                "request_identity": request_identity,
+                "artifact_path": path,
+                "candidate_count": result.get("candidate_count"),
+                "diagnostics": list(result.get("diagnostics") or []),
+            },
+            producer="fault_localization.source_investigation",
+            source_root=str(
+                raw.get("buggy_tree_dir")
+                or raw.get("source_repo_dir")
+                or ""
+            ),
+            parameters={
+                "dataset": str(getattr(bug, "dataset", "") or ""),
+                "bug_id": str(getattr(bug, "bug_id", "") or ""),
+            },
+            metadata={"cache_hit": cache_hit},
+        )
+    except Exception:
+        # This registry is an audit/reuse layer, not FL ranking policy.
+        return
 
 
 def build_source_evidence(
@@ -130,7 +215,7 @@ def build_source_evidence(
         for value in scenario.get("producer_calls") or []
         if _canonical_symbol(value)
     ]
-    file_cache: Dict[str, Tuple[str, Any, bytes | None]] = {}
+    file_cache: Dict[str, Dict[str, Any]] = {}
     dossiers = {}
     diagnostics = []
     for key, runtime in runtime_functions.items():
@@ -193,6 +278,36 @@ def _source_request_identity(
     scenario: Dict[str, Any],
 ) -> str:
     raw = bug.raw if isinstance(getattr(bug, "raw", None), dict) else {}
+    source_root = os.path.realpath(
+        str(
+            raw.get("buggy_tree_dir")
+            or raw.get("source_repo_dir")
+            or ""
+        )
+    )
+    resolved_paths: Dict[str, str] = {}
+    source_revisions: Dict[str, str] = {}
+    functions = []
+    for key, value in sorted(
+        (runtime_evidence.get("functions") or {}).items()
+    ):
+        runtime_path = str((value or {}).get("source_path") or "")
+        if runtime_path not in resolved_paths:
+            resolved_paths[runtime_path] = _resolve_source_path(
+                source_root=source_root,
+                runtime_path=runtime_path,
+            )
+        resolved_path = resolved_paths[runtime_path]
+        if resolved_path not in source_revisions:
+            source_revisions[resolved_path] = _source_revision(
+                resolved_path
+            )
+        functions.append((
+            str(key),
+            runtime_path,
+            int((value or {}).get("source_line") or 0),
+            source_revisions[resolved_path],
+        ))
     payload = {
         "schema": SOURCE_EVIDENCE_SCHEMA,
         "bug_id": str(getattr(bug, "bug_id", "") or ""),
@@ -203,16 +318,10 @@ def _source_request_identity(
             or scenario.get("scenario_id")
             or ""
         ),
-        "functions": [
-            (
-                str(key),
-                str((value or {}).get("source_path") or ""),
-                int((value or {}).get("source_line") or 0),
-            )
-            for key, value in sorted(
-                (runtime_evidence.get("functions") or {}).items()
-            )
-        ],
+        # Persistent source evidence must follow the actual worktree content,
+        # not only commit/path metadata. APR validation may temporarily edit
+        # a file without changing either of those fields.
+        "functions": functions,
     }
     return hashlib.sha256(json.dumps(
         payload,
@@ -220,6 +329,32 @@ def _source_request_identity(
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")).hexdigest()
+
+
+def _source_revision(path: str) -> str:
+    if not path or not os.path.isfile(path):
+        return "missing"
+    real_path = os.path.realpath(path)
+    try:
+        stat = os.stat(real_path)
+        fingerprint = (
+            real_path,
+            int(stat.st_mtime_ns),
+            int(stat.st_size),
+        )
+    except OSError:
+        return "unreadable"
+    indexed = _SOURCE_FILE_INDEX_CACHE.get(fingerprint)
+    if isinstance(indexed, dict) and indexed.get("file_digest"):
+        return str(indexed["file_digest"])
+    digest = hashlib.sha256()
+    try:
+        with open(real_path, "rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return "unreadable"
+    return digest.hexdigest()
 
 
 def compact_source_evidence(
@@ -467,7 +602,7 @@ def _source_dossier(
     function_key: str,
     runtime: Dict[str, Any],
     source_path: str,
-    file_cache: Dict[str, Tuple[str, Any, bytes | None]],
+    file_cache: Dict[str, Dict[str, Any]],
     contract_tokens: List[str],
     producer_calls: List[str],
 ) -> Dict[str, Any]:
@@ -496,16 +631,11 @@ def _source_dossier(
         )
         return base
     if source_path not in file_cache:
-        try:
-            source = open(
-                source_path, "r", encoding="utf-8", errors="replace"
-            ).read()
-        except OSError:
-            source = ""
-        language = source_language_from_path(source_path)
-        tree, source_bytes = parse_tree(source, language)
-        file_cache[source_path] = (source, tree, source_bytes)
-    source, tree, source_bytes = file_cache[source_path]
+        file_cache[source_path] = _load_source_file_index(source_path)
+    source_index = file_cache[source_path]
+    source = str(source_index.get("source") or "")
+    tree = source_index.get("tree")
+    source_bytes = source_index.get("source_bytes")
     if tree is None or source_bytes is None:
         base["diagnostics"].append(
             f"source_ast_unavailable:{function_key}"
@@ -513,11 +643,7 @@ def _source_dossier(
         return base
     line = max(1, int(runtime.get("source_line") or 1))
     candidates = []
-    for node in walk_nodes(tree.root_node):
-        if node.type not in _FUNCTION_TYPES:
-            continue
-        start = int(node.start_point[0]) + 1
-        end = int(node.end_point[0]) + 1
+    for start, end, node in source_index.get("function_nodes") or []:
         if start <= line <= end:
             candidates.append((end - start, int(node.end_byte - node.start_byte), node))
     if not candidates:
@@ -526,6 +652,22 @@ def _source_dossier(
         )
         return base
     function_node = min(candidates, key=lambda item: (item[0], item[1]))[2]
+    dossier_cache_key = (
+        source_index.get("fingerprint"),
+        int(function_node.start_byte),
+        int(function_node.end_byte),
+        str(function_key),
+    )
+    cached_base = _SOURCE_DOSSIER_CACHE.get(dossier_cache_key)
+    if cached_base is not None:
+        _SOURCE_DOSSIER_CACHE.move_to_end(dossier_cache_key)
+        base = copy.deepcopy(cached_base)
+        return _project_scenario_source_facts(
+            base=base,
+            function_key=function_key,
+            contract_tokens=contract_tokens,
+            producer_calls=producer_calls,
+        )
     function_source = node_text(function_node, source_bytes)
     declarator = function_node.child_by_field_name("declarator")
     body = function_node.child_by_field_name("body")
@@ -589,17 +731,6 @@ def _source_dossier(
             "nullptr",
         }:
             literals.append(text)
-    source_tokens = semantic_tokens([
-        signature,
-        function_source,
-        *identifiers,
-        *literals,
-    ])
-    qualified, leaf = _function_identity(function_key)
-    producer_symbol_match = any(
-        _symbol_equivalent(qualified, leaf, producer)
-        for producer in producer_calls
-    )
     base.update({
         "source_available": True,
         "signature": _compact_text(signature, limit=1000),
@@ -614,12 +745,109 @@ def _source_dossier(
         "throws": _unique_records(throws)[:16],
         "identifiers": list(dict.fromkeys(identifiers))[:120],
         "literals": list(dict.fromkeys(literals))[:80],
-        "contract_token_matches": [
-            token for token in contract_tokens if token in source_tokens
-        ][:40],
-        "producer_symbol_match": producer_symbol_match,
     })
+    _SOURCE_DOSSIER_CACHE[dossier_cache_key] = copy.deepcopy(base)
+    _SOURCE_DOSSIER_CACHE.move_to_end(dossier_cache_key)
+    while len(_SOURCE_DOSSIER_CACHE) > _SOURCE_DOSSIER_CACHE_LIMIT:
+        _SOURCE_DOSSIER_CACHE.popitem(last=False)
+    return _project_scenario_source_facts(
+        base=base,
+        function_key=function_key,
+        contract_tokens=contract_tokens,
+        producer_calls=producer_calls,
+    )
+
+
+def _load_source_file_index(source_path: str) -> Dict[str, Any]:
+    """Parse and index one immutable source revision once per process.
+
+    The cache key includes the exact file stat fingerprint, so APR validation
+    or another actor changing a source file cannot reuse a stale Tree-sitter
+    tree.  Scenario-specific token matching remains outside this cache.
+    """
+    real_path = os.path.realpath(source_path)
+    try:
+        stat = os.stat(real_path)
+        fingerprint = (
+            real_path,
+            int(stat.st_mtime_ns),
+            int(stat.st_size),
+        )
+    except OSError:
+        fingerprint = (real_path, 0, 0)
+    cached = _SOURCE_FILE_INDEX_CACHE.get(fingerprint)
+    if cached is not None:
+        _SOURCE_FILE_INDEX_CACHE.move_to_end(fingerprint)
+        return cached
+    try:
+        with open(real_path, "rb") as stream:
+            source_raw = stream.read()
+    except OSError:
+        source_raw = b""
+    source = source_raw.decode("utf-8", errors="replace")
+    language = source_language_from_path(real_path)
+    tree, source_bytes = parse_tree(source, language)
+    function_nodes = []
+    if tree is not None:
+        function_nodes = [
+            (
+                int(node.start_point[0]) + 1,
+                int(node.end_point[0]) + 1,
+                node,
+            )
+            for node in walk_nodes(tree.root_node)
+            if node.type in _FUNCTION_TYPES
+        ]
+    result = {
+        "fingerprint": fingerprint,
+        "file_digest": hashlib.sha256(source_raw).hexdigest(),
+        "source": source,
+        "tree": tree,
+        "source_bytes": source_bytes,
+        "function_nodes": function_nodes,
+    }
+    # Remove older revisions of the same path before installing the current
+    # immutable index.
+    for key in [
+        key for key in _SOURCE_FILE_INDEX_CACHE
+        if key[0] == real_path and key != fingerprint
+    ]:
+        _SOURCE_FILE_INDEX_CACHE.pop(key, None)
+    _SOURCE_FILE_INDEX_CACHE[fingerprint] = result
+    while len(_SOURCE_FILE_INDEX_CACHE) > _SOURCE_FILE_CACHE_LIMIT:
+        _SOURCE_FILE_INDEX_CACHE.popitem(last=False)
+    return result
+
+
+def _project_scenario_source_facts(
+    *,
+    base: Dict[str, Any],
+    function_key: str,
+    contract_tokens: Iterable[str],
+    producer_calls: Iterable[str],
+) -> Dict[str, Any]:
+    """Attach cheap failure-scenario facts to a cached structural dossier."""
+    source_tokens = semantic_tokens([
+        str(base.get("signature") or ""),
+        str(base.get("source") or ""),
+        *(base.get("identifiers") or []),
+        *(base.get("literals") or []),
+    ])
+    qualified, leaf = _function_identity(function_key)
+    base["contract_token_matches"] = [
+        token for token in contract_tokens if token in source_tokens
+    ][:40]
+    base["producer_symbol_match"] = any(
+        _symbol_equivalent(qualified, leaf, producer)
+        for producer in producer_calls
+    )
     return base
+
+
+def _clear_source_analysis_caches() -> None:
+    """Test/support hook for explicitly releasing source-analysis memory."""
+    _SOURCE_FILE_INDEX_CACHE.clear()
+    _SOURCE_DOSSIER_CACHE.clear()
 
 
 def _resolve_source_path(*, source_root: str, runtime_path: str) -> str:

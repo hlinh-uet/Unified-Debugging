@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional, Tuple
 from core.apr.artifacts import write_llm_step_artifact
 from core.apr.llm import call_llm
 
-from .failure_contract import build_failure_contract
+from core.failure_context import build_failure_contract
 from .models import clip
 
 

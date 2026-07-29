@@ -6,7 +6,6 @@ import difflib
 import hashlib
 import json
 import os
-import re
 from collections import Counter
 from typing import Any, Dict, List
 

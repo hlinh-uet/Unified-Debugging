@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import os
 import re
 from collections import Counter
 from typing import Any, Dict, List, Tuple
 
-from core.apr.common import (
+from core.program_analysis.source_utils import (
     node_text,
     parse_tree,
     source_language_from_path,
@@ -18,6 +17,7 @@ from .scenario import _is_assertion_name, extract_assertion_scenarios
 
 
 SCENARIO_MARKER_GENERATION = "targeted_test_ranges_same_line_v2"
+SLICE_PROBE_GENERATION = "executed_path_boundaries_v1"
 
 
 MARKER_DECLARATION_CPP = r"""
@@ -41,8 +41,10 @@ extern void udbg_trace_marker(const char*, const char*)
 #define UDBG_FL_SCENARIO_MARK(ID) do { } while (0)
 #endif
 """.strip()
-SCALAR_DECLARATION_CPP = r"""
+SLICE_DECLARATION_CPP = r"""
 #if defined(__GNUC__) || defined(__clang__)
+extern "C" void udbg_trace_marker(const char*, const char*)
+    __attribute__((weak));
 extern "C" void udbg_trace_scalar(const char*, long long)
     __attribute__((weak));
 static int udbg_fl_trace_condition(const char*, int)
@@ -52,10 +54,16 @@ static int udbg_fl_trace_condition(const char* id, int value) {
     udbg_trace_scalar(id, value ? 1LL : 0LL);
   return value;
 }
+#define UDBG_FL_SLICE_MARK(KIND, ID) \
+  do { if (udbg_trace_marker) udbg_trace_marker(KIND, ID); } while (0)
+#else
+#define UDBG_FL_SLICE_MARK(KIND, ID) do { } while (0)
 #endif
 """.strip()
-SCALAR_DECLARATION_C = r"""
+SLICE_DECLARATION_C = r"""
 #if defined(__GNUC__) || defined(__clang__)
+extern void udbg_trace_marker(const char*, const char*)
+    __attribute__((weak));
 extern void udbg_trace_scalar(const char*, long long)
     __attribute__((weak));
 static int udbg_fl_trace_condition(const char*, int)
@@ -65,6 +73,10 @@ static int udbg_fl_trace_condition(const char* id, int value) {
     udbg_trace_scalar(id, value ? 1LL : 0LL);
   return value;
 }
+#define UDBG_FL_SLICE_MARK(KIND, ID) \
+  do { if (udbg_trace_marker) udbg_trace_marker(KIND, ID); } while (0)
+#else
+#define UDBG_FL_SLICE_MARK(KIND, ID) do { } while (0)
 #endif
 """.strip()
 
@@ -212,111 +224,266 @@ def instrument_assertion_scenarios(
     }
 
 
-def instrument_branch_probes(
+def instrument_slice_probes(
     *,
     source: str,
     source_path: str,
     probes: List[Dict[str, Any]],
 ) -> Tuple[str, Dict[str, Any]]:
-    """Wrap selected branch conditions and record their concrete truth value."""
+    """Instrument bounded branch and control/data boundary sites.
+
+    Branches record their concrete boolean outcome. Argument, return and write
+    probes are occurrence boundaries: they deliberately avoid casting unknown
+    project types, so instrumentation cannot change ownership or value
+    semantics for structs, pointers, or C++ move-only values.
+    """
     language = source_language_from_path(source_path)
     tree, source_bytes = parse_tree(source, language)
     if tree is None or source_bytes is None:
         return source, {
             "changed": False,
             "installed_probe_ids": [],
-            "diagnostics": ["branch_probe_source_ast_unavailable"],
+            "diagnostics": ["slice_probe_source_ast_unavailable"],
         }
+    source_line_offset = _instrumented_source_line_offset(source)
     conditions = []
+    functions = []
+    boundary_nodes = []
     for node in walk_nodes(tree.root_node):
-        if node.type not in {
+        if node.type == "function_definition":
+            body = node.child_by_field_name("body")
+            if body is not None:
+                functions.append({
+                    "node": node,
+                    "body": body,
+                    "start_line": int(node.start_point[0]) + 1,
+                    "end_line": int(node.end_point[0]) + 1,
+                })
+        if node.type in {
             "if_statement",
             "conditional_expression",
             "while_statement",
             "for_statement",
         }:
-            continue
-        condition = node.child_by_field_name("condition")
-        if condition is None:
-            continue
-        conditions.append({
-            "node": condition,
-            "line": int(condition.start_point[0]) + 1,
-            "expression": _normalize_expression(
-                node_text(condition, source_bytes)
-            ),
-        })
-    replacements = []
+            condition = node.child_by_field_name("condition")
+            if condition is not None:
+                conditions.append({
+                    "node": condition,
+                    "line": int(condition.start_point[0]) + 1,
+                    "expression": _normalize_expression(
+                        node_text(condition, source_bytes)
+                    ),
+                })
+        if node.type in {
+            "return_statement",
+            "assignment_expression",
+            "update_expression",
+            "declaration",
+        }:
+            boundary_nodes.append({
+                "node": node,
+                "line": int(node.start_point[0]) + 1,
+                "expression": _normalize_expression(
+                    node_text(node, source_bytes)
+                ),
+            })
+
+    edits = []
     installed = []
+    installed_records = []
+    used_conditions = set()
+    statement_markers: Dict[Tuple[int, int], Dict[str, Any]] = {}
+    entry_markers: Dict[int, List[str]] = {}
     for probe in probes:
         probe_id = str(probe.get("probe_id") or "")
+        kind = str(probe.get("kind") or "")
         line = int(probe.get("line") or 0)
         requested = _normalize_expression(
             str(probe.get("expression") or "")
         )
-        candidates = [
-            item for item in conditions
-            if (not line or int(item["line"]) == line)
-        ]
-        if requested:
-            exact = [
-                item for item in candidates
-                if item["expression"] == requested
-                or item["expression"] in requested
-                or requested in item["expression"]
+        if not probe_id:
+            continue
+        installed_here = False
+        if kind == "branch_outcome":
+            candidates = [
+                item for item in conditions
+                if (
+                    not line
+                    or int(item["line"]) in {
+                        line,
+                        line + source_line_offset,
+                    }
+                )
             ]
-            if exact:
-                candidates = exact
-        if not candidates or not probe_id:
+            candidates = _matching_probe_nodes(
+                candidates, requested=requested
+            )
+            if not candidates:
+                continue
+            item = min(
+                candidates,
+                key=lambda value: len(value["expression"]),
+            )
+            node = item["node"]
+            identity = (int(node.start_byte), int(node.end_byte))
+            if identity in used_conditions:
+                continue
+            original = node_text(node, source_bytes)
+            if ";" in original or re.match(
+                r"^\s*(?:auto|const|volatile|struct|class|enum|"
+                r"[A-Za-z_][A-Za-z0-9_:<>]*\s+[*&]?\s*[A-Za-z_])"
+                r"\s*=",
+                original,
+            ):
+                continue
+            edits.append((
+                identity[0],
+                identity[1],
+                (
+                    f'(udbg_fl_trace_condition("{probe_id}", !!('
+                    + original
+                    + ")))"
+                ),
+            ))
+            used_conditions.add(identity)
+            installed_here = True
+        elif kind == "argument":
+            candidates = [
+                item for item in functions
+                if (
+                    not line
+                    or int(item["start_line"]) <= line <= int(item["end_line"])
+                    or (
+                        source_line_offset
+                        and int(item["start_line"])
+                        <= line + source_line_offset
+                        <= int(item["end_line"])
+                    )
+                )
+            ]
+            if not candidates:
+                continue
+            item = min(
+                candidates,
+                key=lambda value: (
+                    int(value["end_line"]) - int(value["start_line"]),
+                    int(value["start_line"]),
+                ),
+            )
+            offset = int(item["body"].start_byte) + 1
+            entry_markers.setdefault(offset, []).append(
+                f'UDBG_FL_SLICE_MARK("slice_argument", "{probe_id}");'
+            )
+            installed_here = True
+        elif kind in {"return_value", "output_write"}:
+            allowed_types = (
+                {"return_statement"}
+                if kind == "return_value"
+                else {
+                    "assignment_expression",
+                    "update_expression",
+                    "declaration",
+                }
+            )
+            candidates = [
+                item for item in boundary_nodes
+                if item["node"].type in allowed_types
+                and (
+                    not line
+                    or int(item["line"]) in {
+                        line,
+                        line + source_line_offset,
+                    }
+                )
+            ]
+            candidates = _matching_probe_nodes(
+                candidates, requested=requested
+            )
+            if not candidates:
+                continue
+            item = min(
+                candidates,
+                key=lambda value: len(value["expression"]),
+            )
+            statement = _containing_executable_statement(item["node"])
+            if statement is None:
+                continue
+            identity = (
+                int(statement.start_byte),
+                int(statement.end_byte),
+            )
+            record = statement_markers.setdefault(identity, {
+                "node": statement,
+                "markers": [],
+            })
+            marker_kind = (
+                "slice_return"
+                if kind == "return_value"
+                else "slice_write"
+            )
+            record["markers"].append(
+                f'UDBG_FL_SLICE_MARK("{marker_kind}", "{probe_id}");'
+            )
+            installed_here = True
+        if not installed_here:
             continue
-        item = min(
-            candidates,
-            key=lambda value: len(value["expression"]),
-        )
-        node = item["node"]
-        original = node_text(node, source_bytes)
-        # C++17 init-statements and condition declarations require preserving
-        # declaration scope; a value wrapper would change their semantics.
-        if ";" in original or re.match(
-            r"^\s*(?:auto|const|volatile|struct|class|enum|"
-            r"[A-Za-z_][A-Za-z0-9_:<>]*\s+[*&]?\s*[A-Za-z_])"
-            r"\s*=",
-            original,
-        ):
-            continue
-        wrapper = (
-            f'(udbg_fl_trace_condition("{probe_id}", !!('
-            + original
-            + ")))"
-        )
-        replacements.append((
-            int(node.start_byte),
-            int(node.end_byte),
-            wrapper,
-        ))
         installed.append(probe_id)
-    if not replacements:
+        installed_records.append({
+            "probe_id": probe_id,
+            "kind": kind,
+            "line": line,
+        })
+
+    for offset, markers in entry_markers.items():
+        edits.append((
+            offset,
+            offset,
+            " " + " ".join(dict.fromkeys(markers)) + " ",
+        ))
+    for (start, end), record in statement_markers.items():
+        statement = record["node"]
+        marker_text = " ".join(dict.fromkeys(record["markers"]))
+        original = node_text(statement, source_bytes)
+        parent_type = (
+            str(statement.parent.type)
+            if statement.parent is not None else ""
+        )
+        if parent_type in {
+            "compound_statement",
+            "translation_unit",
+            "case_statement",
+        }:
+            edits.append((start, start, marker_text + " "))
+        else:
+            edits.append((
+                start,
+                end,
+                "{ " + marker_text + " " + original + " }",
+            ))
+    if not edits:
         return source, {
             "changed": False,
             "installed_probe_ids": [],
-            "diagnostics": ["branch_probe_condition_unresolved"],
+            "diagnostics": ["slice_probe_sites_unresolved"],
         }
     instrumented_bytes = source.encode("utf-8")
     for start, end, replacement in sorted(
-        replacements, key=lambda item: item[0], reverse=True
+        edits,
+        key=lambda item: (item[0], item[1]),
+        reverse=True,
     ):
         instrumented_bytes = (
             instrumented_bytes[:start]
             + replacement.encode("utf-8")
             + instrumented_bytes[end:]
         )
+    declaration = (
+        SLICE_DECLARATION_C
+        if language == "c"
+        else SLICE_DECLARATION_CPP
+    )
     instrumented = instrumented_bytes.decode(
         "utf-8", errors="replace"
-    )
-    declaration = (
-        SCALAR_DECLARATION_C
-        if language == "c"
-        else SCALAR_DECLARATION_CPP
     )
     return (
         declaration
@@ -326,9 +493,50 @@ def instrument_branch_probes(
         + instrumented
     ), {
         "changed": True,
+        "generation": SLICE_PROBE_GENERATION,
         "installed_probe_ids": list(dict.fromkeys(installed)),
+        "installed_probes": installed_records,
         "diagnostics": [],
     }
+
+
+def _matching_probe_nodes(
+    candidates: List[Dict[str, Any]], *, requested: str
+) -> List[Dict[str, Any]]:
+    if not requested:
+        return candidates
+    exact = [
+        item
+        for item in candidates
+        if item["expression"] == requested
+        or item["expression"] in requested
+        or requested in item["expression"]
+    ]
+    return exact or candidates
+
+
+def _instrumented_source_line_offset(source: str) -> int:
+    """Return the physical line prefix added by an earlier marker pass."""
+    match = re.search(
+        r"(?m)^[ \t]*#line[ \t]+1[ \t]+[\"<][^\"\n>]+[\">][ \t]*$",
+        str(source or ""),
+    )
+    if not match:
+        return 0
+    return str(source[:match.start()]).count("\n") + 1
+
+
+def _containing_executable_statement(node: Any) -> Any:
+    current = node
+    while current is not None:
+        if current.type in {
+            "expression_statement",
+            "declaration",
+            "return_statement",
+        }:
+            return current
+        current = current.parent
+    return None
 
 
 def _producer_region(

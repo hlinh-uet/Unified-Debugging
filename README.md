@@ -42,14 +42,13 @@ python3 main.py --all --dataset tcpdump --llm openrouter
 `--all` chạy theo thứ tự:
 
 ```text
-FL → APR pipeline mới → Evaluation
+Regression test → Shared Fail Context → FL → APR (reuse Fail Context) → Evaluation
 ```
 
 ### Chạy unified pipeline theo từng bug
 
 ```bash
 # Với từng bug: FL → APR → Update FL → ... đến plausible hoặc hết 2 vòng;
-# hoàn tất bug hiện tại rồi mới chuyển sang bug kế tiếp.
 python3 main.py --full --dataset fmt --llm openrouter
 
 # Tối đa 4 vòng APR cho mỗi bug.
@@ -88,6 +87,13 @@ experiments/full_pipeline_runs/<dataset>/<run-id>/
 │       └── ...
 └── ...
 ```
+
+Các round APR không reset về cùng top-k. Mỗi bug lưu exact FL function keys
+đã được xét; round sau loại các key này trước khi lấy `APR_TOP_K`, rồi tự lấp
+slot bằng các hàm chưa thử ở phía dưới ranking mới. Nếu không còn candidate
+chưa thử, bug dừng với `candidate_space_exhausted` thay vì gọi lại agent/LLM.
+`round_manifest.json` lưu selection của round, danh sách đã thử và selection
+dự kiến cho round tiếp theo.
 
 ### Chạy từng bước
 
@@ -208,6 +214,115 @@ chính xác:
 | `--no-fl-llm-guide` | Tắt LLM của FL và dùng deterministic trace plan |
 | `--refresh-runtime-traces` | Bỏ cache và build/chạy lại regression trace |
 | `--fl-cache-only` | Chỉ tổng hợp và evaluation các bug đã có runtime cache; không chạy bug còn thiếu |
+
+### Shared Fail Context
+
+FL và APR dùng chung một Fail Context bất biến theo `context_id`:
+
+- regression/census run cung cấp fresh `stdout/stderr`, return code và artifact;
+- builder ánh xạ output về đúng failing assertion, rồi lấy test input bằng
+  dependency slice của scenario đó; với stdin-style test, builder đọc đúng
+  fixture `input-<test-id>` và expected-output tương ứng;
+- Shared `FailContextAgent` chọn/thu regression evidence, ghi context tại
+  `experiments/runtime_traces/<dataset>/<bug-id>/fail_context.json` và dùng nó
+  làm nguồn failure semantics cho cả FL lẫn APR;
+- FL và APR đọc cùng canonical context/context artifact. APR standalone ưu
+  tiên cache của shared agent; nếu không có fresh regression context thì APR
+  dừng bug thay vì giả lập context từ metadata cũ;
+- `ground_truth` và FL candidate không được dùng để dựng Fail Context.
+
+### Shared Program Analysis
+
+Tree-sitter, Clang và Joern là các provider dùng chung tại
+`core/program_analysis/`, không còn thuộc riêng correctness APR:
+
+- FailContext/FL dùng cùng helper Tree-sitter để truy test input, assertion và
+  source dossier; FL dùng shared Clang provider khi có
+  `compile_commands.json`;
+- correctness APR dùng Tree-sitter cho SyntaxIR, Clang cho semantic binding và
+  chỉ gọi Joern khi có proof gap; security APR dùng cùng Joern/Tree-sitter
+  service cho operation/context evidence;
+- `core.apr.program_analysis` và module Clang cũ chỉ là compatibility alias,
+  nên caller cũ và mới dùng đúng cùng function object và cache;
+- shared evidence store chỉ giữ static result đã bounded hoặc compact index
+  tới FL source artifact. Nó không lưu bản sao full runtime trace và không
+  quyết định ranking, hypothesis hay patch.
+
+Runtime trace của FL tự thích ứng theo từng bug/test:
+
+- Sau build, FL chạy một lượt **count/edge census**: hook chỉ đếm số lần vào
+  hàm và cạnh gọi aggregate, không ghi từng E/X. Function thực sự xuất hiện
+  trong fresh census là candidate universe; coverage metadata chỉ còn là hint
+  để audit/tối ưu và không được phép loại function đã chạy.
+- Từ census, FL tìm exact producer roots trong assertion, xếp hạng
+  output/error sinks bằng source-contract specificity, rồi lấy các đường gọi
+  đã execute từ producer tới sink. Static call edges chỉ dùng để nối chỗ thiếu
+  dynamic edge; dynamic-only edges được đánh dấu là callback/indirect dispatch
+  liên quan; không còn lấy toàn bộ caller/callee neighborhood.
+- Chỉ function trên producer→sink paths và một frontier nhỏ mới được cân nhắc
+  cho detailed E/X. Hard budget áp dụng cho mọi function, kể cả root/sink:
+  function quá nóng trở thành aggregate-only thay vì được phép vượt trần.
+- Sau census và trước probe build, shared investigation query broker hợp nhất
+  deterministic `TraceQuery` và information-needs của LLM cho từng câu hỏi producer/path,
+  argument boundary, return boundary, relevant write và branch outcome. Probe
+  được đặt trên toàn producer→sink path, kể cả function nóng bị loại khỏi
+  ordered E/X; mỗi probe có quota mẫu riêng.
+  Nếu probe rebuild lỗi, source được khôi phục từ snapshot trong container và
+  FL rebuild lại ở chế độ control-only; không bỏ cả bug chỉ vì probe phụ lỗi.
+- Detailed chỉ chạy một scenario-window pass; không tự tăng 300.000 →
+  600.000 → 1.200.000. Nếu `nm` không tạo được scope, FL giữ census evidence
+  thay vì vô tình fallback sang full ordered trace.
+- Nếu ordered slice chạm budget trước khi trả lời hết `TraceQuery`, FL chạy
+  đúng một **probe-only recovery pass** với probe reserve; không tăng global
+  E/X limit. Evidence thiếu được ghi `incomplete_overflow`/`unknown`, không
+  được hiểu là function hay boundary không liên quan.
+- Probe ở loop nóng vượt sample quota được ghi `observed_*_sampled` và tạo
+  follow-up `invocation_window_refinement`; sample đầu không được nâng thành
+  causal support hoàn chỉnh.
+- Census, detailed và recovery output được so bằng immutable Fail Context ID.
+  Evidence từ một rerun không tái hiện cùng failure signature sẽ bị đánh dấu
+  `signature_mismatch` và không được nhập vào localization.
+- Tổng ngân sách detailed mặc định là 260.000 event, gồm E/X và 40.000 event
+  dự phòng cho source probes. Có thể chỉnh bằng
+  `UDBG_TRACE_DETAILED_EVENT_BUDGET` và
+  `UDBG_TRACE_SLICE_PROBE_EVENT_RESERVE`.
+- Raw census/detailed/probe stream được gzip ngay sau post-process; cache đầy
+  đủ cũng là JSON gzip. Pipeline mới không để lại raw `.trace` chưa nén.
+- Câu hỏi, câu trả lời và completeness được lưu riêng tại
+  `runtime_trace_queries.json`; probe-only recovery chỉ nhập observations, không
+  nhân đôi ordered trace vào runtime evidence.
+- Một bảng function coverage nhẹ được ghi độc lập với ordered-event limit. Vì
+  vậy hàm đã chạy trước khi trace bị cắt vẫn còn trong candidate set, nhưng
+  không bị xem nhầm là failure boundary.
+- Lỗi hạ tầng như thiếu `run_one_test.sh`, exit code 126/127 hoặc trace rỗng
+  không còn được tính là regression failure hợp lệ.
+- Không còn causal targeted-probe build thứ hai. Mọi probe được cài trong cùng
+  slice-probe build; sau ranking không được clean/build/chạy regression lại.
+  Câu hỏi vượt budget giữ trạng thái `unknown`. Function-level
+  invocation identity chỉ giữ 128 mẫu audit; tổng count và ordered events vẫn
+  được bảo toàn.
+
+Source AST được index theo `(realpath, mtime_ns, size)` và structural dossier
+được dùng lại giữa các failed test/scenario. Persistent source cache còn mang
+digest của nội dung source để không reuse nhầm worktree đã đổi. Causal evidence
+và compilation database được lưu content-addressed; các file score giữ
+`causal_evidence_ref`, còn source dossiers tham chiếu source-evidence cache.
+Checkpoint nằm trong output của từng run và manifest chỉ ghi đường dẫn per-bug,
+thay vì serialize lại bốn map kết quả đang tăng dần.
+
+Có thể điều chỉnh trần mà không sửa mã:
+
+| Biến | Mặc định | Mô tả |
+|------|----------|-------|
+| `UDBG_TRACE_INITIAL_MAX_EVENTS` | `300000` | Giới hạn ordered event lần đầu |
+| `UDBG_TRACE_MAX_RETRY_EVENTS` | `1200000` | Giới hạn ordered event tối đa |
+| `UDBG_TRACE_MAX_ATTEMPTS` | `3` | Số lần chạy tối đa cho mỗi regression test |
+| `UDBG_TRACE_DETAILED_EVENT_BUDGET` | `260000` | Tổng hard budget cho detailed E/X và slice probes |
+| `UDBG_TRACE_SLICE_PROBE_EVENT_RESERVE` | `40000` | Phần budget dành cho branch/argument/return/write probes |
+
+Sau thay đổi instrumentation, chạy `--refresh-runtime-traces` nếu muốn chủ
+động tạo lại ngay. Một lượt FL/full bình thường cũng tự loại cache instrumentation
+cũ và thu trace mới; `--fl-cache-only` thì không chạy lại test.
 
 ### Biến môi trường APR
 

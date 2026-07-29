@@ -10,7 +10,7 @@ try:
 except ImportError:  # pragma: no cover - reported through diagnostics
     Query = QueryCursor = None
 
-from core.apr.common import node_text, tree_sitter_language
+from core.program_analysis.source_utils import node_text, tree_sitter_language
 
 from .models import clip, stable_id
 
