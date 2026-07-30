@@ -46,6 +46,14 @@ def build_failure_contract(context: Dict[str, Any]) -> Dict[str, Any]:
         regression_output = _compact_regression_output(
             test.get("regression_output") or {}
         )
+        resolved_test_case = _compact_resolved_test_case(
+            test.get("resolved_test_case") or {}
+        )
+        test_inputs = [
+            _compact_test_input(item)
+            for item in test.get("test_inputs") or []
+            if isinstance(item, dict) and item
+        ]
         observation = focused.get("failure_observation") or {}
         failure_log = str(test.get("failure_log") or test.get("fail_reason") or "")
         actual_output = str(test.get("actual_output") or "")
@@ -76,8 +84,22 @@ def build_failure_contract(context: Dict[str, Any]) -> Dict[str, Any]:
                 else clip(actual_output, 1000)
             ),
         })
+        if (
+            resolved_test_case
+            and resolved_test_case.get("framework") != "source_test"
+        ):
+            compact_tests[-1]["resolved_test_case"] = resolved_test_case
+        if len(test_inputs) > 1:
+            compact_tests[-1]["test_inputs"] = test_inputs[:12]
+    uses_resolved_test_contract = any(
+        test.get("resolved_test_case") or test.get("test_inputs")
+        for test in compact_tests
+    )
     contract = {
-        "version": 3,
+        # Keep the existing contract version/shape for source-based tests
+        # (fmt/libyang). Version 5 is only needed when a project resolver adds
+        # manifest/fixture semantics such as TCPdump TESTLIST or PHP PHPT.
+        "version": 5 if uses_resolved_test_contract else 4,
         "oracle_kind": "regression_input_output_behavior",
         "tests": compact_tests,
         "runtime_facts": compact_strings(behavior.get("runtime_facts"), limit=12, chars=300),
@@ -88,8 +110,143 @@ def build_failure_contract(context: Dict[str, Any]) -> Dict[str, Any]:
             behavior.get("evidence_gaps") or context.get("evidence_gaps"), limit=8, chars=240
         ),
     }
+    failure_signature = _failure_signature(compact_tests)
+    contract["failure_signature"] = failure_signature
+    contract["failure_signature_id"] = stable_id(
+        "failure_signature",
+        failure_signature,
+    )
     contract["contract_id"] = stable_id("failure", contract)
     return contract
+
+
+def _failure_signature(tests: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return the provenance-independent identity of reproduced failures.
+
+    A Fail Context contract also records where evidence came from, return
+    codes, and the runner's complete output. Those audit fields legitimately
+    change between census, detailed, and recovery executions, so they cannot
+    be used to decide whether two executions reproduced the same failure.
+    """
+    signatures = []
+    for test in tests:
+        assertion = test.get("failing_assertion") or {}
+        observation = test.get("failure_observation") or {}
+        proof = test.get("proof_obligation") or {}
+        test_input = test.get("test_input") or {}
+        expected_oracle = test.get("expected_oracle") or {}
+        has_structured_failure = bool(
+            assertion
+            or observation.get("failure_mode")
+            or observation.get("runner_assertion_observation")
+            or observation.get("reported_line")
+        )
+        signature_input = {
+            "kind": test_input.get("kind"),
+            "selection_basis": test_input.get("selection_basis"),
+            "source_path": _signature_path(
+                test_input.get("source_path")
+            ),
+            "source_ranges": test_input.get("source_ranges") or [],
+            "source": _normalized_output(test_input.get("source")),
+            "symbols": test_input.get("symbols") or [],
+        }
+        if test_input.get("sha256"):
+            signature_input["sha256"] = str(test_input.get("sha256"))
+        if test_input.get("size") is not None:
+            signature_input["size"] = int(test_input.get("size") or 0)
+
+        signature_observation = {
+            "reported_source": _signature_path(
+                observation.get("reported_source_path")
+            ),
+            "reported_line": int(
+                observation.get("reported_line") or 0
+            ),
+            "runner_assertion_observation": _normalized_output(
+                observation.get("runner_assertion_observation")
+            ),
+            "failure_mode": str(
+                observation.get("failure_mode") or ""
+            ),
+            "signal_name": str(
+                observation.get("signal_name") or ""
+            ),
+            "signal_number": int(
+                observation.get("signal_number") or 0
+            ),
+        }
+        if observation.get("sanitizer_kind"):
+            signature_observation["sanitizer_kind"] = str(
+                observation.get("sanitizer_kind")
+            )
+        if observation.get("sanitizer_error"):
+            signature_observation["sanitizer_error"] = str(
+                observation.get("sanitizer_error")
+            )
+
+        signatures.append({
+            "test_id": str(test.get("test_id") or ""),
+            "assertion": {
+                "kind": assertion.get("kind"),
+                "callee": assertion.get("callee"),
+                "source_range": assertion.get("source_range") or {},
+                "expected_expression": _normalized_output(
+                    assertion.get("expected_expression")
+                ),
+                "actual_expression": _normalized_output(
+                    assertion.get("actual_expression")
+                ),
+            },
+            "test_input": signature_input,
+            "expected_oracle": {
+                "kind": expected_oracle.get("kind"),
+                "source_path": _signature_path(
+                    expected_oracle.get("source_path")
+                ),
+                "source": _normalized_output(
+                    expected_oracle.get("source")
+                ),
+            },
+            "observation": signature_observation,
+            "proof_obligation": _signature_proof_obligation(proof),
+            "diagnostic_fallback": (
+                ""
+                if has_structured_failure
+                else _normalized_output(test.get("failure_log"))
+            ),
+        })
+    return {
+        "version": 1,
+        "tests": signatures,
+    }
+
+
+def _signature_path(value: Any) -> str:
+    path = str(value or "").replace("\\", "/").strip()
+    if not path:
+        return ""
+    return os.path.basename(os.path.normpath(path))
+
+
+def _signature_proof_obligation(value: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep only stable sanitizer identity fields in failure signatures.
+
+    Probe rebuilds can make the same sanitizer summary switch between a
+    checkout-relative and an absolute source path. The complete summary stays
+    in the auditable contract, but it must not make an identical crash look
+    like a different regression failure.
+    """
+    if not isinstance(value, dict):
+        return {}
+    if value.get("kind") != "prevent_observed_sanitizer_failure":
+        return value
+    return {
+        "kind": value.get("kind"),
+        "sanitizer_kind": value.get("sanitizer_kind"),
+        "sanitizer_error": value.get("sanitizer_error"),
+        "source_location_status": value.get("source_location_status"),
+    }
 
 
 def _compact_assertion(value: Dict[str, Any]) -> Dict[str, Any]:
@@ -140,7 +297,7 @@ def _compact_dependency_slice(value: Dict[str, Any]) -> Dict[str, Any]:
 def _compact_test_input(value: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(value, dict) or not value:
         return {}
-    return {
+    compact = {
         "kind": value.get("kind"),
         "selection_basis": value.get("selection_basis"),
         "source_path": value.get("source_path"),
@@ -152,15 +309,91 @@ def _compact_test_input(value: Dict[str, Any]) -> Dict[str, Any]:
         "source": clip(value.get("source"), 3_000),
         "symbols": (value.get("symbols") or [])[:32],
     }
+    optional = {
+        "role": value.get("role"),
+        "primary": value.get("primary"),
+        "path": value.get("path"),
+        "media_type": value.get("media_type"),
+        "sha256": value.get("sha256"),
+        "size": value.get("size"),
+        "content_ref": value.get("content_ref"),
+        "preview": value.get("preview"),
+    }
+    compact.update({
+        key: item
+        for key, item in optional.items()
+        if item not in (None, "", {}, [])
+    })
+    return compact
 
 
 def _compact_expected_oracle(value: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(value, dict) or not value:
         return {}
-    return {
+    compact = {
         "kind": value.get("kind"),
         "source_path": value.get("source_path"),
         "source": clip(value.get("source"), 2_000),
+    }
+    compact.update({
+        key: value.get(key)
+        for key in (
+            "selection_basis",
+            "path",
+            "media_type",
+            "sha256",
+            "size",
+            "content_ref",
+        )
+        if value.get(key) not in (None, "")
+    })
+    return compact
+
+
+def _compact_resolved_test_case(value: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, dict) or not value:
+        return {}
+    definition = value.get("definition") or {}
+    execution = value.get("execution") or {}
+    provenance = value.get("provenance") or {}
+    return {
+        "schema": value.get("schema"),
+        "version": value.get("version"),
+        "test_id": value.get("test_id"),
+        "framework": value.get("framework"),
+        "definition": {
+            "kind": definition.get("kind"),
+            "source_path": definition.get("source_path"),
+            "source_range": definition.get("source_range") or {},
+            "source": clip(definition.get("source"), 1_500),
+        },
+        "execution": {
+            "runner": execution.get("runner"),
+            "cwd": execution.get("cwd"),
+            "executable_hint": execution.get("executable_hint"),
+            "arguments": [
+                clip(item, 300)
+                for item in execution.get("arguments") or []
+            ][:32],
+        },
+        "inputs": [
+            _compact_test_input(item)
+            for item in value.get("inputs") or []
+            if isinstance(item, dict) and item
+        ][:12],
+        "oracle": _compact_expected_oracle(value.get("oracle") or {}),
+        "provenance": {
+            "resolver": provenance.get("resolver"),
+            "confidence": provenance.get("confidence"),
+            "ground_truth_used": bool(
+                provenance.get("ground_truth_used")
+            ),
+        },
+        "diagnostics": compact_strings(
+            value.get("diagnostics"),
+            limit=8,
+            chars=240,
+        ),
     }
 
 
@@ -215,6 +448,16 @@ def _proof_obligation(
     observation: Dict[str, Any],
     expected_oracle: Dict[str, Any] = None,
 ) -> Dict[str, Any]:
+    if observation.get("failure_mode") == "sanitizer":
+        return {
+            "kind": "prevent_observed_sanitizer_failure",
+            "sanitizer_kind": observation.get("sanitizer_kind"),
+            "sanitizer_error": observation.get("sanitizer_error"),
+            "sanitizer_summary": observation.get("sanitizer_summary"),
+            "source_location_status": observation.get(
+                "source_location_status"
+            ),
+        }
     if observation.get("failure_mode") == "signal":
         return {
             "kind": "prevent_observed_signal",
@@ -394,20 +637,72 @@ def _failure_observation(failure_log: str, test: Dict[str, Any]) -> Dict[str, An
             "bus error": "SIGBUS",
             "illegal instruction": "SIGILL",
         }.get(signal_match.group(1).lower(), signal_match.group(1))
-    return {
+    sanitizer_match = re.search(
+        r"ERROR:\s*(?P<kind>AddressSanitizer|"
+        r"UndefinedBehaviorSanitizer|MemorySanitizer|ThreadSanitizer)"
+        r":\s*(?P<error>[^\n\r]+)",
+        failure_log,
+        re.IGNORECASE,
+    )
+    sanitizer_kind = ""
+    sanitizer_error = ""
+    sanitizer_summary = ""
+    if sanitizer_match:
+        sanitizer_kind = {
+            "addresssanitizer": "address",
+            "undefinedbehaviorsanitizer": "undefined",
+            "memorysanitizer": "memory",
+            "threadsanitizer": "thread",
+        }.get(
+            sanitizer_match.group("kind").lower(),
+            sanitizer_match.group("kind"),
+        )
+        sanitizer_error = re.sub(
+            r"\s+on\s+(?:unknown\s+)?(?:address\s+)?"
+            r"0x[0-9a-f]+.*$",
+            "",
+            sanitizer_match.group("error").strip(),
+            flags=re.IGNORECASE,
+        )
+        summary_match = re.search(
+            r"SUMMARY:\s*[^\n\r]+",
+            failure_log,
+            re.IGNORECASE,
+        )
+        sanitizer_summary = (
+            summary_match.group(0).strip()
+            if summary_match
+            else ""
+        )
+    failure_mode = (
+        "sanitizer"
+        if sanitizer_match
+        else "signal"
+        if signal_match
+        else "assertion"
+    )
+    observation = {
         "reported_source_path": reported_path,
         "reported_line": reported_line,
         "runner_assertion_observation": clip(error_payload, 800),
         "runner_log_kind": (
-            "cmocka" if "[  ERROR   ]" in failure_log
+            "sanitizer" if sanitizer_match
+            else "cmocka" if "[  ERROR   ]" in failure_log
             else "gtest" if "[ RUN      ]" in failure_log
             else "generic"
         ),
-        "failure_mode": "signal" if signal_match else "assertion",
+        "failure_mode": failure_mode,
         "signal_name": signal_name,
         "signal_number": int(signal_match.group(2)) if signal_match and signal_match.group(2) else 0,
         "source_location_status": "exact" if reported_line else "unavailable",
     }
+    if sanitizer_match:
+        observation.update({
+            "sanitizer_kind": sanitizer_kind,
+            "sanitizer_error": clip(sanitizer_error, 500),
+            "sanitizer_summary": clip(sanitizer_summary, 1_000),
+        })
+    return observation
 
 
 def _reported_test_location(

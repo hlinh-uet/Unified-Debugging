@@ -16,6 +16,10 @@ from core.program_analysis.source_utils import (
     walk_nodes,
 )
 from .contract import analyze_test_failure_source, build_failure_contract
+from .test_case_resolver import (
+    resolve_test_case,
+    source_test_case,
+)
 from .utils import clip
 
 
@@ -45,8 +49,8 @@ def build_regression_fail_context(
     """Join exact test input with the fresh observed regression output.
 
     Dataset output is retained only as a compatibility fallback when no fresh
-    execution result is available. Ground truth and FL candidates are never
-    consulted while this context is built.
+    execution reproduces the regression failure. Ground truth and FL
+    candidates are never consulted while this context is built.
     """
     if bug is None:
         return _empty_context("bug_record_missing")
@@ -86,26 +90,28 @@ def build_regression_fail_context(
 
         runtime_test = runtime_by_id.get(test_id) or {}
         fresh_output = str(runtime_test.get("fresh_output") or "")
-        runtime_observed = bool(runtime_test) and (
+        runtime_failure_observed = bool(runtime_test) and (
             bool(runtime_test.get("test_executed"))
-            or runtime_test.get("returncode") is not None
-            or bool(runtime_test.get("failed_as_expected"))
+            and bool(runtime_test.get("failed_as_expected"))
+            and not bool(runtime_test.get("infrastructure_error"))
         )
-        metadata_output = "\n".join(
+        metadata_output = "\n".join(dict.fromkeys(
             str(value or "")
             for value in (
                 record.get("fail_reason"),
                 record.get("actual_output"),
             )
             if value
-        )
+        ))
         failure_log = clip(
-            fresh_output if runtime_observed else metadata_output,
+            fresh_output
+            if runtime_failure_observed
+            else metadata_output,
             12_000,
         )
         output_source = (
             "fresh_regression_run"
-            if runtime_observed
+            if runtime_failure_observed
             else "dataset_metadata_fallback"
         )
 
@@ -113,7 +119,20 @@ def build_regression_fail_context(
             test_id,
             test_files,
         )
-        if match_error:
+        resolved_case = resolve_test_case(
+            bug=bug,
+            record=record,
+            test_id=test_id,
+            root=buggy_root,
+        )
+        if not resolved_case and source_match:
+            resolved_case = source_test_case(
+                test_id=test_id,
+                source_match=source_match,
+            )
+        if match_error and not (
+            (resolved_case.get("definition") or {}).get("source_path")
+        ):
             gaps.append(f"{test_id}:{match_error}")
         focused = analyze_test_failure_source(
             source=str(source_match.get("source") or ""),
@@ -129,6 +148,11 @@ def build_regression_fail_context(
             root=buggy_root,
             source_match=source_match,
             focused=focused,
+            resolved_case=resolved_case,
+        )
+        test_inputs = _test_inputs(
+            primary=test_input,
+            resolved_case=resolved_case,
         )
         if test_input.get("kind") == "unavailable":
             gaps.append(f"{test_id}:exact_test_input_unavailable")
@@ -136,15 +160,32 @@ def build_regression_fail_context(
         regression_output = {
             "source": output_source,
             "text": failure_log,
-            "artifact": str(runtime_test.get("output_artifact") or ""),
-            "returncode": runtime_test.get("returncode"),
-            "failed_as_expected": runtime_test.get("failed_as_expected"),
-            "test_executed": runtime_test.get("test_executed"),
+            "artifact": (
+                str(runtime_test.get("output_artifact") or "")
+                if runtime_failure_observed
+                else ""
+            ),
+            "returncode": (
+                runtime_test.get("returncode")
+                if runtime_failure_observed
+                else None
+            ),
+            "failed_as_expected": (
+                runtime_test.get("failed_as_expected")
+                if runtime_failure_observed
+                else None
+            ),
+            "test_executed": (
+                runtime_test.get("test_executed")
+                if runtime_failure_observed
+                else None
+            ),
         }
         expected_oracle = _expected_oracle(
             bug=bug,
             record=record,
             test_id=test_id,
+            resolved_case=resolved_case,
         )
         tests.append({
             "test_id": test_id,
@@ -155,6 +196,8 @@ def build_regression_fail_context(
             "test_dependency_slice": (
                 focused.get("test_dependency_slice") or {}
             ),
+            "resolved_test_case": resolved_case,
+            "test_inputs": test_inputs,
             "test_input": test_input,
             "expected_oracle": expected_oracle,
             "failure_observation": (
@@ -163,10 +206,7 @@ def build_regression_fail_context(
             "regression_output": regression_output,
             # Compatibility fields used by the existing correctness agents.
             "failure_log": failure_log,
-            "actual_output": clip(
-                fresh_output or record.get("actual_output"),
-                2_200,
-            ),
+            "actual_output": clip(failure_log, 2_200),
             "runtime_output_artifact": regression_output["artifact"],
             "runtime_trace_artifact": str(
                 runtime_test.get("trace_artifact") or ""
@@ -175,7 +215,8 @@ def build_regression_fail_context(
         runtime_facts.append(
             f"{test_id}: output={output_source}, "
             f"returncode={runtime_test.get('returncode')}, "
-            f"failed_as_expected={runtime_test.get('failed_as_expected')}"
+            f"failed_as_expected={runtime_test.get('failed_as_expected')}, "
+            f"test_executed={runtime_test.get('test_executed')}"
         )
 
     gaps = list(dict.fromkeys(value for value in gaps if value))
@@ -190,7 +231,7 @@ def build_regression_fail_context(
             "llm_used": False,
             "ground_truth_used": False,
             "fallback_policy": (
-                "dataset_output_only_when_fresh_execution_is_absent"
+                "dataset_output_only_when_fresh_failure_is_absent"
             ),
         },
         "project_info": {
@@ -214,6 +255,10 @@ def build_regression_fail_context(
     result["failure_contract"] = build_failure_contract(result)
     result["context_id"] = result["failure_contract"].get(
         "contract_id",
+        "",
+    )
+    result["failure_signature_id"] = result["failure_contract"].get(
+        "failure_signature_id",
         "",
     )
     result["summary_text"] = _summary(result["failure_contract"])
@@ -270,6 +315,10 @@ def _empty_context(error: str) -> dict:
     result["failure_contract"] = build_failure_contract(result)
     result["context_id"] = result["failure_contract"].get(
         "contract_id",
+        "",
+    )
+    result["failure_signature_id"] = result["failure_contract"].get(
+        "failure_signature_id",
         "",
     )
     result["summary_text"] = ""
@@ -387,6 +436,7 @@ def _build_test_input(
     root: str,
     source_match: Dict[str, Any],
     focused: Dict[str, Any],
+    resolved_case: Dict[str, Any],
 ) -> dict:
     dependency_slice = focused.get("test_dependency_slice") or {}
     statements = [
@@ -414,6 +464,9 @@ def _build_test_input(
             ),
             "symbols": dependency_slice.get("symbols") or [],
         }
+    descriptor_input = _primary_resolved_input(resolved_case)
+    if descriptor_input:
+        return descriptor_input
     external = _external_input(
         bug=bug,
         record=record,
@@ -441,6 +494,57 @@ def _build_test_input(
         "source": "",
         "symbols": [],
     }
+
+
+def _primary_resolved_input(resolved_case: Dict[str, Any]) -> dict:
+    inputs = [
+        item
+        for item in (resolved_case or {}).get("inputs") or []
+        if isinstance(item, dict) and item
+    ]
+    if not inputs:
+        return {}
+    selected = next(
+        (item for item in inputs if item.get("primary")),
+        inputs[0],
+    )
+    return copy.deepcopy(selected)
+
+
+def _test_inputs(
+    *,
+    primary: Dict[str, Any],
+    resolved_case: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    values = []
+    if primary and primary.get("kind") != "unavailable":
+        values.append(copy.deepcopy(primary))
+    for item in (resolved_case or {}).get("inputs") or []:
+        if not isinstance(item, dict) or not item:
+            continue
+        identity = (
+            str(item.get("role") or ""),
+            str(item.get("selection_basis") or ""),
+            str(item.get("source_path") or item.get("path") or ""),
+            str(item.get("sha256") or ""),
+        )
+        if any(
+            identity
+            == (
+                str(existing.get("role") or ""),
+                str(existing.get("selection_basis") or ""),
+                str(
+                    existing.get("source_path")
+                    or existing.get("path")
+                    or ""
+                ),
+                str(existing.get("sha256") or ""),
+            )
+            for existing in values
+        ):
+            continue
+        values.append(copy.deepcopy(item))
+    return values
 
 
 def _external_input(
@@ -487,7 +591,15 @@ def _expected_oracle(
     bug: BugRecord,
     record: Dict[str, Any],
     test_id: str,
+    resolved_case: Dict[str, Any],
 ) -> dict:
+    resolved_oracle = (
+        (resolved_case or {}).get("oracle")
+        if isinstance(resolved_case, dict)
+        else {}
+    )
+    if isinstance(resolved_oracle, dict) and resolved_oracle:
+        return copy.deepcopy(resolved_oracle)
     expected = record.get("expected_output")
     if expected is not None and str(expected) != "":
         return {

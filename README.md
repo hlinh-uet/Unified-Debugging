@@ -279,9 +279,10 @@ Runtime trace của FL tự thích ứng theo từng bug/test:
 - Probe ở loop nóng vượt sample quota được ghi `observed_*_sampled` và tạo
   follow-up `invocation_window_refinement`; sample đầu không được nâng thành
   causal support hoàn chỉnh.
-- Census, detailed và recovery output được so bằng immutable Fail Context ID.
-  Evidence từ một rerun không tái hiện cùng failure signature sẽ bị đánh dấu
-  `signature_mismatch` và không được nhập vào localization.
+- Census, detailed và recovery output được so bằng immutable semantic failure
+  signature ID; Fail Context ID đầy đủ vẫn giữ provenance/audit của từng lần
+  chạy. Evidence từ một rerun không tái hiện cùng failure signature sẽ bị đánh
+  dấu `signature_mismatch` và không được nhập vào localization.
 - Tổng ngân sách detailed mặc định là 260.000 event, gồm E/X và 40.000 event
   dự phòng cho source probes. Có thể chỉnh bằng
   `UDBG_TRACE_DETAILED_EVENT_BUDGET` và

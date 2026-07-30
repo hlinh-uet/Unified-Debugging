@@ -64,6 +64,17 @@ TRACE_SLICE_MAX_PROBES = 192
 TRACE_SLICE_PROBE_SAMPLE_LIMIT = 64
 FUNCTION_IDENTITY_SAMPLE_LIMIT = 128
 PERSISTED_EVENT_LIMIT = 8_000
+PERSISTED_PROBE_SAMPLES_PER_ID = 16
+INSTRUMENTABLE_SOURCE_SUFFIXES = {
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cxx",
+    ".h",
+    ".hh",
+    ".hpp",
+    ".hxx",
+}
 FULL_RUNTIME_CACHE_FILENAME = "runtime_evidence.full.json.gz"
 TRACE_SCOPE_SCHEMA = "unified_debugging.trace_scope.v4"
 RUNTIME_CACHE_FILENAME = "runtime_evidence.json"
@@ -88,6 +99,7 @@ TRACE_RUNTIME_SOURCE = textwrap.dedent(
     static int scenario_window = 0;
     static int probe_only = 0;
     static int coverage_only = 0;
+    static int crash_safe_coverage = 0;
     static int scope_enabled = 0;
     static unsigned long slice_probe_limit = 512;
     static __thread unsigned trace_depth = 0;
@@ -148,6 +160,10 @@ TRACE_RUNTIME_SOURCE = textwrap.dedent(
         const char *id, long long value, unsigned depth) NOINST;
     static void trace_record_coverage(void *fn) NOINST;
     static void trace_record_edge(void *caller, void *callee) NOINST;
+    static void trace_write_coverage_record(
+        uintptr_t address, unsigned long count) NOINST;
+    static void trace_write_edge_record(
+        uintptr_t caller, uintptr_t callee, unsigned long count) NOINST;
     static void trace_flush_coverage(void) NOINST;
     static void trace_flush_edges(void) NOINST;
     static void trace_reset_scenario_window(void) NOINST;
@@ -162,6 +178,8 @@ TRACE_RUNTIME_SOURCE = textwrap.dedent(
       const char *window = getenv("UDBG_TRACE_SCENARIO_WINDOW");
       const char *probe = getenv("UDBG_TRACE_PROBE_ONLY");
       const char *census = getenv("UDBG_TRACE_COVERAGE_ONLY");
+      const char *crash_safe = getenv(
+          "UDBG_TRACE_CRASH_SAFE_COVERAGE");
       const char *probe_limit = getenv(
           "UDBG_TRACE_PROBE_LIMIT_PER_ID");
       if (limit && *limit) {
@@ -176,6 +194,9 @@ TRACE_RUNTIME_SOURCE = textwrap.dedent(
       }
       if (census && *census && strcmp(census, "0") != 0) {
         coverage_only = 1;
+      }
+      if (crash_safe && *crash_safe && strcmp(crash_safe, "0") != 0) {
+        crash_safe_coverage = 1;
       }
       if (probe_limit && *probe_limit) {
         unsigned long value = strtoul(probe_limit, NULL, 10);
@@ -212,6 +233,9 @@ TRACE_RUNTIME_SOURCE = textwrap.dedent(
                 __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
           __atomic_store_n(
               &coverage[index].count, 1UL, __ATOMIC_RELAXED);
+          if (crash_safe_coverage) {
+            trace_write_coverage_record(address, 1UL);
+          }
           return;
         }
       }
@@ -244,9 +268,46 @@ TRACE_RUNTIME_SOURCE = textwrap.dedent(
                 &edges[index].callee, right, __ATOMIC_RELAXED);
             __atomic_store_n(
                 &edges[index].count, 1UL, __ATOMIC_RELAXED);
+            if (crash_safe_coverage) {
+              trace_write_edge_record(left, right, 1UL);
+            }
             return;
           }
         }
+      }
+    }
+
+    static void trace_write_coverage_record(
+        uintptr_t address, unsigned long count) {
+      if (trace_fd < 0) return;
+      if (!address || !count) return;
+      Dl_info info;
+      memset(&info, 0, sizeof(info));
+      const char *module = "";
+      const char *symbol = "";
+      uintptr_t base = 0;
+      if (dladdr((void *)address, &info)) {
+        module = info.dli_fname ? info.dli_fname : "";
+        symbol = info.dli_sname ? info.dli_sname : "";
+        base = (uintptr_t)info.dli_fbase;
+      }
+      uintptr_t offset =
+          base && address >= base ? address - base : address;
+      char line[4096];
+      int length = snprintf(
+          line, sizeof(line), "C\t%ld\t%lx\t%lx\t%s\t%s\t%lu\n",
+          (long)getpid(),
+          (unsigned long)address,
+          (unsigned long)offset,
+          module,
+          symbol,
+          count);
+      if (length > 0) {
+        size_t size =
+            (size_t)length < sizeof(line)
+                ? (size_t)length
+                : sizeof(line) - 1;
+        (void)write(trace_fd, line, size);
       }
     }
 
@@ -257,35 +318,47 @@ TRACE_RUNTIME_SOURCE = textwrap.dedent(
             &coverage[index].function, __ATOMIC_RELAXED);
         unsigned long count = __atomic_load_n(
             &coverage[index].count, __ATOMIC_RELAXED);
-        if (!address || !count) continue;
-        Dl_info info;
-        memset(&info, 0, sizeof(info));
-        const char *module = "";
-        const char *symbol = "";
-        uintptr_t base = 0;
-        if (dladdr((void *)address, &info)) {
-          module = info.dli_fname ? info.dli_fname : "";
-          symbol = info.dli_sname ? info.dli_sname : "";
-          base = (uintptr_t)info.dli_fbase;
-        }
-        uintptr_t offset =
-            base && address >= base ? address - base : address;
-        char line[4096];
-        int length = snprintf(
-            line, sizeof(line), "C\t%ld\t%lx\t%lx\t%s\t%s\t%lu\n",
-            (long)getpid(),
-            (unsigned long)address,
-            (unsigned long)offset,
-            module,
-            symbol,
-            count);
-        if (length > 0) {
-          size_t size =
-              (size_t)length < sizeof(line)
-                  ? (size_t)length
-                  : sizeof(line) - 1;
-          (void)write(trace_fd, line, size);
-        }
+        if (crash_safe_coverage && count > 0) count--;
+        trace_write_coverage_record(address, count);
+      }
+    }
+
+    static void trace_write_edge_record(
+        uintptr_t caller, uintptr_t callee, unsigned long count) {
+      if (trace_fd < 0 || !caller || !callee || !count) return;
+      Dl_info caller_info;
+      Dl_info callee_info;
+      memset(&caller_info, 0, sizeof(caller_info));
+      memset(&callee_info, 0, sizeof(callee_info));
+      (void)dladdr((void *)caller, &caller_info);
+      (void)dladdr((void *)callee, &callee_info);
+      uintptr_t caller_base = (uintptr_t)caller_info.dli_fbase;
+      uintptr_t callee_base = (uintptr_t)callee_info.dli_fbase;
+      uintptr_t caller_offset =
+          caller_base && caller >= caller_base
+              ? caller - caller_base : caller;
+      uintptr_t callee_offset =
+          callee_base && callee >= callee_base
+              ? callee - callee_base : callee;
+      char line[8192];
+      int length = snprintf(
+          line, sizeof(line),
+          "D\t%ld\t%lx\t%lx\t%s\t%s\t%lx\t%lx\t%s\t%s\t%lu\n",
+          (long)getpid(),
+          (unsigned long)caller,
+          (unsigned long)caller_offset,
+          caller_info.dli_fname ? caller_info.dli_fname : "",
+          caller_info.dli_sname ? caller_info.dli_sname : "",
+          (unsigned long)callee,
+          (unsigned long)callee_offset,
+          callee_info.dli_fname ? callee_info.dli_fname : "",
+          callee_info.dli_sname ? callee_info.dli_sname : "",
+          count);
+      if (length > 0) {
+        size_t size =
+            (size_t)length < sizeof(line)
+                ? (size_t)length : sizeof(line) - 1;
+        (void)write(trace_fd, line, size);
       }
     }
 
@@ -298,41 +371,8 @@ TRACE_RUNTIME_SOURCE = textwrap.dedent(
             &edges[index].callee, __ATOMIC_RELAXED);
         unsigned long count = __atomic_load_n(
             &edges[index].count, __ATOMIC_RELAXED);
-        if (!caller || !callee || !count) continue;
-        Dl_info caller_info;
-        Dl_info callee_info;
-        memset(&caller_info, 0, sizeof(caller_info));
-        memset(&callee_info, 0, sizeof(callee_info));
-        (void)dladdr((void *)caller, &caller_info);
-        (void)dladdr((void *)callee, &callee_info);
-        uintptr_t caller_base = (uintptr_t)caller_info.dli_fbase;
-        uintptr_t callee_base = (uintptr_t)callee_info.dli_fbase;
-        uintptr_t caller_offset =
-            caller_base && caller >= caller_base
-                ? caller - caller_base : caller;
-        uintptr_t callee_offset =
-            callee_base && callee >= callee_base
-                ? callee - callee_base : callee;
-        char line[8192];
-        int length = snprintf(
-            line, sizeof(line),
-            "D\t%ld\t%lx\t%lx\t%s\t%s\t%lx\t%lx\t%s\t%s\t%lu\n",
-            (long)getpid(),
-            (unsigned long)caller,
-            (unsigned long)caller_offset,
-            caller_info.dli_fname ? caller_info.dli_fname : "",
-            caller_info.dli_sname ? caller_info.dli_sname : "",
-            (unsigned long)callee,
-            (unsigned long)callee_offset,
-            callee_info.dli_fname ? callee_info.dli_fname : "",
-            callee_info.dli_sname ? callee_info.dli_sname : "",
-            count);
-        if (length > 0) {
-          size_t size =
-              (size_t)length < sizeof(line)
-                  ? (size_t)length : sizeof(line) - 1;
-          (void)write(trace_fd, line, size);
-        }
+        if (crash_safe_coverage && count > 0) count--;
+        trace_write_edge_record(caller, callee, count);
       }
     }
 
@@ -446,7 +486,13 @@ TRACE_RUNTIME_SOURCE = textwrap.dedent(
     }
 
     static int trace_slice_probe_allowed(const char *id) {
-      if (!id || strncmp(id, "slice_", 6) != 0) return 1;
+      if (
+          !id
+          || (
+              strncmp(id, "slice_", 6) != 0
+              && strncmp(id, "probe_", 6) != 0)) {
+        return 1;
+      }
       unsigned long hash = 1469598103934665603UL;
       for (const unsigned char *cursor =
                (const unsigned char *)id; *cursor; ++cursor) {
@@ -801,6 +847,7 @@ def _refine_trace_scope_from_census(
     census_test: Dict[str, Any],
     artifact_dir: str,
     fail_context: Dict[str, Any] = None,
+    compilation_database: str = "",
 ) -> Dict[str, Any]:
     """Build a bounded executed producer-to-sink slice for detailed tracing."""
     census_functions = {
@@ -852,6 +899,9 @@ def _refine_trace_scope_from_census(
             for key in executed_candidates
         },
         "dynamic_edges": candidate_edges,
+        "compile": {
+            "compilation_database": compilation_database,
+        },
     }
     producer_symbols = {
         str(value)
@@ -1187,7 +1237,10 @@ def _refine_trace_scope_from_census(
     )
     slice_probe_limit_per_id = max(
         1,
-        probe_reserve // max(1, len(slice_probes)),
+        min(
+            TRACE_SLICE_PROBE_SAMPLE_LIMIT,
+            probe_reserve // max(1, len(slice_probes)),
+        ),
     )
     estimated_probe_events = (
         slice_probe_limit_per_id * len(slice_probes)
@@ -1202,6 +1255,12 @@ def _refine_trace_scope_from_census(
         for key in selected
         if _trace_scope_function(key)
     })
+    observed_runtime_modules = sorted({
+        str(module)
+        for record in census_functions.values()
+        for module in record.get("runtime_modules") or []
+        if str(module)
+    })
     return {
         **base_scope,
         "enabled": False,
@@ -1210,6 +1269,7 @@ def _refine_trace_scope_from_census(
             "query_driven_producer_sink_v1"
         ),
         "requested_functions": selected_functions,
+        "observed_runtime_modules": observed_runtime_modules,
         "candidate_function_count": len(executed_candidates),
         "metadata_candidate_count": len(metadata_keys),
         "metadata_executed_candidate_count": len(
@@ -1562,6 +1622,142 @@ def _collect_trace_nm_output(
     )
 
 
+def _runtime_module_match_score(
+    candidate: str,
+    observed: str,
+) -> int:
+    """Match an nm module to the exact module spelling emitted by dladdr."""
+    candidate = os.path.normpath(
+        str(candidate or "").replace("\\", "/")
+    )
+    observed = os.path.normpath(
+        str(observed or "").replace("\\", "/")
+    )
+    if not candidate or not observed or observed == ".":
+        return 0
+    if candidate == observed:
+        return 4
+    relative = observed
+    while relative.startswith("../"):
+        relative = relative[3:]
+    relative = relative.lstrip("./")
+    if relative and (
+        candidate == relative
+        or candidate.endswith("/" + relative)
+    ):
+        return 3
+    if os.path.basename(candidate) == os.path.basename(observed):
+        return 1
+    return 0
+
+
+def _select_trace_scope_modules(
+    *,
+    module_matches: Dict[str, set],
+    module_ranges: Dict[str, List[Tuple[str, int, int]]],
+    requested: List[str],
+    test_id: str,
+    observed_runtime_modules: List[str],
+) -> Dict[str, Any]:
+    """Select the smallest executed module set that covers requested symbols."""
+    candidates = {
+        module
+        for module, matches in module_matches.items()
+        if matches
+    }
+    requested_set = set(requested)
+    suite = str(test_id or "").split("::", 1)[0].strip()
+    suite_variants = {
+        suite,
+        suite.replace("_", "-"),
+        suite.replace("-", "_"),
+    } - {""}
+    hint_modules = {
+        module
+        for module in candidates
+        if os.path.basename(module) in suite_variants
+    }
+    observed_scores = {
+        module: max(
+            (
+                _runtime_module_match_score(module, observed)
+                for observed in observed_runtime_modules
+            ),
+            default=0,
+        )
+        for module in candidates
+    }
+    observed_candidates = {
+        module
+        for module, score in observed_scores.items()
+        if score > 0
+    }
+    if observed_candidates:
+        primary_pool = observed_candidates
+        strategy = "runtime_census_modules"
+    elif hint_modules:
+        primary_pool = hint_modules
+        strategy = "test_suite_hint"
+    else:
+        primary_pool = candidates
+        strategy = "symbol_coverage_fallback"
+
+    selected: List[str] = []
+    covered = set()
+
+    def add_greedy(pool: Iterable[str]) -> None:
+        remaining = set(pool) - set(selected)
+        while remaining and requested_set - covered:
+            ordered = sorted(remaining)
+            module = max(
+                ordered,
+                key=lambda value: (
+                    len(
+                        module_matches[value]
+                        & (requested_set - covered)
+                    ),
+                    observed_scores.get(value, 0),
+                    int(value in hint_modules),
+                    int(".so" not in os.path.basename(value)),
+                    -len(module_ranges.get(value) or []),
+                ),
+            )
+            gain = (
+                module_matches[module]
+                & (requested_set - covered)
+            )
+            if not gain:
+                break
+            selected.append(module)
+            covered.update(gain)
+            remaining.remove(module)
+
+    add_greedy(primary_pool)
+    if requested_set - covered:
+        add_greedy(candidates)
+
+    aliases_by_module = {}
+    observed_matches = {}
+    for module in selected:
+        aliases = sorted({
+            str(observed)
+            for observed in observed_runtime_modules
+            if _runtime_module_match_score(module, observed) > 0
+        })
+        aliases_by_module[module] = aliases or [module]
+        if aliases:
+            observed_matches[module] = aliases
+    return {
+        "selected_modules": selected,
+        "covered_functions": sorted(covered),
+        "uncovered_functions": sorted(requested_set - covered),
+        "selection_strategy": strategy,
+        "runtime_module_aliases": aliases_by_module,
+        "observed_module_matches": observed_matches,
+        "suite_hint_modules": sorted(hint_modules),
+    }
+
+
 def _build_trace_scope_file(
     *,
     container: str,
@@ -1650,52 +1846,17 @@ def _build_trace_scope_file(
             module_ranges[module].append((module, address, next_address))
             module_matches[module].update(symbol_matches)
 
-    suite = str(test_id or "").split("::", 1)[0].strip()
-    suite_variants = {
-        suite,
-        suite.replace("_", "-"),
-        suite.replace("-", "_"),
-    } - {""}
-
-    def is_test_binary(module: str) -> bool:
-        basename = os.path.basename(module)
-        return basename in suite_variants
-
-    def is_shared_library(module: str) -> bool:
-        basename = os.path.basename(module)
-        return ".so" in basename
-
-    primary_modules = sorted(
-        module for module in module_matches if is_test_binary(module)
+    selection = _select_trace_scope_modules(
+        module_matches=module_matches,
+        module_ranges=module_ranges,
+        requested=requested,
+        test_id=test_id,
+        observed_runtime_modules=list(
+            scope.get("observed_runtime_modules") or []
+        ),
     )
-    selected_modules = list(primary_modules)
-    covered = set().union(
-        *(module_matches[module] for module in selected_modules)
-    ) if selected_modules else set()
-    uncovered = set(requested) - covered
-    library_modules = {
-        module
-        for module in module_matches
-        if is_shared_library(module)
-    }
-    while uncovered and library_modules:
-        module = max(
-            library_modules,
-            key=lambda value: (
-                len(module_matches[value] & uncovered),
-                -len(module_ranges[value]),
-                value,
-            ),
-        )
-        gain = module_matches[module] & uncovered
-        if not gain:
-            break
-        selected_modules.append(module)
-        covered.update(gain)
-        uncovered = set(requested) - covered
-        library_modules.remove(module)
-
-    if not primary_modules:
+    selected_modules = list(selection["selected_modules"])
+    if not selected_modules:
         return {
             **scope,
             "enabled": False,
@@ -1706,14 +1867,22 @@ def _build_trace_scope_file(
             "unmatched_functions": requested[:80],
             "diagnostics": [
                 *(scope.get("diagnostics") or []),
-                "trace_scope_test_binary_unresolved",
+                "trace_scope_runtime_module_unresolved",
             ],
         }
 
-    ranges = sorted({
+    symbol_ranges = sorted({
         item
         for module in selected_modules
         for item in module_ranges[module]
+    })
+    ranges = sorted({
+        (runtime_module, start, end)
+        for module, start, end in symbol_ranges
+        for runtime_module in (
+            selection["runtime_module_aliases"].get(module)
+            or [module]
+        )
     })
     matched = Counter(
         requested_name
@@ -1732,6 +1901,12 @@ def _build_trace_scope_file(
             "matched_function_count": len(matched),
             "range_count": len(ranges),
             "selected_modules": selected_modules,
+            "module_selection_strategy": selection[
+                "selection_strategy"
+            ],
+            "runtime_module_aliases": selection[
+                "runtime_module_aliases"
+            ],
             "unmatched_functions": unmatched[:80],
             "diagnostics": [
                 *(scope.get("diagnostics") or []),
@@ -1746,6 +1921,12 @@ def _build_trace_scope_file(
             "matched_function_count": len(matched),
             "range_count": len(ranges),
             "selected_modules": selected_modules,
+            "module_selection_strategy": selection[
+                "selection_strategy"
+            ],
+            "runtime_module_aliases": selection[
+                "runtime_module_aliases"
+            ],
             "unmatched_functions": [],
             "diagnostics": [
                 *(scope.get("diagnostics") or []),
@@ -1788,6 +1969,15 @@ def _build_trace_scope_file(
         "matched_function_count": len(matched),
         "range_count": len(set(ranges)),
         "selected_modules": selected_modules,
+        "module_selection_strategy": selection[
+            "selection_strategy"
+        ],
+        "runtime_module_aliases": selection[
+            "runtime_module_aliases"
+        ],
+        "observed_module_matches": selection[
+            "observed_module_matches"
+        ],
         "unmatched_functions": [],
         "diagnostics": [],
     }
@@ -1843,6 +2033,9 @@ def _bound_function_identity_samples(function: Dict[str, Any]) -> None:
     function["callsite_ids"] = list(
         function.get("callsite_ids") or []
     )[:FUNCTION_IDENTITY_SAMPLE_LIMIT]
+    function["runtime_modules"] = list(
+        function.get("runtime_modules") or []
+    )[:FUNCTION_IDENTITY_SAMPLE_LIMIT]
     function.setdefault(
         "invocation_count",
         int(function.get("enter_count") or 0),
@@ -1868,6 +2061,7 @@ def _merge_census_into_detailed_test(
             "invocation_count": 0,
             "invocation_ids": [],
             "callsite_ids": [],
+            "runtime_modules": [],
         })
         census_count = int(
             census_record.get("coverage_enter_count")
@@ -1889,6 +2083,11 @@ def _merge_census_into_detailed_test(
             record["source_path"] = census_record.get("source_path")
         if not record.get("source_line"):
             record["source_line"] = census_record.get("source_line")
+        for runtime_module in census_record.get("runtime_modules") or []:
+            _append_identity_sample(
+                record.setdefault("runtime_modules", []),
+                runtime_module,
+            )
     edge_counts = Counter()
     for edge in (
         list(detailed.get("dynamic_edges") or [])
@@ -1938,6 +2137,23 @@ def _merge_trace_query_observations(
         primary[field] = merged
 
 
+def _fail_context_signature_id(context: Dict[str, Any]) -> str:
+    """Prefer semantic failure identity; keep legacy caches comparable."""
+    contract = (
+        context.get("failure_contract")
+        if isinstance(context, dict)
+        else {}
+    )
+    if not isinstance(contract, dict):
+        contract = {}
+    return str(
+        context.get("failure_signature_id")
+        or contract.get("failure_signature_id")
+        or context.get("context_id")
+        or ""
+    )
+
+
 def _compact_trace_query_recovery(
     recovery: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -1966,6 +2182,12 @@ def _compact_trace_query_recovery(
         ),
         "observed_fail_context_id": recovery.get(
             "observed_fail_context_id"
+        ),
+        "baseline_failure_signature_id": recovery.get(
+            "baseline_failure_signature_id"
+        ),
+        "observed_failure_signature_id": recovery.get(
+            "observed_failure_signature_id"
         ),
         "failure_signature_match": recovery.get(
             "failure_signature_match"
@@ -2126,6 +2348,38 @@ def collect_regression_runtime_evidence(
         if compile_result.get("returncode") != 0:
             result["diagnostics"].append("runtime_trace_build_failed")
             return result
+        compilation_database = _copy_compilation_database(
+            container=container,
+            container_repo=container_repo,
+            host_artifact_dir=host_artifact_dir,
+            host_source_root=str(raw.get("buggy_tree_dir") or ""),
+            captured_commands_path=str(
+                setup.get("compilation_log") or ""
+            ),
+        )
+        result["compile"]["compilation_database"] = compilation_database
+        if not compilation_database:
+            result["diagnostics"].append(
+                "runtime_compilation_database_unavailable"
+            )
+        runtime_preload = _trace_runtime_preload(
+            compile_cmd=str(raw["compile_cmd"]),
+            trace_library=str(setup["trace_library"]),
+        )
+        result["compile"]["runtime_preload"] = {
+            key: value
+            for key, value in runtime_preload.items()
+            if key != "preload"
+        }
+        result["diagnostics"].extend(
+            runtime_preload.get("diagnostics") or []
+        )
+        if not runtime_preload.get("available"):
+            return result
+        trace_preload = str(runtime_preload["preload"])
+        address_sanitizer = (
+            runtime_preload.get("sanitizer") == "address"
+        )
         base_scope_by_test = {}
         for test_id in regression_ids:
             scope = _coverage_scope_records_for_test(bug, test_id)
@@ -2147,7 +2401,7 @@ def collect_regression_runtime_evidence(
                 container=container,
                 container_repo=container_repo,
                 container_trace_root=container_trace_root,
-                trace_library=str(setup["trace_library"]),
+                trace_library=trace_preload,
                 test_template=template,
                 test_id=test_id,
                 host_artifact_dir=host_artifact_dir,
@@ -2158,6 +2412,7 @@ def collect_regression_runtime_evidence(
                 attempt_index=0,
                 summarize_truncated=True,
                 coverage_only=True,
+                address_sanitizer=address_sanitizer,
             )
             census_result["trace_scope"] = {}
             census_by_test[test_id] = census_result
@@ -2175,6 +2430,7 @@ def collect_regression_runtime_evidence(
                 census_test=census_result,
                 artifact_dir=host_artifact_dir,
                 fail_context=census_fail_context,
+                compilation_database=compilation_database,
             )
             refined_scope["fail_context_id"] = (
                 census_fail_context.get("context_id") or ""
@@ -2398,18 +2654,6 @@ def collect_regression_runtime_evidence(
                 )
             )
 
-        compilation_database = _copy_compilation_database(
-            container=container,
-            container_repo=container_repo,
-            host_artifact_dir=host_artifact_dir,
-            host_source_root=str(raw.get("buggy_tree_dir") or ""),
-        )
-        result["compile"]["compilation_database"] = compilation_database
-        if not compilation_database:
-            result["diagnostics"].append(
-                "runtime_compilation_database_unavailable"
-            )
-
         all_functions: Dict[str, Dict[str, Any]] = {}
         all_edges = Counter()
         all_callsites = Counter()
@@ -2424,7 +2668,7 @@ def collect_regression_runtime_evidence(
                     container=container,
                     container_repo=container_repo,
                     container_trace_root=container_trace_root,
-                    trace_library=str(setup["trace_library"]),
+                    trace_library=trace_preload,
                     test_template=template,
                     test_id=test_id,
                     host_artifact_dir=host_artifact_dir,
@@ -2448,6 +2692,7 @@ def collect_regression_runtime_evidence(
                         detailed_scope.get("detailed_event_budget")
                         or TRACE_DETAILED_EVENT_BUDGET
                     ),
+                    address_sanitizer=address_sanitizer,
                 )
             else:
                 test_result = {
@@ -2472,6 +2717,9 @@ def collect_regression_runtime_evidence(
                 ).get("context_id")
                 or ""
             )
+            baseline_signature_id = _fail_context_signature_id(
+                census_fail_context_by_test.get(test_id) or {}
+            )
             primary_context = build_regression_fail_context(
                 bug,
                 runtime_evidence={"tests": [test_result]},
@@ -2480,13 +2728,22 @@ def collect_regression_runtime_evidence(
             primary_context_id = str(
                 primary_context.get("context_id") or ""
             )
+            primary_signature_id = _fail_context_signature_id(
+                primary_context
+            )
             primary_signature_match = (
-                primary_context_id == baseline_context_id
-                if primary_context_id and baseline_context_id
+                primary_signature_id == baseline_signature_id
+                if primary_signature_id and baseline_signature_id
                 else None
             )
             test_result["baseline_fail_context_id"] = baseline_context_id
             test_result["observed_fail_context_id"] = primary_context_id
+            test_result["baseline_failure_signature_id"] = (
+                baseline_signature_id
+            )
+            test_result["observed_failure_signature_id"] = (
+                primary_signature_id
+            )
             test_result["failure_signature_match"] = (
                 primary_signature_match
             )
@@ -2502,7 +2759,7 @@ def collect_regression_runtime_evidence(
                     container=container,
                     container_repo=container_repo,
                     container_trace_root=container_trace_root,
-                    trace_library=str(setup["trace_library"]),
+                    trace_library=trace_preload,
                     test_template=template,
                     test_id=test_id,
                     host_artifact_dir=host_artifact_dir,
@@ -2526,6 +2783,7 @@ def collect_regression_runtime_evidence(
                         )
                         or TRACE_SLICE_PROBE_EVENT_RESERVE
                     ),
+                    address_sanitizer=address_sanitizer,
                 )
                 recovery_context = build_regression_fail_context(
                     bug,
@@ -2535,9 +2793,12 @@ def collect_regression_runtime_evidence(
                 recovery_context_id = str(
                     recovery_context.get("context_id") or ""
                 )
+                recovery_signature_id = _fail_context_signature_id(
+                    recovery_context
+                )
                 recovery_signature_match = (
-                    recovery_context_id == baseline_context_id
-                    if recovery_context_id and baseline_context_id
+                    recovery_signature_id == baseline_signature_id
+                    if recovery_signature_id and baseline_signature_id
                     else None
                 )
                 recovery_result["baseline_fail_context_id"] = (
@@ -2545,6 +2806,12 @@ def collect_regression_runtime_evidence(
                 )
                 recovery_result["observed_fail_context_id"] = (
                     recovery_context_id
+                )
+                recovery_result["baseline_failure_signature_id"] = (
+                    baseline_signature_id
+                )
+                recovery_result["observed_failure_signature_id"] = (
+                    recovery_signature_id
                 )
                 recovery_result["failure_signature_match"] = (
                     recovery_signature_match
@@ -3278,6 +3545,13 @@ def _install_trace_toolchain(
     if not real_cc:
         return {"available": False, "diagnostics": ["trace_compiler_not_found"]}
 
+    compilation_log = (
+        f"{container_trace_root.rstrip('/')}/compile_commands.tsv"
+    )
+    instrumentation_args = (
+        "-g -O0 -finstrument-functions -fno-omit-frame-pointer "
+        "-Wl,--export-dynamic"
+    )
     with tempfile.TemporaryDirectory(prefix="udbg_trace_toolchain_") as local:
         bin_dir = os.path.join(local, "bin")
         os.makedirs(bin_dir, exist_ok=True)
@@ -3285,9 +3559,30 @@ def _install_trace_toolchain(
         for name, real_path in compilers.items():
             wrapper = (
                 "#!/bin/sh\n"
+                "udbg_is_compile=0\n"
+                "udbg_has_source=0\n"
+                'for udbg_arg in "$@"; do\n'
+                '  [ "$udbg_arg" = "-c" ] && udbg_is_compile=1\n'
+                '  case "$udbg_arg" in\n'
+                "    *.c|*.cc|*.cpp|*.cxx) udbg_has_source=1 ;;\n"
+                "  esac\n"
+                "done\n"
+                'if [ "$udbg_is_compile" -eq 1 ] '
+                '&& [ "$udbg_has_source" -eq 1 ]; then\n'
+                '  udbg_tab=$(printf "\\t")\n'
+                f'  udbg_record="$PWD${{udbg_tab}}{real_path}"\n'
+                '  for udbg_arg in "$@"; do\n'
+                '    udbg_record="${udbg_record}${udbg_tab}${udbg_arg}"\n'
+                "  done\n"
+                "  for udbg_arg in -g -O0 -finstrument-functions "
+                "-fno-omit-frame-pointer -Wl,--export-dynamic; do\n"
+                '    udbg_record="${udbg_record}${udbg_tab}${udbg_arg}"\n'
+                "  done\n"
+                f"  printf '%s\\n' \"$udbg_record\" >> "
+                f"{shlex.quote(compilation_log)}\n"
+                "fi\n"
                 f"exec {shlex.quote(real_path)} \"$@\" "
-                "-g -O0 -finstrument-functions -fno-omit-frame-pointer "
-                "-Wl,--export-dynamic\n"
+                f"{instrumentation_args}\n"
             )
             path = os.path.join(bin_dir, name)
             _write_text(path, wrapper)
@@ -3332,6 +3627,7 @@ def _install_trace_toolchain(
         "diagnostics": [],
         "wrapper_bin": f"{container_trace_root}/bin",
         "trace_library": trace_library,
+        "compilation_log": compilation_log,
     }
 
 
@@ -3359,7 +3655,11 @@ def _install_scenario_markers(
     test_files = [
         str(value)
         for value in raw.get("test_files") or []
-        if str(value)
+        if (
+            str(value)
+            and os.path.splitext(str(value))[1].lower()
+            in INSTRUMENTABLE_SOURCE_SUFFIXES
+        )
     ]
     for configured_path in test_files:
         host_path = os.path.realpath(
@@ -3719,6 +4019,51 @@ def _run_trace_build(
     }
 
 
+def _metadata_uses_address_sanitizer(compile_cmd: str) -> bool:
+    """Return whether the metadata build explicitly enables AddressSanitizer."""
+    for value in re.findall(
+        r"(?<![A-Za-z0-9_])-fsanitize=([A-Za-z0-9_,+-]+)",
+        str(compile_cmd or ""),
+    ):
+        if "address" in {
+            item.strip().lower()
+            for item in value.split(",")
+            if item.strip()
+        }:
+            return True
+    return False
+
+
+def _trace_runtime_preload(
+    *,
+    compile_cmd: str,
+    trace_library: str,
+) -> Dict[str, Any]:
+    """Configure tracing without replacing sanitizers selected by metadata."""
+    trace_library = str(trace_library or "").strip()
+    if not trace_library:
+        return {
+            "available": False,
+            "sanitizer": "none",
+            "sanitizer_runtime": "",
+            "libraries": [],
+            "diagnostics": ["runtime_trace_library_unavailable"],
+        }
+    address_sanitizer = _metadata_uses_address_sanitizer(compile_cmd)
+    return {
+        "available": True,
+        "preload": trace_library,
+        "sanitizer": "address" if address_sanitizer else "none",
+        "sanitizer_runtime": (
+            "linked_by_instrumented_target" if address_sanitizer else ""
+        ),
+        "libraries": [trace_library],
+        "asan_link_order_override": bool(address_sanitizer),
+        "crash_safe_coverage": bool(address_sanitizer),
+        "diagnostics": [],
+    }
+
+
 def _run_traced_test_adaptively(
     *,
     container: str,
@@ -3737,6 +4082,7 @@ def _run_traced_test_adaptively(
     slice_probe_limit: int = 0,
     trace_event_budget: int = 0,
     trace_scope_file: str = "",
+    address_sanitizer: bool = False,
 ) -> Dict[str, Any]:
     """Collect one complete trace, focusing/retrying only after truncation."""
     attempts = []
@@ -3784,6 +4130,7 @@ def _run_traced_test_adaptively(
             probe_only=probe_only,
             slice_probe_limit=slice_probe_limit,
             trace_scope_file=trace_scope_file,
+            address_sanitizer=address_sanitizer,
         )
         attempts.append({
             "attempt": attempt_index + 1,
@@ -3872,6 +4219,7 @@ def _run_one_traced_test(
     coverage_only: bool = False,
     slice_probe_limit: int = 0,
     trace_scope_file: str = "",
+    address_sanitizer: bool = False,
 ) -> Dict[str, Any]:
     slug = _safe_name(test_id)
     namespace = _safe_name(artifact_namespace or "runtime")
@@ -3891,7 +4239,38 @@ def _run_one_traced_test(
             f"{namespace}__{slug}__{mode}_{int(trace_max_events)}"
         )
     container_trace = f"{container_trace_root}/{artifact_slug}.trace"
+    sanitizer_log_prefix = (
+        f"{container_trace_root}/{artifact_slug}.asan"
+    )
     test_cmd = test_template.replace("{test_id}", shlex.quote(test_id))
+    sanitizer_environment = (
+        "export UDBG_TRACE_CRASH_SAFE_COVERAGE=1\n"
+        "export ASAN_OPTIONS=verify_asan_link_order=0:"
+        f"log_path={shlex.quote(sanitizer_log_prefix)}"
+        '${ASAN_OPTIONS:+:$ASAN_OPTIONS}\n'
+        if address_sanitizer
+        else ""
+    )
+    timeout_command = (
+        f"timeout --kill-after=10s {shlex.quote(str(timeout) + 's')} "
+        f"bash -lc {shlex.quote(test_cmd)}"
+    )
+    test_execution = (
+        f"rm -f -- {shlex.quote(sanitizer_log_prefix)} "
+        f"{shlex.quote(sanitizer_log_prefix)}.*\n"
+        f"{timeout_command}\n"
+        "udbg_test_returncode=$?\n"
+        f"for udbg_asan_log in {shlex.quote(sanitizer_log_prefix)} "
+        f"{shlex.quote(sanitizer_log_prefix)}.*; do\n"
+        '  [ -f "$udbg_asan_log" ] || continue\n'
+        '  printf "\\n[UDBG ASAN LOG: %s]\\n" "$udbg_asan_log"\n'
+        '  cat -- "$udbg_asan_log"\n'
+        '  rm -f -- "$udbg_asan_log"\n'
+        "done\n"
+        'exit "$udbg_test_returncode"\n'
+        if address_sanitizer
+        else timeout_command + "\n"
+    )
     script = (
         f"cd {shlex.quote(container_repo)} || exit 2\n"
         f"rm -f -- {shlex.quote(container_trace)}\n"
@@ -3902,10 +4281,10 @@ def _run_one_traced_test(
         f"export UDBG_TRACE_COVERAGE_ONLY={1 if coverage_only else 0}\n"
         f"export UDBG_TRACE_PROBE_LIMIT_PER_ID={max(0, int(slice_probe_limit))}\n"
         f"export UDBG_TRACE_SCOPE_FILE={shlex.quote(trace_scope_file)}\n"
+        f"{sanitizer_environment}"
         f"export LD_PRELOAD={shlex.quote(trace_library)}"
         '${LD_PRELOAD:+:$LD_PRELOAD}\n'
-        f"timeout --kill-after=10s {shlex.quote(str(timeout) + 's')} "
-        f"bash -lc {shlex.quote(test_cmd)}\n"
+        f"{test_execution}"
     )
     try:
         completed = subprocess.run(
@@ -4424,13 +4803,18 @@ def _summarize_events(
                 coverage_counts[key] += int(
                     event.get("coverage_count") or 0
                 )
-                coverage_records.setdefault(key, {
+                coverage_record = coverage_records.setdefault(key, {
                     "function": identity.get("function"),
                     "source_path": identity.get("source_path"),
                     "source_line": int(
                         event.get("source_line") or 0
                     ),
+                    "runtime_modules": [],
                 })
+                _append_identity_sample(
+                    coverage_record["runtime_modules"],
+                    str(event.get("module") or ""),
+                )
             continue
         if event.get("event") == "D":
             callee_identity = _production_identity(
@@ -4595,7 +4979,12 @@ def _summarize_events(
                     "invocation_count": 0,
                     "invocation_ids": [],
                     "callsite_ids": [],
+                    "runtime_modules": [],
                 })
+                _append_identity_sample(
+                    record["runtime_modules"],
+                    str(event.get("module") or ""),
+                )
                 record["enter_count"] += 1
                 record["invocation_count"] += 1
                 record["max_depth"] = max(record["max_depth"], depth)
@@ -4685,7 +5074,13 @@ def _summarize_events(
             "invocation_count": 0,
             "invocation_ids": [],
             "callsite_ids": [],
+            "runtime_modules": [],
         })
+        for runtime_module in coverage.get("runtime_modules") or []:
+            _append_identity_sample(
+                record["runtime_modules"],
+                runtime_module,
+            )
         record["coverage_enter_count"] = int(count)
         record["enter_count"] = max(
             int(record.get("enter_count") or 0),
@@ -4824,11 +5219,16 @@ def compact_runtime_evidence(
 ) -> Dict[str, Any]:
     """Compact full in-memory events only after causal slicing has consumed them."""
     limit = max(1, int(event_limit or PERSISTED_EVENT_LIMIT))
+    observation_fields = {
+        "value_observations",
+        "slice_boundary_observations",
+    }
     compact = {
         key: value
         for key, value in runtime_evidence.items()
-        if key != "tests"
+        if key != "tests" and key not in observation_fields
     }
+    _persist_compact_observations(compact, runtime_evidence)
     compact_tests = []
     for test in runtime_evidence.get("tests") or []:
         if not isinstance(test, dict):
@@ -4837,8 +5237,9 @@ def compact_runtime_evidence(
         item = {
             key: value
             for key, value in test.items()
-            if key != "events"
+            if key != "events" and key not in observation_fields
         }
+        _persist_compact_observations(item, test)
         full_event_count = max(
             len(events),
             int(test.get("trace_event_count") or 0),
@@ -4856,14 +5257,118 @@ def compact_runtime_evidence(
     return compact
 
 
+def _persist_compact_observations(
+    target: Dict[str, Any],
+    source: Dict[str, Any],
+) -> None:
+    for field, count_field, summary_field in (
+        (
+            "value_observations",
+            "value_observation_count",
+            "value_observation_summary",
+        ),
+        (
+            "slice_boundary_observations",
+            "slice_boundary_observation_count",
+            "slice_boundary_observation_summary",
+        ),
+    ):
+        values = [
+            item
+            for item in source.get(field) or []
+            if isinstance(item, dict)
+        ]
+        target[count_field] = len(values)
+        target[field] = _bounded_probe_observations(
+            values,
+            per_id=PERSISTED_PROBE_SAMPLES_PER_ID,
+        )
+        target[summary_field] = _probe_observation_summary(values)
+
+
+def _bounded_probe_observations(
+    values: List[Dict[str, Any]],
+    *,
+    per_id: int,
+) -> List[Dict[str, Any]]:
+    """Retain bounded audit samples without losing distinct scalar outcomes."""
+    limit = max(1, int(per_id))
+    selected = set()
+    selected_per_id = Counter()
+    seen_values: Dict[str, set] = defaultdict(set)
+
+    # Preserve the first occurrence of each distinct scalar value per probe.
+    for index, item in enumerate(values):
+        identity = _probe_observation_identity(item)
+        scalar = item.get("value")
+        if (
+            scalar is None
+            or scalar in seen_values[identity]
+            or selected_per_id[identity] >= limit
+        ):
+            continue
+        seen_values[identity].add(scalar)
+        selected.add(index)
+        selected_per_id[identity] += 1
+
+    # Fill the remaining allowance with chronological examples.
+    for index, item in enumerate(values):
+        if index in selected:
+            continue
+        identity = _probe_observation_identity(item)
+        if selected_per_id[identity] >= limit:
+            continue
+        selected.add(index)
+        selected_per_id[identity] += 1
+    return [values[index] for index in sorted(selected)]
+
+
+def _probe_observation_summary(
+    values: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    counts = Counter()
+    value_counts: Dict[str, Counter] = defaultdict(Counter)
+    for item in values:
+        identity = _probe_observation_identity(item)
+        counts[identity] += 1
+        if item.get("value") is not None:
+            value_counts[identity][str(item.get("value"))] += 1
+    return [
+        {
+            "probe_id": identity,
+            "count": int(counts[identity]),
+            "value_counts": {
+                value: int(count)
+                for value, count in sorted(value_counts[identity].items())
+            },
+        }
+        for identity in sorted(counts)
+    ]
+
+
+def _probe_observation_identity(item: Dict[str, Any]) -> str:
+    return str(
+        item.get("probe_id")
+        or item.get("marker_id")
+        or item.get("marker_kind")
+        or "unknown"
+    )
+
+
 def _copy_compilation_database(
     *,
     container: str,
     container_repo: str,
     host_artifact_dir: str,
     host_source_root: str,
+    captured_commands_path: str = "",
 ) -> str:
-    """Copy and path-rewrite the build's compilation database for host Clang."""
+    """Persist a path-rewritten compilation database for host Clang.
+
+    CMake projects can provide ``compile_commands.json`` directly. Autotools
+    projects such as TCPdump use the trace compiler wrapper's bounded TSV
+    capture as a fallback.
+    """
     found = subprocess.run(
         [
             "docker", "exec", container, "find", container_repo,
@@ -4878,24 +5383,48 @@ def _copy_compilation_database(
         timeout=30,
     )
     container_path = str(found.stdout or "").strip().splitlines()
-    if found.returncode != 0 or not container_path:
-        return ""
     host_path = os.path.join(host_artifact_dir, "compile_commands.json")
-    copied = subprocess.run(
-        ["docker", "cp", f"{container}:{container_path[0]}", host_path],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=30,
-    )
-    if copied.returncode != 0:
-        return ""
     source_root = os.path.realpath(host_source_root) if host_source_root else ""
     try:
-        with open(host_path, "r", encoding="utf-8") as stream:
-            payload = json.load(stream)
+        payload = None
+        if found.returncode == 0 and container_path:
+            copied = subprocess.run(
+                [
+                    "docker",
+                    "cp",
+                    f"{container}:{container_path[0]}",
+                    host_path,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+            )
+            if copied.returncode == 0:
+                try:
+                    with open(host_path, "r", encoding="utf-8") as stream:
+                        payload = json.load(stream)
+                except (
+                    OSError,
+                    TypeError,
+                    UnicodeError,
+                    json.JSONDecodeError,
+                ):
+                    payload = None
+        if not isinstance(payload, list) or not payload:
+            payload = _copy_captured_compilation_commands(
+                container=container,
+                container_path=captured_commands_path,
+                host_artifact_dir=host_artifact_dir,
+            )
+        if not payload:
+            try:
+                os.unlink(host_path)
+            except OSError:
+                pass
+            return ""
         rewritten = payload
         if source_root:
             rewritten = _rewrite_compilation_database_paths(
@@ -4948,6 +5477,88 @@ def _copy_compilation_database(
         except OSError:
             pass
         return ""
+
+
+def _copy_captured_compilation_commands(
+    *,
+    container: str,
+    container_path: str,
+    host_artifact_dir: str,
+) -> List[Dict[str, Any]]:
+    """Convert compiler-wrapper TSV records into compile_commands entries."""
+    if not container_path:
+        return []
+    host_path = os.path.join(
+        host_artifact_dir,
+        "compile_commands.captured.tsv",
+    )
+    copied = subprocess.run(
+        ["docker", "cp", f"{container}:{container_path}", host_path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    if copied.returncode != 0:
+        return []
+    records = []
+    seen = set()
+    try:
+        with open(
+            host_path,
+            "r",
+            encoding="utf-8",
+            errors="replace",
+        ) as stream:
+            for raw_line in stream:
+                fields = raw_line.rstrip("\r\n").split("\t")
+                if len(fields) < 3:
+                    continue
+                directory, compiler, *arguments = fields
+                if not directory or not compiler:
+                    continue
+                sources = [
+                    value
+                    for value in arguments
+                    if (
+                        value
+                        and not value.startswith("-")
+                        and os.path.splitext(value)[1].lower()
+                        in {".c", ".cc", ".cpp", ".cxx"}
+                    )
+                ]
+                for source in sources:
+                    source_path = (
+                        source
+                        if os.path.isabs(source)
+                        else os.path.normpath(
+                            os.path.join(directory, source)
+                        )
+                    )
+                    identity = (
+                        directory,
+                        compiler,
+                        tuple(arguments),
+                        source_path,
+                    )
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    records.append({
+                        "directory": directory,
+                        "arguments": [compiler, *arguments],
+                        "file": source_path,
+                    })
+    except OSError:
+        return []
+    finally:
+        try:
+            os.unlink(host_path)
+        except OSError:
+            pass
+    return records
 
 
 def _rewrite_compilation_database_paths(
@@ -5092,12 +5703,22 @@ def _production_identity(
     function = _canonical_function(str(event.get("function") or ""))
     if not source or not function:
         return {"key": ""}
-    normalized_root = container_repo.rstrip("/").replace("\\", "/")
+    normalized_root = os.path.normpath(
+        container_repo.rstrip("/").replace("\\", "/")
+    )
+    normalized_source = os.path.normpath(source)
     relative = ""
-    if source.startswith(normalized_root + "/"):
-        relative = source[len(normalized_root) + 1:]
-    elif not source.startswith("/") and not source.startswith("../"):
-        relative = source.lstrip("./")
+    if normalized_source.startswith(normalized_root + "/"):
+        relative = os.path.relpath(
+            normalized_source,
+            normalized_root,
+        ).replace("\\", "/")
+    elif (
+        not normalized_source.startswith("/")
+        and normalized_source != ".."
+        and not normalized_source.startswith("../")
+    ):
+        relative = normalized_source.lstrip("./")
     else:
         return {"key": ""}
     lowered = "/" + relative.lower().strip("/") + "/"

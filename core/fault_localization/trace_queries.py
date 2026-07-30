@@ -48,6 +48,16 @@ def build_trace_query_plan(
     )
     scenario_id = str(trace_scope.get("scenario_id") or "")
     context_id = str((fail_context or {}).get("context_id") or "")
+    contract = (fail_context or {}).get("failure_contract") or {}
+    failure_signature_id = str(
+        (fail_context or {}).get("failure_signature_id")
+        or (
+            contract.get("failure_signature_id")
+            if isinstance(contract, dict)
+            else ""
+        )
+        or context_id
+    )
     requests: List[Dict[str, Any]] = []
 
     path_keys = [
@@ -134,6 +144,7 @@ def build_trace_query_plan(
     plan_identity = {
         "test_id": str(test_id or ""),
         "context_id": context_id,
+        "failure_signature_id": failure_signature_id,
         "scenario_id": scenario_id,
         "requests": [
             {
@@ -151,6 +162,7 @@ def build_trace_query_plan(
         "test_id": str(test_id or ""),
         "scenario_id": scenario_id,
         "fail_context_id": context_id,
+        "failure_signature_id": failure_signature_id,
         "failure_observation": (
             failure_test.get("failure_observation") or {}
         ),
@@ -269,6 +281,7 @@ def evaluate_trace_query_plan(
         "plan_id": plan.get("plan_id"),
         "test_id": plan.get("test_id"),
         "fail_context_id": plan.get("fail_context_id"),
+        "failure_signature_id": plan.get("failure_signature_id"),
         "status": "complete" if incomplete == 0 else "partial",
         "status_counts": status_counts,
         "primary_trace_overflow": primary_overflow,

@@ -17,7 +17,7 @@ from .scenario import _is_assertion_name, extract_assertion_scenarios
 
 
 SCENARIO_MARKER_GENERATION = "targeted_test_ranges_same_line_v2"
-SLICE_PROBE_GENERATION = "executed_path_boundaries_v1"
+SLICE_PROBE_GENERATION = "executed_path_boundaries_v2"
 
 
 MARKER_DECLARATION_CPP = r"""
@@ -41,34 +41,24 @@ extern void udbg_trace_marker(const char*, const char*)
 #define UDBG_FL_SCENARIO_MARK(ID) do { } while (0)
 #endif
 """.strip()
-SLICE_DECLARATION_CPP = r"""
+SLICE_DECLARATION_UNIVERSAL = r"""
+#ifndef UDBG_FL_SLICE_DECLARATION_V2
+#define UDBG_FL_SLICE_DECLARATION_V2
 #if defined(__GNUC__) || defined(__clang__)
-extern "C" void udbg_trace_marker(const char*, const char*)
-    __attribute__((weak));
-extern "C" void udbg_trace_scalar(const char*, long long)
-    __attribute__((weak));
-static int udbg_fl_trace_condition(const char*, int)
-    __attribute__((no_instrument_function));
-static int udbg_fl_trace_condition(const char* id, int value) {
-  if (udbg_trace_scalar)
-    udbg_trace_scalar(id, value ? 1LL : 0LL);
-  return value;
-}
-#define UDBG_FL_SLICE_MARK(KIND, ID) \
-  do { if (udbg_trace_marker) udbg_trace_marker(KIND, ID); } while (0)
-#else
-#define UDBG_FL_SLICE_MARK(KIND, ID) do { } while (0)
+#ifdef __cplusplus
+extern "C" {
 #endif
-""".strip()
-SLICE_DECLARATION_C = r"""
-#if defined(__GNUC__) || defined(__clang__)
 extern void udbg_trace_marker(const char*, const char*)
     __attribute__((weak));
 extern void udbg_trace_scalar(const char*, long long)
     __attribute__((weak));
-static int udbg_fl_trace_condition(const char*, int)
+#ifdef __cplusplus
+}
+#endif
+static inline int udbg_fl_trace_condition(const char*, int)
     __attribute__((no_instrument_function));
-static int udbg_fl_trace_condition(const char* id, int value) {
+static inline int udbg_fl_trace_condition(
+    const char* id, int value) {
   if (udbg_trace_scalar)
     udbg_trace_scalar(id, value ? 1LL : 0LL);
   return value;
@@ -78,7 +68,14 @@ static int udbg_fl_trace_condition(const char* id, int value) {
 #else
 #define UDBG_FL_SLICE_MARK(KIND, ID) do { } while (0)
 #endif
+#endif
 """.strip()
+
+# Kept as aliases for callers/tests that import the language-specific names.
+# The guarded declaration is deliberately valid in both C and C++ because a
+# probed header can be included by either language and by another probed file.
+SLICE_DECLARATION_CPP = SLICE_DECLARATION_UNIVERSAL
+SLICE_DECLARATION_C = SLICE_DECLARATION_UNIVERSAL
 
 
 def instrument_assertion_scenarios(
